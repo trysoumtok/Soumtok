@@ -8,11 +8,12 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "vite build",
+    "build:check": "tsc -b",
     "start": "tsx server/index.ts",
     "db:migrate": "tsx server/migrate.ts",
     "lint": "oxlint",
-    "test": "tsx --test shared/chatMedia.test.ts shared/chatMemory.test.ts shared/agentAsk.test.ts shared/capabilities.test.ts shared/secretsGuard.test.ts shared/tools.test.ts shared/connectLinks.test.ts",
+    "test": "tsx --test shared/chatMedia.test.ts shared/chatMemory.test.ts shared/agentAsk.test.ts shared/capabilities.test.ts shared/secretsGuard.test.ts shared/tools.test.ts shared/connectLinks.test.ts shared/chatFiles.test.ts shared/replyFormat.test.ts",
     "preview": "vite preview"
   },
   "dependencies": {

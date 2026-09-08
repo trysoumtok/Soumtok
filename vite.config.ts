@@ -1,13 +1,19 @@
 import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
 import { defineConfig } from 'vite'
-import { soumtokApi } from './server/vite-plugin.ts'
 
-export default defineConfig({
-  plugins: [react(), tailwindcss(), soumtokApi()],
-  server: {
-    watch: {
-      ignored: ['**/public/logos/**'],
+export default defineConfig(async ({ command }) => {
+  const plugins = [react(), tailwindcss()]
+  if (command === 'serve') {
+    const { soumtokApi } = await import('./server/vite-plugin.ts')
+    plugins.push(soumtokApi())
+  }
+  return {
+    plugins,
+    server: {
+      watch: {
+        ignored: ['**/public/logos/**'],
+      },
     },
-  },
+  }
 })
