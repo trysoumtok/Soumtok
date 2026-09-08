@@ -1,0 +1,581 @@
+export type PluginKind = 'mcp' | 'skills' | 'both'
+export type PluginCost = 'free' | 'freemium' | 'paid'
+export type PluginCategory = 'Productivity' | 'Data & Analytics' | 'Dev' | 'Payments'
+
+export type PluginSkill = {
+  id: string
+  label: string
+  description: string
+  insert: string
+  sourceUrl: string
+}
+
+export type PluginMcp = {
+  id: string
+  label: string
+  url: string
+  sourceUrl: string
+}
+
+export type CatalogPlugin = {
+  id: string
+  name: string
+  publisher: string
+  description: string
+  kind: PluginKind
+  category: PluginCategory
+  featured?: boolean
+  suggested?: boolean
+  repoUrl?: string
+  logo: string
+  skills: PluginSkill[]
+  mcps: PluginMcp[]
+  mcpHint?: string
+  docsUrl: string
+  signupUrl: string
+  cost: PluginCost
+  costNote: string
+  connect: string[]
+}
+
+export const FEATURED_PLUGIN_IDS = ['notion', 'figma', 'datadog'] as const
+export const PLUGIN_CATEGORIES: PluginCategory[] = ['Productivity', 'Data & Analytics', 'Dev', 'Payments']
+
+export function skillTitle(id: string, label?: string) {
+  if (label && label !== id && !/[-_]/.test(label)) return label
+  return id
+    .split(/[-_]/g)
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ')
+}
+
+function skill(repo: string, id: string, description: string, path = `skills/${id}/SKILL.md`): PluginSkill {
+  return {
+    id,
+    label: skillTitle(id),
+    description,
+    insert: `Use the ${id} skill from the installed plugin.\n\n`,
+    sourceUrl: `https://github.com/${repo}/blob/main/${path}`,
+  }
+}
+
+function mcp(id: string, url: string, sourceUrl: string): PluginMcp {
+  return { id, label: id, url, sourceUrl }
+}
+
+const NOTION = 'makenotion/cursor-notion-plugin'
+const FIGMA = 'figma/mcp-server-guide'
+const DATADOG = 'datadog-labs/cursor-plugin'
+const SLACK = 'slackapi/slack-skills-plugin'
+const GRANOLA = 'granola-inc/granola-cursor-plugin'
+const SENTRY = 'getsentry/plugin-cursor'
+const STRIPE = 'stripe/ai'
+const POSTMAN = 'Postman-Devrel/cursor-postman-plugin'
+const LINEAR = 'linear/cursor-plugin'
+const CURSOR = 'cursor/plugins'
+
+export const PLUGIN_CATALOG: CatalogPlugin[] = [
+  {
+    id: 'notion',
+    name: 'Notion',
+    publisher: 'Notion',
+    description: 'Notion Skills + Notion MCP server packaged as a Soumtok plugin.',
+    kind: 'both',
+    category: 'Productivity',
+    featured: true,
+    repoUrl: `https://github.com/${NOTION}`,
+    logo: '/logos/plugins/notion.svg',
+    skills: [
+      skill(NOTION, 'create-database-row', 'Insert a new row into a specified Notion database using natural-language property values. Handles property name matching and validation.'),
+      skill(NOTION, 'create-page', 'Create a new Notion page, optionally under a specific parent. Automatically structures content based on page type (meeting notes, project pages, etc.).'),
+      skill(NOTION, 'create-task', 'Create a new task in the user\'s Notion tasks database with sensible defaults for due date, status, owner, and project.'),
+      skill(NOTION, 'database-query', 'Query a Notion database by name or ID and return structured, readable results with optional filters and sorting.'),
+      skill(NOTION, 'find', 'Quickly find pages or databases in Notion by title keywords. Returns precise matches rather than comprehensive results.'),
+      skill(NOTION, 'knowledge-capture', 'Transform conversations and discussions into structured documentation pages in Notion. Captures insights, decisions, and knowledge from chat context with proper organization and linking.'),
+      skill(NOTION, 'meeting-intelligence', 'Prepare meeting materials by gathering context from Notion, enriching with research, and creating both an internal pre-read and external agenda saved to Notion.'),
+      skill(NOTION, 'research-documentation', 'Search across your Notion workspace, synthesize findings from multiple pages, and create comprehensive research documentation with proper citations and actionable insights.'),
+      skill(NOTION, 'search', 'Search the user\'s Notion workspace using the Notion MCP server. Use for finding pages, databases, and content by keywords or natural-language queries.'),
+      skill(NOTION, 'spec-to-implementation', 'Turn product or tech specs into concrete Notion tasks. Breaks down spec pages into detailed implementation plans with clear tasks, acceptance criteria, and progress tracking.'),
+      skill(NOTION, 'tasks-build', 'Build a task from a Notion page URL. Fetches task details, marks it in progress, implements the work, and updates status in Notion.'),
+      skill(NOTION, 'tasks-explain-diff', 'Generate a rich Notion document explaining code changes. Creates comprehensive documentation with background, intuition, code walkthrough, and verification steps.'),
+      skill(NOTION, 'tasks-plan', 'Create an implementation plan from a Notion task or specification. Breaks down requirements into actionable steps with estimates and dependencies.'),
+      skill(NOTION, 'tasks-setup', 'Set up a Notion task board for tracking tasks. Guides users through using a template or connecting an existing board.'),
+    ],
+    mcps: [mcp('notion', 'https://mcp.notion.com/mcp', `https://github.com/${NOTION}/blob/main/mcp.json`)],
+    mcpHint: 'https://mcp.notion.com/mcp',
+    docsUrl: 'https://developers.notion.com/docs/mcp',
+    signupUrl: 'https://www.notion.so/signup',
+    cost: 'freemium',
+    costNote: 'Notion Free is enough for MCP. Notion AI extras are paid. Soumtok does not charge to add this plugin.',
+    connect: [
+      'Create a free Notion account, or sign in.',
+      'Click Add. All 14 skills and the official Notion MCP address install with the plugin — do not look up MCP.',
+      'Sign in at Notion when Soumtok opens that window. Until the window exists, the plugin and skills are saved for Studio.',
+    ],
+  },
+  {
+    id: 'figma',
+    name: 'Figma',
+    publisher: 'Figma',
+    description: 'Plugin that includes the Figma MCP server and Skills for common workflows.',
+    kind: 'both',
+    category: 'Productivity',
+    featured: true,
+    repoUrl: `https://github.com/${FIGMA}`,
+    logo: '/logos/plugins/figma.svg',
+    skills: [
+      skill(FIGMA, 'figma-code-connect', 'Creates and maintains Figma Code Connect template files that map Figma components to code snippets.'),
+      skill(FIGMA, 'figma-create-new-file', 'Mandatory before create_new_file. Use when the user wants a new blank Figma, FigJam, or Slides file.'),
+      skill(FIGMA, 'figma-design-to-code', 'Mandatory before get_design_context. Use when the user wants to implement a Figma design as code.'),
+      skill(FIGMA, 'figma-generate-design', 'Translate an application page or multi-section layout into Figma.'),
+      skill(FIGMA, 'figma-generate-diagram', 'Mandatory before generate_diagram. Flowcharts, architecture diagrams, and sketches in Figma.'),
+      skill(FIGMA, 'figma-generate-library', 'Build or update a Figma component library and Code Connect mappings.'),
+      skill(FIGMA, 'figma-generative-plugins', 'Author generative Figma plugins from a prompt.'),
+      skill(FIGMA, 'figma-implement-motion', 'Implement motion and interaction from Figma into code.'),
+      skill(FIGMA, 'figma-shaders', 'Work with Figma shaders and visual effects.'),
+      skill(FIGMA, 'figma-swiftui', 'Implement Figma designs as SwiftUI.'),
+      skill(FIGMA, 'figma-use-figjam', 'Read and write FigJam boards through the Figma MCP server.'),
+      skill(FIGMA, 'figma-use-motion', 'Read motion specs from Figma before implementing animation.'),
+      skill(FIGMA, 'figma-use-slides', 'Work with Figma Slides through the MCP server.'),
+      skill(FIGMA, 'figma-use', 'Write to the Figma canvas with Plugin API scripts.'),
+    ],
+    mcps: [mcp('figma', 'https://mcp.figma.com/mcp', `https://github.com/${FIGMA}/blob/main/.mcp.json`)],
+    mcpHint: 'https://mcp.figma.com/mcp',
+    docsUrl: 'https://developers.figma.com/docs/figma-mcp-server/',
+    signupUrl: 'https://www.figma.com/signup',
+    cost: 'freemium',
+    costNote: 'Figma Starter is free. Remote MCP needs a Figma account. Desktop Dev Mode MCP is on a paid Dev or Full seat.',
+    connect: [
+      'Sign up at Figma (Starter is free).',
+      'Click Add. The 14 Figma skills and remote MCP are already in the bundle.',
+      'Approve Figma in the browser when asked.',
+    ],
+  },
+  {
+    id: 'datadog',
+    name: 'Datadog',
+    publisher: 'Datadog',
+    description: 'Use Datadog through a preconfigured MCP server. Query logs, metrics, traces, and dashboards. This plugin is in preview.',
+    kind: 'both',
+    category: 'Data & Analytics',
+    featured: true,
+    repoUrl: `https://github.com/${DATADOG}`,
+    logo: '/logos/plugins/datadog.svg',
+    skills: [
+      skill(DATADOG, 'ddsetup', 'First-time initialization of the Datadog MCP server. Run this if Datadog tools are not in the tool list.'),
+      skill(DATADOG, 'ddconfig', 'Configure or troubleshoot the Datadog MCP server. Change domain, switch organizations, or fix a silent server.'),
+      skill(DATADOG, 'ddtoolsets', 'View, enable, or disable Datadog MCP toolsets that control which tools are available.'),
+    ],
+    mcps: [mcp('datadog', 'https://mcp.datadoghq.com/mcp', `https://github.com/${DATADOG}/blob/main/.dd_cursor_mcp.json`)],
+    mcpHint: 'https://mcp.datadoghq.com/mcp',
+    docsUrl: 'https://docs.datadoghq.com/mcp_server/',
+    signupUrl: 'https://www.datadoghq.com/free-datadog-trial/',
+    cost: 'paid',
+    costNote: 'Needs a Datadog account. MCP itself has no extra SKU, but Datadog is a paid product (free trial).',
+    connect: [
+      'Start a Datadog trial or use an existing org.',
+      'Click Add. ddsetup, ddconfig, and ddtoolsets install with the plugin. The MCP address is included.',
+      'Datadog still asks you to pick a site and authenticate. Those keys are Datadog’s step, not an MCP hunt.',
+    ],
+  },
+  {
+    id: 'google-drive',
+    name: 'Google Drive',
+    publisher: 'Google',
+    description: 'Search, read, create, and share files.',
+    kind: 'mcp',
+    category: 'Productivity',
+    suggested: true,
+    repoUrl: `https://github.com/${CURSOR}`,
+    logo: '/logos/plugins/google-drive.svg',
+    skills: [],
+    mcps: [mcp('google-drive', 'https://drivemcp.googleapis.com/mcp/v1', `https://github.com/${CURSOR}/blob/main/third_party/google-drive/mcp.json`)],
+    mcpHint: 'https://drivemcp.googleapis.com/mcp/v1',
+    docsUrl: 'https://developers.google.com/workspace/drive/api/guides/about-sdk',
+    signupUrl: 'https://drive.google.com',
+    cost: 'free',
+    costNote: 'Personal Google Drive is free (storage limits apply). Google Workspace is paid if you use a work domain.',
+    connect: [
+      'Use a free Google account at drive.google.com.',
+      'Click Add. This catalog plugin is MCP-only — no separate skills repo. You do not paste an MCP URL.',
+      'Sign in with Google and allow Drive when that window exists.',
+    ],
+  },
+  {
+    id: 'google-calendar',
+    name: 'Google Calendar',
+    publisher: 'Google',
+    description: 'Search events and schedule meetings.',
+    kind: 'mcp',
+    category: 'Productivity',
+    suggested: true,
+    repoUrl: `https://github.com/${CURSOR}`,
+    logo: '/logos/plugins/google-calendar.svg',
+    skills: [],
+    mcps: [mcp('google-calendar', 'https://calendarmcp.googleapis.com/mcp/v1', `https://github.com/${CURSOR}/blob/main/third_party/google-calendar/mcp.json`)],
+    mcpHint: 'https://calendarmcp.googleapis.com/mcp/v1',
+    docsUrl: 'https://developers.google.com/workspace/calendar/api/guides/overview',
+    signupUrl: 'https://calendar.google.com',
+    cost: 'free',
+    costNote: 'Personal Google Calendar is free. Workspace calendars follow your Google Workspace plan.',
+    connect: [
+      'Open calendar.google.com with a free Google account.',
+      'Click Add. MCP-only — no skill files to collect.',
+      'Allow Calendar on the Google sign-in screen when Soumtok shows it.',
+    ],
+  },
+  {
+    id: 'gmail',
+    name: 'Gmail',
+    publisher: 'Google',
+    description: 'Search, read, draft, and manage email.',
+    kind: 'mcp',
+    category: 'Productivity',
+    suggested: true,
+    repoUrl: `https://github.com/${CURSOR}`,
+    logo: '/logos/plugins/gmail.svg',
+    skills: [],
+    mcps: [mcp('gmail', 'https://gmailmcp.googleapis.com/mcp/v1', `https://github.com/${CURSOR}/blob/main/third_party/gmail/mcp.json`)],
+    mcpHint: 'https://gmailmcp.googleapis.com/mcp/v1',
+    docsUrl: 'https://developers.google.com/workspace/gmail/api/guides/overview',
+    signupUrl: 'https://gmail.com',
+    cost: 'free',
+    costNote: 'Gmail is free. Google Workspace mail is paid. Soumtok does not charge to add the plugin.',
+    connect: [
+      'Use gmail.com or your work Google account.',
+      'Click Add. MCP-only — the bundle already knows how to reach Gmail.',
+      'Allow Gmail when the Google window appears.',
+    ],
+  },
+  {
+    id: 'granola',
+    name: 'Granola',
+    publisher: 'Granola',
+    description: 'Your meetings in your workflow. Granola gives Soumtok access to what your team discussed, decided, and committed to.',
+    kind: 'both',
+    category: 'Productivity',
+    suggested: true,
+    repoUrl: `https://github.com/${GRANOLA}`,
+    logo: '/logos/plugins/granola.svg',
+    skills: [
+      skill(GRANOLA, 'granola-engineer', 'A decisions-aware assistant that anchors work to meeting context.', 'agents/granola-engineer.md'),
+      skill(GRANOLA, 'granola-context', 'Look up what was discussed or decided in meetings.'),
+      skill(GRANOLA, 'granola-prep', 'Prepare for an upcoming meeting by pulling context from previous ones.'),
+      skill(GRANOLA, 'granola-review', 'Check current work against meeting decisions before submitting.'),
+      skill(GRANOLA, 'check-meeting-context', 'Check Granola for relevant meeting context when working on features or making decisions.', 'rules/check-meeting-context.mdc'),
+      skill(GRANOLA, 'granola-brief', 'Synthesize everything discussed about a topic across meetings into a briefing document.', 'commands/granola-brief.md'),
+      skill(GRANOLA, 'granola-bug-report', 'Turn a bug walkthrough call into a structured bug report.', 'commands/granola-bug-report.md'),
+      skill(GRANOLA, 'granola-gaps', 'Find what was discussed in meetings but has not shown up in code yet.', 'commands/granola-gaps.md'),
+      skill(GRANOLA, 'granola-plan', 'Generate a prioritized build plan from recent meeting decisions and action items.', 'commands/granola-plan.md'),
+      skill(GRANOLA, 'granola-pr', 'Write a PR description grounded in meeting decisions and discussions.', 'commands/granola-pr.md'),
+      skill(GRANOLA, 'granola-spec', 'Turn meeting decisions into a written spec.', 'commands/granola-spec.md'),
+    ],
+    mcps: [mcp('granola', 'https://mcp.granola.ai/mcp', `https://github.com/${GRANOLA}/blob/main/.mcp.json`)],
+    mcpHint: 'https://mcp.granola.ai/mcp',
+    docsUrl: 'https://docs.granola.ai/help-center/sharing/integrations/mcp',
+    signupUrl: 'https://www.granola.ai',
+    cost: 'freemium',
+    costNote: 'Needs a Granola account. Free Granola keeps limited history. Full history is on a paid Granola plan.',
+    connect: [
+      'Create an account at granola.ai and capture a meeting.',
+      'Click Add. Skills, commands, and the Granola MCP address install together.',
+      'Sign in with Granola in the browser when asked.',
+    ],
+  },
+  {
+    id: 'github',
+    name: 'GitHub',
+    publisher: 'GitHub',
+    description: 'Manage repos, issues, pull requests, and Actions.',
+    kind: 'mcp',
+    category: 'Dev',
+    repoUrl: `https://github.com/${CURSOR}`,
+    logo: '/logos/plugins/github.svg',
+    skills: [],
+    mcps: [mcp('github', 'https://api.githubcopilot.com/mcp/', `https://github.com/${CURSOR}/blob/main/third_party/github/mcp.json`)],
+    mcpHint: 'https://api.githubcopilot.com/mcp/',
+    docsUrl: 'https://docs.github.com/en/apps/using-github-apps',
+    signupUrl: 'https://github.com/signup',
+    cost: 'free',
+    costNote: 'GitHub Free covers public repos and limited private repos. Connecting on Soumtok is free.',
+    connect: [
+      'Create a free GitHub account if you do not have one.',
+      'Click Add. The official GitHub MCP ships with the plugin. On Soumtok, also connect GitHub under Dashboard → Integrations.',
+      'Sign in at GitHub when that window exists.',
+    ],
+  },
+  {
+    id: 'slack',
+    name: 'Slack',
+    publisher: 'Slack',
+    description: 'Slack MCP server. Search channels, send messages, and perform other Slack actions.',
+    kind: 'both',
+    category: 'Productivity',
+    suggested: true,
+    repoUrl: `https://github.com/${SLACK}`,
+    logo: '/logos/plugins/slack.svg',
+    skills: [
+      skill(SLACK, 'block-kit', 'Build and validate Block Kit layouts for Slack messages, modals, and Home tabs.'),
+      skill(SLACK, 'create-slack-app', 'Create a Slack app or agent using the Slack CLI and Bolt.'),
+      skill(SLACK, 'slack-api', 'Discover and call Slack Web API methods such as chat.postMessage and conversations.history.'),
+      skill(SLACK, 'slack-cli', 'Use the Slack CLI to create, run, and manage Slack apps from the terminal.'),
+      skill(SLACK, 'slack-docs', 'Look up Slack platform documentation while building apps or using the API.'),
+      skill(SLACK, 'slack-messaging', 'Guidance for composing well-formatted, effective Slack messages.'),
+      skill(SLACK, 'slack-search', 'Find messages, files, channels, and people in Slack.'),
+    ],
+    mcps: [mcp('slack', 'https://mcp.slack.com/mcp', `https://github.com/${SLACK}/blob/main/.cursor-mcp.json`)],
+    mcpHint: 'https://mcp.slack.com/mcp',
+    docsUrl: 'https://docs.slack.dev/ai/mcp-server',
+    signupUrl: 'https://slack.com/get-started',
+    cost: 'freemium',
+    costNote: 'Slack Free exists with limits. Pro/Business are paid. Soumtok does not bill Slack.',
+    connect: [
+      'Create or join a Slack workspace (Free works to start).',
+      'Click Add. The Slack skills and MCP address install together.',
+      'Approve Slack in the browser when Soumtok asks.',
+    ],
+  },
+  {
+    id: 'linear',
+    name: 'Linear',
+    publisher: 'Linear',
+    description: 'Manage issues, projects, and documents across your Linear workspace through Linear MCP.',
+    kind: 'mcp',
+    category: 'Dev',
+    suggested: true,
+    repoUrl: `https://github.com/${LINEAR}`,
+    logo: '/logos/plugins/linear.svg',
+    skills: [],
+    mcps: [mcp('linear', 'https://mcp.linear.app/mcp', `https://github.com/${LINEAR}/blob/main/mcp.json`)],
+    mcpHint: 'https://mcp.linear.app/mcp',
+    docsUrl: 'https://linear.app/docs/mcp',
+    signupUrl: 'https://linear.app/signup',
+    cost: 'freemium',
+    costNote: 'Linear Free is enough for small teams. Plus/Enterprise are paid. MCP is included.',
+    connect: [
+      'Sign up at linear.app (Free plan is fine).',
+      'Click Add. Linear’s official plugin is MCP-first — no public skills list. You do not paste an MCP URL.',
+      'Approve Linear OAuth in the browser when that window exists.',
+    ],
+  },
+  {
+    id: 'sentry',
+    name: 'Sentry',
+    publisher: 'Sentry',
+    description: 'Sentry plugin for debugging, including MCP and skill capabilities.',
+    kind: 'both',
+    category: 'Data & Analytics',
+    suggested: true,
+    repoUrl: `https://github.com/${SENTRY}`,
+    logo: '/logos/plugins/sentry.svg',
+    skills: [
+      skill(SENTRY, 'sentry-get-started', 'Guided Sentry setup: provision a project, install the SDK, and confirm telemetry.'),
+      skill(SENTRY, 'sentry-instrument', 'Instrument an app with Sentry — errors, tracing, logs, replay, and more.'),
+      skill(SENTRY, 'sentry-debug-issue', 'Find a Sentry issue, pull stack traces and breadcrumbs, and apply a fix.'),
+      skill(SENTRY, 'sentry-create-alert', 'Create Sentry alerts and notification workflows (email, Slack, PagerDuty).'),
+      skill(SENTRY, 'sentry-fix-stack-traces', 'Fix unsymbolicated or noisy Sentry stack traces.'),
+      skill(SENTRY, 'sentry-otel-exporter-setup', 'Set up OpenTelemetry export into Sentry.'),
+      skill(SENTRY, 'sentry-setup-releases', 'Configure Sentry releases and source maps.'),
+      skill(SENTRY, 'sentry-snapshots-cocoa', 'Sentry Snapshots setup for Apple platforms.'),
+    ],
+    mcps: [mcp('sentry', 'https://mcp.sentry.dev/mcp?utm_source=plugin', `https://github.com/${SENTRY}/blob/main/mcp.json`)],
+    mcpHint: 'https://mcp.sentry.dev/mcp',
+    docsUrl: 'https://docs.sentry.io/product/sentry-mcp/',
+    signupUrl: 'https://sentry.io/signup',
+    cost: 'freemium',
+    costNote: 'Sentry Developer is free with limits. Team/Business are paid. Soumtok does not bill Sentry.',
+    connect: [
+      'Create a Sentry account (Developer plan is enough to start).',
+      'Click Add. All eight skills and the Sentry MCP address install with the plugin.',
+      'Sign in at Sentry when Soumtok opens that window.',
+    ],
+  },
+  {
+    id: 'stripe',
+    name: 'Stripe',
+    publisher: 'Stripe',
+    description: 'Stripe integrations, best practices, API/SDK guidance, and the Stripe MCP server.',
+    kind: 'both',
+    category: 'Payments',
+    suggested: true,
+    repoUrl: `https://github.com/${STRIPE}`,
+    logo: '/logos/plugins/stripe.svg',
+    skills: [
+      skill(STRIPE, 'stripe-best-practices', 'Guides Checkout vs PaymentIntents, Connect, billing, tax, and key security.', 'providers/cursor/plugin/skills/stripe-best-practices/SKILL.md'),
+      skill(STRIPE, 'stripe-docs', 'Read and search Stripe documentation and API reference.', 'providers/cursor/plugin/skills/stripe-docs/SKILL.md'),
+      skill(STRIPE, 'stripe-apps', 'Build or review a Stripe App that extends the Stripe Dashboard.', 'providers/cursor/plugin/skills/stripe-apps/SKILL.md'),
+      skill(STRIPE, 'stripe-directory', 'Find Stripe Directory partners and services for a workflow.', 'providers/cursor/plugin/skills/stripe-directory/SKILL.md'),
+      skill(STRIPE, 'stripe-projects', 'Scaffold or review a Stripe project integration.', 'providers/cursor/plugin/skills/stripe-projects/SKILL.md'),
+      skill(STRIPE, 'connect-recommend', 'Recommend Stripe Connect charge patterns for marketplaces and platforms.', 'providers/cursor/plugin/skills/connect-recommend/SKILL.md'),
+      skill(STRIPE, 'connect-required-verification-information', 'Required verification fields for Stripe Connect accounts.', 'providers/cursor/plugin/skills/connect-required-verification-information/SKILL.md'),
+      skill(STRIPE, 'upgrade-stripe', 'Upgrade Stripe API versions and SDKs safely.', 'providers/cursor/plugin/skills/upgrade-stripe/SKILL.md'),
+    ],
+    mcps: [mcp('stripe', 'https://mcp.stripe.com', `https://github.com/${STRIPE}/blob/main/providers/cursor/plugin/mcp.json`)],
+    mcpHint: 'https://mcp.stripe.com',
+    docsUrl: 'https://docs.stripe.com/mcp',
+    signupUrl: 'https://dashboard.stripe.com/register',
+    cost: 'freemium',
+    costNote: 'Stripe has no monthly plugin fee. Stripe charges for payments. Test mode is free.',
+    connect: [
+      'Create a Stripe account. Test mode is enough to start.',
+      'Click Add. The eight Stripe skills and MCP address install together.',
+      'Sign in at Stripe when that window exists.',
+    ],
+  },
+  {
+    id: 'postman',
+    name: 'Postman',
+    publisher: 'Postman',
+    description: 'Full API lifecycle in Studio: collections, tests, mocks, docs, and the Postman MCP server.',
+    kind: 'both',
+    category: 'Dev',
+    suggested: true,
+    repoUrl: `https://github.com/${POSTMAN}`,
+    logo: '/logos/plugins/postman.svg',
+    skills: [
+      skill(POSTMAN, 'postman-routing', 'Routes API work to the right Postman command or MCP tool.'),
+      skill(POSTMAN, 'postman-knowledge', 'Postman concepts and how to use the Postman MCP server.'),
+      skill(POSTMAN, 'agent-ready-apis', 'Audit an API for agent readiness across design, docs, and security.'),
+    ],
+    mcps: [mcp('postman', 'https://mcp.postman.com/mcp', `https://github.com/${POSTMAN}/blob/main/.mcp.json`)],
+    mcpHint: 'https://mcp.postman.com/mcp',
+    docsUrl: 'https://learning.postman.com/docs/developer/postman-mcp/',
+    signupUrl: 'https://identity.getpostman.com/signup',
+    cost: 'freemium',
+    costNote: 'Postman Free covers basic collections. Team/Enterprise are paid. MCP uses your Postman plan.',
+    connect: [
+      'Create a free Postman account.',
+      'Click Add. The three skills and Postman MCP address install with the plugin.',
+      'Sign in at Postman when Soumtok asks.',
+    ],
+  },
+  {
+    id: 'firebase',
+    name: 'Firebase',
+    publisher: 'Google',
+    description: 'Connect a Firebase project. Studio walks you through a sign-in link and a code. Hosted MCP is not public yet — paste your own MCP URL if you run the Firebase CLI server.',
+    kind: 'mcp',
+    category: 'Dev',
+    suggested: true,
+    logo: '/logos/plugins/firebase.svg',
+    skills: [],
+    mcps: [],
+    mcpHint: 'Firebase MCP currently runs in the Firebase CLI (stdio or a URL you host). There is no public Google-hosted MCP endpoint.',
+    docsUrl: 'https://firebase.google.com/docs/ai-assistance/mcp-server',
+    signupUrl: 'https://console.firebase.google.com',
+    cost: 'freemium',
+    costNote: 'Firebase has a free Spark plan. Blaze is usage-based. Soumtok does not bill Firebase.',
+    connect: [
+      'Open the connect card in chat, click the link, and enter the code.',
+      'Sign in with the Google account that owns the Firebase project.',
+      'If you host Firebase MCP yourself, add that HTTPS URL under Connectors.',
+    ],
+  },
+  {
+    id: 'neon',
+    name: 'Neon',
+    publisher: 'Neon',
+    description: 'Query and manage Lakebase Postgres through the official Neon MCP server.',
+    kind: 'mcp',
+    category: 'Data & Analytics',
+    suggested: true,
+    logo: '/logos/plugins/neon.svg',
+    skills: [],
+    mcps: [mcp('neon', 'https://mcp.neon.tech/mcp', 'https://neon.com/docs/ai/neon-mcp-server')],
+    mcpHint: 'https://mcp.neon.tech/mcp',
+    docsUrl: 'https://neon.com/docs/ai/neon-mcp-server',
+    signupUrl: 'https://console.neon.tech/signup',
+    cost: 'freemium',
+    costNote: 'Neon Free is enough to start. Launch/Scale are paid. Soumtok does not bill Neon.',
+    connect: [
+      'Create a Neon account, or sign in.',
+      'Click Add. The official Neon MCP address is already in the plugin.',
+      'Approve Neon in the browser when Soumtok opens that window, or enter the code from chat.',
+    ],
+  },
+  {
+    id: 'supabase',
+    name: 'Supabase',
+    publisher: 'Supabase',
+    description: 'Tables, auth, and project tools through the official Supabase MCP server.',
+    kind: 'mcp',
+    category: 'Dev',
+    suggested: true,
+    logo: '/logos/plugins/supabase.svg',
+    skills: [],
+    mcps: [mcp('supabase', 'https://mcp.supabase.com/mcp', 'https://supabase.com/docs/guides/getting-started/mcp')],
+    mcpHint: 'https://mcp.supabase.com/mcp',
+    docsUrl: 'https://supabase.com/docs/guides/getting-started/mcp',
+    signupUrl: 'https://supabase.com/dashboard/sign-up',
+    cost: 'freemium',
+    costNote: 'Supabase Free is enough to start. Pro is paid. Soumtok does not bill Supabase.',
+    connect: [
+      'Create a Supabase account, or sign in.',
+      'Click Add. The official MCP address installs with the plugin.',
+      'Approve Supabase when the sign-in window appears, or enter the chat code.',
+    ],
+  },
+  {
+    id: 'cloudflare',
+    name: 'Cloudflare',
+    publisher: 'Cloudflare',
+    description: 'Workers, DNS, and account APIs through Cloudflare’s remote MCP server.',
+    kind: 'mcp',
+    category: 'Dev',
+    suggested: true,
+    logo: '/logos/plugins/cloudflare.svg',
+    skills: [],
+    mcps: [mcp('cloudflare', 'https://mcp.cloudflare.com/mcp', 'https://developers.cloudflare.com/agents/model-context-protocol/mcp-servers-for-cloudflare/')],
+    mcpHint: 'https://mcp.cloudflare.com/mcp',
+    docsUrl: 'https://developers.cloudflare.com/agents/model-context-protocol/mcp-servers-for-cloudflare/',
+    signupUrl: 'https://dash.cloudflare.com/sign-up',
+    cost: 'freemium',
+    costNote: 'Cloudflare has a free plan. Paid products are optional. Soumtok does not bill Cloudflare.',
+    connect: [
+      'Create a Cloudflare account, or sign in.',
+      'Click Add. The official MCP address is included.',
+      'Authorize Cloudflare in the browser, or enter the code from chat.',
+    ],
+  },
+  {
+    id: 'vercel',
+    name: 'Vercel',
+    publisher: 'Vercel',
+    description: 'Projects, deployments, and logs through Vercel’s remote MCP server.',
+    kind: 'mcp',
+    category: 'Dev',
+    suggested: true,
+    logo: '/logos/plugins/vercel.svg',
+    skills: [],
+    mcps: [mcp('vercel', 'https://mcp.vercel.com', 'https://vercel.com/docs/mcp/vercel-mcp')],
+    mcpHint: 'https://mcp.vercel.com',
+    docsUrl: 'https://vercel.com/docs/mcp/vercel-mcp',
+    signupUrl: 'https://vercel.com/signup',
+    cost: 'freemium',
+    costNote: 'Vercel Hobby is free. Pro is paid. Soumtok does not bill Vercel.',
+    connect: [
+      'Create a Vercel account, or sign in.',
+      'Click Add. The official MCP address is included.',
+      'Approve Vercel in the browser, or enter the code from chat.',
+    ],
+  },
+]
+
+export function catalogPlugin(id: string) {
+  return PLUGIN_CATALOG.find((item) => item.id === id) || null
+}
+
+export function costLabel(cost: PluginCost) {
+  if (cost === 'free') return 'Free'
+  if (cost === 'paid') return 'Paid'
+  return 'Free plan, extras paid'
+}
+
+export function isFeaturedPlugin(id: string) {
+  return (FEATURED_PLUGIN_IDS as readonly string[]).includes(id)
+}
+
+export function pluginPath(id?: string) {
+  return id ? `/dashboard/plugins/${id}` : '/dashboard/plugins'
+}
