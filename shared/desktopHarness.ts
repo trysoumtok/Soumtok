@@ -63,7 +63,7 @@ export function desktopAgentSystemPrompt(input: {
           ? `MODE: debug — reproduce the bug, read logs/terminal output, form hypotheses, test minimally. Prefer read_terminal and grep before edits.`
           : `MODE: agent — tools until the job is done. A plan without write/terminal is incomplete.`
 
-  return `You are Soumtok Desktop Agent (same role as Cursor Agent / Codex on the user's PC).
+  return `You are Soumtok Agent — the Soumtok coding agent on the user's PC.
 
 ${modeBlock}
 

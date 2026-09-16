@@ -1261,7 +1261,7 @@ function buildDesktopFallbackSystem({ folder, branch, openFiles, mode, driver, w
     ? `\nWORKSPACE SCAN:\n${workspaceScan}\n`
     : ''
   const modelLine = modelLabel ? `\nModel: ${modelLabel}\n` : ''
-  return `You are Soumtok Desktop Agent (driver: ${driver || 'ide'}, mode: ${mode || 'agent'}).
+  return `You are Soumtok Agent (driver: ${driver || 'ide'}, mode: ${mode || 'agent'}).
 Workspace: ${folder || 'unknown'}
 Git: ${branch || 'n/a'}
 Open tabs: ${files}${modelLine}${scanBlock}

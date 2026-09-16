@@ -1,17 +1,30 @@
-                                 Apache License
-                           Version 2.0, January 2004
-                        http://www.apache.org/licenses/
+Soumtok Software License Agreement
+Copyright (c) 2026 Soumtok · Joseph Nyarandi. All rights reserved.
 
-   Copyright 2026 Soumtok · Joseph Nyarandi
+IMPORTANT — READ CAREFULLY
 
-   Licensed under the Apache License, Version 2.0 (the "License");
-   you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
+This repository and all associated materials (source code, documentation, assets,
+binaries, and the "Soumtok Agent" harness) are proprietary to Soumtok.
 
-       http://www.apache.org/licenses/LICENSE-2.0
+PERMITTED USE
+  • Clone and run locally for your own development with a valid Soumtok account.
+  • Fork on GitHub only to propose changes back via pull request to trysoumtok/Soumtok.
+  • Study the code for learning — do not republish as your own product.
 
-   Unless required by applicable law or agreed to in writing, software
-   distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   See the License for the specific language governing permissions and
-   limitations under the License.
+PROHIBITED WITHOUT WRITTEN PERMISSION FROM SOUMTOK
+  • Selling, sublicensing, or white-labeling this code or derivatives.
+  • Removing Soumtok branding, copyright notices, or license files.
+  • Hosting a competing "Soumtok clone" IDE or agent service using this codebase.
+  • Using the Soumtok name, logo, or "Soumtok Agent" mark for unrelated products.
+
+TRADEMARKS
+  "Soumtok", the Soumtok logo, and "Soumtok Agent" are trademarks of Soumtok.
+  See TRADEMARK.md.
+
+NO WARRANTY
+  This software is provided "as is" without warranty of any kind.
+
+CONTACT
+  Licensing: info@soumtok.com
+  Security: security@soumtok.com
+  Website: https://soumtok.com

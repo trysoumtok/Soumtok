@@ -11,7 +11,8 @@
 
 <p align="center">
   <a href="https://soumtok.com"><img src="https://img.shields.io/badge/website-soumtok.com-f54e00?style=for-the-badge" alt="Website" /></a>
-  <a href="https://github.com/trysoumtok/Soumtok/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue?style=for-the-badge" alt="License" /></a>
+  <a href="https://github.com/trysoumtok/Soumtok/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Proprietary-red?style=for-the-badge" alt="License" /></a>
+  <a href="https://github.com/trysoumtok/Soumtok"><img src="https://img.shields.io/badge/agent-Soumtok%20Agent-f54e00?style=for-the-badge" alt="Soumtok Agent" /></a>
   <a href="https://github.com/trysoumtok/Soumtok/issues"><img src="https://img.shields.io/badge/issues-welcome-181818?style=for-the-badge" alt="Issues" /></a>
 </p>
 
@@ -19,7 +20,7 @@
 
 ## Why Soumtok
 
-Soumtok is a **production-grade AI coding agent** — not a chat wrapper. It classifies intent, gates tools, verifies edits, rolls back failures, and scales across long sessions. Built for desks that actually ship: Nairobi first, then everywhere the same loop works.
+**Soumtok Agent** is our production-grade AI coding agent — not a chat wrapper. It classifies intent, gates tools, verifies edits, rolls back failures, and scales across long sessions. Built for desks that actually ship: Nairobi first, then everywhere the same loop works.
 
 | | Studio (web) | Desktop (Electron) |
 | --- | --- | --- |
@@ -132,7 +133,18 @@ Report vulnerabilities privately: **security@soumtok.com** (see [SECURITY.md](SE
 
 ---
 
-## License
+## License & protection
 
-Apache License 2.0 — see [LICENSE](LICENSE).  
-Soumtok name and logo are trademarks of Soumtok.
+**Proprietary — all rights reserved.** See [LICENSE](LICENSE), [NOTICE](NOTICE), and [TRADEMARK.md](TRADEMARK.md).
+
+You may run and contribute via pull request. You may **not** rebrand, resell, or ship a competing product from this codebase without written permission from Soumtok.
+
+© 2026 Soumtok · Joseph Nyarandi
+
+---
+
+<p align="center">
+  <sub>
+    <b>Topics:</b> ai · coding-agent · soumtok-agent · ide · electron · llm · mcp · africa · nairobi · typescript · monaco · agent-harness
+  </sub>
+</p>

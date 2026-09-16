@@ -403,7 +403,7 @@ export function compactControlSystem(input: {
   const git = compactGitSnapshot(input.gitSnapshot)
 
   const body = [
-    'You are Soumtok Desktop Agent. Do the USER ASKED job in this WORKSPACE with JSON tools.',
+    'You are Soumtok Agent. Do the USER ASKED job in this WORKSPACE with JSON tools.',
     modeLine,
     `WORKSPACE: ${root}`,
     `OPEN: ${open}`,

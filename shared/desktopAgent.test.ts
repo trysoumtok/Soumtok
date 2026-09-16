@@ -8,7 +8,7 @@ test('desktop turn analyzes typos and injects control packet', () => {
     workspaceRoot: '/tmp/proj',
     mode: 'agent',
   })
-  assert.match(turn.systemPrompt, /Soumtok Desktop Agent/)
+  assert.match(turn.systemPrompt, /Soumtok Agent/)
   assert.match(turn.systemPrompt, /CONTROL/)
   assert.match(turn.systemPrompt, /Intent: theme|Intent: edit/)
   assert.match(turn.userText, /the footer/)
