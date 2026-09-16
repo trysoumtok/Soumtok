@@ -32,14 +32,16 @@ import { registerPlugins } from './plugins.ts'
 import { registerConnectors } from './connectors.ts'
 import { registerDevice } from './device.ts'
 import { registerDesktopAuth } from './desktop-auth.ts'
-import { registerTestHub } from './testHub.ts'
+import { cleanupExpiredDeploys, hydrateTestHubDeploys, registerTestHub } from './testHub.ts'
 import { registerSkills } from './skills.ts'
 import { registerSeo } from './seo.ts'
+import { registerDesktopControl } from './desktop-control.ts'
 import { hashSecret } from './secrets.ts'
 import { BLOCKED_EMAIL_MESSAGE, isBlockedEmail } from './blocked-emails.ts'
 
 export const app = new Hono()
 registerSeo(app)
+registerDesktopControl(app)
 registerGithubSetup(app)
 registerGithub(app, requireReadyUser)
 registerStudio(app, requireReadyUser)
@@ -715,8 +717,16 @@ export async function ensureMigrated() {
   if (!hasDatabase()) return
   if (migrated) {
     await migrate()
+    if (pool) {
+      await cleanupExpiredDeploys(pool).catch(() => undefined)
+      await hydrateTestHubDeploys(pool).catch(() => undefined)
+    }
     return
   }
   await migrate()
+  if (pool) {
+    await cleanupExpiredDeploys(pool).catch(() => undefined)
+    await hydrateTestHubDeploys(pool).catch(() => undefined)
+  }
   migrated = true
 }

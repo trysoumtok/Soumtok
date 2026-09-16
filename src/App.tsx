@@ -3,7 +3,7 @@ import { emptyProfile, fetchProfile, fetchTwoFactorStatus, isOnboardingComplete,
 import { signOut, useSession } from './lib/auth-client'
 import { sessionTimedOut } from '../shared/session'
 import { navigate, openTab, usePath } from './lib/nav'
-import { DownloadModal } from './components/DownloadModal'
+import { DownloadPage } from './components/DownloadPage'
 import { HomeLanding } from './components/HomeLanding'
 import { LoginPage } from './components/LoginPage'
 import { PageSkeleton } from './components/Loaders'
@@ -39,6 +39,7 @@ const RESERVED_PATHS = new Set([
   'agents',
   'connect',
   'desktop-link',
+  'download',
 ])
 
 function publicProfileHandle(path: string) {
@@ -58,8 +59,7 @@ export default function App() {
       : undefined
   const [profile, setProfile] = useState<Profile | null | undefined>(undefined)
   const [need2fa, setNeed2fa] = useState(false)
-  const [downloadOpen, setDownloadOpen] = useState(false)
-  const openDownload = () => setDownloadOpen(true)
+  const openDownload = () => navigate('/download')
 
   useEffect(() => {
     if (isPending) return
@@ -224,6 +224,10 @@ export default function App() {
     return <ContactPage />
   }
 
+  if (path === '/download') {
+    return <DownloadPage />
+  }
+
   if (path.startsWith('/connect/')) {
     if (!session) return <PageSkeleton />
     const code = path.slice('/connect/'.length).split('/')[0] || ''
@@ -247,7 +251,6 @@ export default function App() {
     return (
       <>
         <DashboardPage profile={profile ?? null} path={path} onDownload={openDownload} />
-        <DownloadModal open={downloadOpen} onClose={() => setDownloadOpen(false)} />
       </>
     )
   }
@@ -265,7 +268,6 @@ export default function App() {
         onContact={() => openTab('/contact')}
         onAccount={() => navigate('/dashboard')}
       />
-      <DownloadModal open={downloadOpen} onClose={() => setDownloadOpen(false)} />
     </>
   )
 }

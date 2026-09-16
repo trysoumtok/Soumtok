@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
  * Verify a desktop release folder and print upload steps for auto-update.
- * Run after: npm run pack:win (or pack:mac / pack:linux)
  */
+import { execSync } from 'child_process'
 import fs from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
@@ -26,12 +26,15 @@ if (!fs.existsSync(releaseDir)) {
   process.exit(1)
 }
 
+execSync('node scripts/sync-release-manifest.mjs', { cwd: path.join(__dirname, '..'), stdio: 'inherit' })
+
 const files = fs.readdirSync(releaseDir)
 const yml = files.find((f) => /^latest.*\.yml$/i.test(f))
-const installers = files.filter((f) => /\.(exe|dmg|AppImage|zip)$/i.test(f))
+const installers = files.filter((f) => /\.(exe|dmg|AppImage|deb|zip)$/i.test(f))
 
 ok(installers.length > 0, `installers found (${installers.length})`)
-ok(Boolean(yml), 'latest*.yml manifest present for electron-updater')
+ok(fs.existsSync(path.join(releaseDir, 'releases.json')), 'releases.json manifest present')
+ok(Boolean(yml) || installers.some((f) => f.endsWith('.exe')), 'update manifest or Windows installer present')
 
 console.log('\nRelease', version)
 console.log('Folder:', releaseDir)
@@ -40,16 +43,12 @@ for (const f of installers) console.log('  -', f)
 
 console.log(`
 Upload to your update CDN (SOUMTOK_UPDATE_URL):
-  1. Upload ALL files from release/ to the feed root (same URL as package.json build.publish.url)
-  2. Set SOUMTOK_UPDATE_URL=https://your-cdn/desktop/ in server .env and rebuild installers
-  3. Users get updates via Help → Check for updates (or auto after 12s when packaged)
+  1. Upload ALL files from release/ to the feed root
+  2. Include latest*.yml, releases.json, and installers
+  3. data/desktop-control.json is auto-synced with available builds
 
-Code signing (recommended for public release):
-  Windows: set CSC_LINK=path/to/cert.pfx && set CSC_KEY_PASSWORD=secret
-  macOS:   set CSC_LINK=... CSC_KEY_PASSWORD=... APPLE_ID=... APPLE_APP_SPECIFIC_PASSWORD=... APPLE_TEAM_ID=...
-  Linux:   AppImage needs no signing; use checksums in release notes
-
-Without signing, builds still install locally for beta testers.
+macOS builds require a Mac or GitHub Actions (pack:mac).
+Linux ARM64 requires a Linux host or CI.
 `)
 
 if (failed) process.exit(1)

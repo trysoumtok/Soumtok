@@ -1,10 +1,19 @@
 const { app, ipcMain, dialog } = require('electron')
+const { getDesktopConfig } = require('./desktopControl')
 
 let autoUpdater = null
 let mainWindow = null
+let forceUpdateMode = false
 
-function initAutoUpdater(getMainWindow) {
+function isForceUpdateMode() {
+  const config = getDesktopConfig()
+  return forceUpdateMode || Boolean(config?.updateRequired)
+}
+
+function initAutoUpdater(getMainWindow, options = {}) {
   mainWindow = getMainWindow
+  forceUpdateMode = Boolean(options.forceUpdate)
+
   if (!app.isPackaged) {
     registerUpdateIpc(() => ({ ok: false, reason: 'dev' }))
     return
@@ -17,7 +26,8 @@ function initAutoUpdater(getMainWindow) {
     return
   }
 
-  const feed = process.env.SOUMTOK_UPDATE_URL || ''
+  const config = getDesktopConfig()
+  const feed = config?.updateFeedUrl || process.env.SOUMTOK_UPDATE_URL || ''
   if (feed) {
     try {
       autoUpdater.setFeedURL({ provider: 'generic', url: feed.replace(/\/$/, '') })
@@ -26,11 +36,25 @@ function initAutoUpdater(getMainWindow) {
     }
   }
 
-  autoUpdater.autoDownload = false
+  autoUpdater.autoDownload = isForceUpdateMode()
   autoUpdater.autoInstallOnAppQuit = true
 
   autoUpdater.on('update-available', (info) => {
     const win = mainWindow?.()
+    const forced = isForceUpdateMode()
+    if (forced) {
+      void autoUpdater.downloadUpdate()
+      if (win && !win.isDestroyed()) {
+        dialog.showMessageBox(win, {
+          type: 'info',
+          title: 'Update required',
+          message: `Soumtok ${info?.version || ''} is required.`,
+          detail: 'Downloading the update now. Soumtok will restart when it is ready.',
+          buttons: ['OK'],
+        }).catch(() => {})
+      }
+      return
+    }
     if (!win || win.isDestroyed()) return
     dialog
       .showMessageBox(win, {
@@ -50,20 +74,28 @@ function initAutoUpdater(getMainWindow) {
 
   autoUpdater.on('update-downloaded', () => {
     const win = mainWindow?.()
-    if (!win || win.isDestroyed()) return
+    const forced = isForceUpdateMode()
+    if (!win || win.isDestroyed()) {
+      if (forced) autoUpdater.quitAndInstall(false, true)
+      return
+    }
     dialog
       .showMessageBox(win, {
         type: 'info',
-        title: 'Update ready',
-        message: 'Restart Soumtok to install the update.',
-        buttons: ['Restart now', 'Later'],
+        title: forced ? 'Update ready — restart required' : 'Update ready',
+        message: forced ? 'Restart Soumtok to finish the required update.' : 'Restart Soumtok to install the update.',
+        buttons: forced ? ['Restart now'] : ['Restart now', 'Later'],
         defaultId: 0,
-        cancelId: 1,
+        cancelId: forced ? 0 : 1,
       })
       .then(({ response }) => {
         if (response === 0) autoUpdater.quitAndInstall(false, true)
       })
       .catch(() => {})
+  })
+
+  autoUpdater.on('update-not-available', () => {
+    /* manual check uses IPC return value */
   })
 
   autoUpdater.on('error', (err) => {
@@ -72,14 +104,16 @@ function initAutoUpdater(getMainWindow) {
 
   registerUpdateIpc(async () => {
     try {
+      autoUpdater.autoDownload = isForceUpdateMode()
       const result = await autoUpdater.checkForUpdates()
-      return { ok: true, updateInfo: result?.updateInfo || null }
+      return { ok: true, updateInfo: result?.updateInfo || null, forceUpdate: isForceUpdateMode() }
     } catch (err) {
       return { ok: false, error: String(err?.message || err) }
     }
   })
 
   setTimeout(() => {
+    autoUpdater.autoDownload = isForceUpdateMode()
     autoUpdater.checkForUpdates().catch(() => {})
   }, 12_000)
 }

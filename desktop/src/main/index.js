@@ -25,6 +25,7 @@ const { loadMcpMarketplace } = require('./mcpMarketplace')
 const { workspaceGrep, workspaceReplaceAll } = require('./desktopTools')
 const { startCrashReporter, registerCrashIpc, bindProcessHandlers } = require('./crashReporter')
 const { initAutoUpdater } = require('./autoUpdater')
+const { initDesktopControl, startDesktopControlPolling } = require('./desktopControl')
 startCrashReporter()
 bindProcessHandlers()
 registerCrashIpc()
@@ -950,8 +951,18 @@ if (devPrimary) {
       return permission === 'media' || permission === 'audioCapture'
     })
     Menu.setApplicationMenu(null)
+    const control = await initDesktopControl({
+      apiBase: API,
+      version: appVersion,
+      getMainWindow: () => mainWindow,
+    })
     createWindow()
-    initAutoUpdater(() => mainWindow)
+    initAutoUpdater(() => mainWindow, { forceUpdate: Boolean(control?.config?.updateRequired) })
+    startDesktopControlPolling({
+      apiBase: API,
+      version: appVersion,
+      getMainWindow: () => mainWindow,
+    })
     watchRenderer()
     watchMainProcess()
     app.on('activate', () => {
@@ -1894,6 +1905,47 @@ ipcMain.handle('testhub:benchmarks:summary', async () => {
   const res = await api('GET', '/api/test-hub/benchmarks/summary', null, 20_000)
   if (res.status >= 400) return { error: res.data?.error || 'Could not load summary', rows: [] }
   return res.data || { rows: [] }
+})
+
+ipcMain.handle('testhub:publish', async (_e, payload) => {
+  const files = payload?.files || {}
+  if (!Object.keys(files).length) return { error: 'No files to publish' }
+  if (!String(payload?.slug || '').trim()) return { error: 'Choose a slug for the link' }
+  const res = await api(
+    'POST',
+    '/api/test-hub/publish',
+    {
+      files,
+      title: payload?.title || 'Test Hub preview',
+      slug: payload.slug,
+      projectId: payload?.projectId || null,
+      projectTitle: payload?.projectTitle || null,
+      ttlMinutes: payload?.ttlMinutes,
+    },
+    25_000,
+  )
+  if (res.status === 401) return { error: 'Sign in to publish a share link' }
+  if (res.status === 403) return { error: res.data?.error || 'Finish account setup first' }
+  if (res.status >= 400) return { error: res.data?.error || `Publish failed (${res.status})` }
+  return res.data || { error: 'Publish failed' }
+})
+
+ipcMain.handle('testhub:deploys:list', async (_e, payload) => {
+  const limit = Number(payload?.limit) || 30
+  const project = payload?.projectId ? `&project=${encodeURIComponent(payload.projectId)}` : ''
+  const res = await api('GET', `/api/test-hub/deploys?limit=${limit}${project}`, null, 20_000)
+  if (res.status >= 400) return { error: res.data?.error || 'Could not load deploys', rows: [] }
+  return res.data || { rows: [] }
+})
+
+ipcMain.handle('testhub:deploys:delete', async (_e, payload) => {
+  const id = String(payload?.id || '').trim()
+  if (!id) return { error: 'Missing link id' }
+  const res = await api('DELETE', `/api/test-hub/deploys/${encodeURIComponent(id)}`, null, 20_000)
+  if (res.status === 401) return { error: 'Sign in to manage share links' }
+  if (res.status === 404) return { error: 'Link not found' }
+  if (res.status >= 400) return { error: res.data?.error || `Delete failed (${res.status})` }
+  return res.data || { ok: true }
 })
 
 ipcMain.handle('testhub:export:folder', async (event, payload) => {

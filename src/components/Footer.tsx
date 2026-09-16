@@ -15,6 +15,7 @@ const columns = [
     title: 'Resources',
     links: [
       { label: 'Docs', href: '/docs' },
+      { label: 'Download', href: '/download' },
       { label: 'Help', href: '/help' },
       { label: 'Contact', href: '/contact' },
     ],
@@ -37,7 +38,7 @@ export function TryNow({ onStart }: { onStart: () => void }) {
         Open the desk.
       </h2>
       <p className="mx-auto mt-4 max-w-[420px] text-[16px] text-white/50">
-        Studio is in the browser today. The Windows app is on a waitlist.
+        Studio is in the browser today. Download the desktop app for Windows, macOS, or Linux.
       </p>
       <div className="mt-7">
         <PillButton onClick={() => (session?.user ? onStart() : navigate('/signup'))}>

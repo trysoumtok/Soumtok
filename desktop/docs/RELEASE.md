@@ -36,6 +36,44 @@ Unsigned builds work for internal beta; Windows SmartScreen and macOS Gatekeeper
 
 - Sign in, open folder, agent round, Tab, Problems panel, extension host optional.
 
-## 6. Ship
+## 6. Remote control (updates, disable app, force upgrade)
+
+Server-side control lives in `data/desktop-control.json` and env overrides.
+
+| Control | Env | Effect |
+|---------|-----|--------|
+| Latest version | `DESKTOP_LATEST_VERSION` | Shown on `/download` and compared for force-update |
+| Minimum version | `DESKTOP_MIN_VERSION` | Older desktop builds must update |
+| Force update | `DESKTOP_FORCE_UPDATE=1` | Packaged app auto-downloads and requires restart |
+| Disable app | `DESKTOP_DISABLED=1` | Desktop quits on launch with your message |
+| Admin API | `DESKTOP_ADMIN_SECRET` | Bearer token for `PUT /api/admin/desktop/control` |
+
+**After each release:**
+
+1. Upload `release/` to CDN (`latest*.yml`, `releases.json`, installers).
+2. Bump `latestVersion` in `data/desktop-control.json` (or admin API).
+3. Set `available: true` on new platform builds in the `releases` array.
+
+**Admin API example:**
+
+```bash
+curl -X PUT https://soumtok.com/api/admin/desktop/control \
+  -H "Authorization: Bearer $DESKTOP_ADMIN_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"latestVersion":"0.2.0","forceUpdate":false,"disabled":false}'
+```
+
+**Disable desktop everywhere:**
+
+```bash
+curl -X PUT https://soumtok.com/api/admin/desktop/control \
+  -H "Authorization: Bearer $DESKTOP_ADMIN_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"disabled":true,"disabledMessage":"Desktop maintenance — use Studio at soumtok.com"}'
+```
+
+Desktop apps poll `/api/desktop/config` on launch and every 6 hours.
+
+## 7. Ship
 
 Publish release notes with known limits from `desktop/README.md`.

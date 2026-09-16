@@ -117,7 +117,7 @@ export function Nav({
             onClick={onDownload}
             className="rounded-full border border-white/25 px-4 py-1.5 text-[13.5px] text-white transition hover:bg-white/5"
           >
-            Windows waitlist
+            Download
           </button>
         </div>
 
@@ -189,7 +189,7 @@ export function Nav({
             >
               Contact
             </button>
-            <PillButton onClick={onDownload}>Windows waitlist</PillButton>
+            <PillButton onClick={onDownload}>Download</PillButton>
           </div>
         </div>
       )}

@@ -27,3 +27,7 @@ tmp
 *.sln
 *.sw?
 .neon
+
+# Desktop installers (upload to Bunny via npm run release:upload)
+desktop/release/**
+!desktop/release/releases.json

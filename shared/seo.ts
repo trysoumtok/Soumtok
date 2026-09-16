@@ -180,6 +180,12 @@ const PAGES: Record<string, SeoPage> = {
     description: 'Talk to the Soumtok team about Studio, teams, or a bug.',
     path: '/contact',
   },
+  '/download': {
+    title: `Download Soumtok Desktop | ${SITE_NAME}`,
+    description:
+      'Download Soumtok for Windows, macOS, and Linux. Agent-first IDE with Tab, terminal, and your Soumtok account.',
+    path: '/download',
+  },
   '/login': {
     title: `Sign in | ${SITE_NAME}`,
     description: 'Sign in to Soumtok.',
@@ -290,6 +296,7 @@ export function marketingSitemapEntries(): SitemapEntry[] {
     { loc: '/', changefreq: 'daily', priority: '1.0', lastmod: SITEMAP_LASTMOD },
     { loc: '/agents', changefreq: 'weekly', priority: '0.9', lastmod: SITEMAP_LASTMOD },
     { loc: '/help', changefreq: 'weekly', priority: '0.7', lastmod: SITEMAP_LASTMOD },
+    { loc: '/download', changefreq: 'weekly', priority: '0.8', lastmod: SITEMAP_LASTMOD },
     { loc: '/contact', changefreq: 'weekly', priority: '0.6', lastmod: SITEMAP_LASTMOD },
   ]
 }

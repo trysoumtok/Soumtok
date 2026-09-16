@@ -3,6 +3,11 @@
   "productName": "Soumtok",
   "version": "0.1.0",
   "private": true,
+  "author": {
+    "name": "Soumtok",
+    "email": "info@soumtok.com"
+  },
+  "homepage": "https://soumtok.com",
   "description": "Soumtok desktop IDE — Cursor-style editor signed into your Soumtok account",
   "main": "src/main/index.js",
   "scripts": {
@@ -12,10 +17,13 @@
     "postinstall": "node scripts/rebuild-native.mjs",
     "soumtok-code:install": "node scripts/install-soumtok-code-host.mjs",
     "vscode:fork-bootstrap": "node vscode-fork/bootstrap.mjs",
-    "pack:win": "electron-builder --win nsis",
-    "pack:mac": "electron-builder --mac dmg",
-    "pack:linux": "electron-builder --linux AppImage",
-    "pack:all": "electron-builder --win nsis --mac dmg --linux AppImage",
+    "installer:assets": "node scripts/generate-installer-assets.mjs",
+    "pack:win": "node scripts/pack-win-all.mjs",
+    "pack:mac": "npm run installer:assets && electron-builder --mac --x64 --arm64",
+    "pack:linux": "node scripts/pack-linux-all.mjs",
+    "pack:all": "npm run pack:win && npm run pack:linux",
+    "release:sync": "node scripts/sync-release-manifest.mjs",
+    "release:upload": "node scripts/upload-releases.mjs",
     "release:verify": "node scripts/publish-release.mjs"
   },
   "engines": {
@@ -24,8 +32,12 @@
   "build": {
     "appId": "com.soumtok.ide",
     "productName": "Soumtok",
+    "copyright": "Copyright © Soumtok",
+    "artifactName": "${productName}-Setup-${version}-${os}-${arch}.${ext}",
+    "npmRebuild": false,
     "directories": {
-      "output": "release"
+      "output": "release",
+      "buildResources": "build"
     },
     "files": [
       "src/**/*",
@@ -36,37 +48,60 @@
       "node_modules/@homebridge/node-pty-prebuilt-multiarch/**/*"
     ],
     "extraResources": [
-      {
-        "from": "node_modules/monaco-editor/min",
-        "to": "monaco"
-      }
+      { "from": "node_modules/monaco-editor/min", "to": "monaco" }
     ],
     "win": {
-      "icon": "resources/icon.png",
-      "target": ["nsis"],
-      "signAndEditExecutable": true,
-      "signDlls": true,
-      "publisherName": "Soumtok"
+      "icon": "build/icon.ico",
+      "target": ["nsis", "zip"]
     },
     "mac": {
-      "icon": "resources/icon.png",
-      "target": ["dmg"],
+      "icon": "build/icon.png",
+      "target": ["dmg", "zip"],
       "category": "public.app-category.developer-tools",
       "hardenedRuntime": true,
       "gatekeeperAssess": false,
       "entitlements": "build/entitlements.mac.plist",
-      "entitlementsInherit": "build/entitlements.mac.plist"
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "darkModeSupport": true
+    },
+    "dmg": {
+      "background": "build/dmg-background.png",
+      "iconSize": 96,
+      "title": "${productName} ${version}",
+      "window": { "width": 540, "height": 380 },
+      "contents": [
+        { "x": 130, "y": 200, "type": "file" },
+        { "x": 410, "y": 200, "type": "link", "path": "/Applications" }
+      ]
     },
     "linux": {
-      "icon": "resources/icon.png",
-      "target": [
-        "AppImage"
-      ],
-      "category": "Development"
+      "icon": "build/linux-icon.png",
+      "artifactName": "${productName}-Setup-${version}-linux-${arch}.${ext}",
+      "target": ["AppImage", "deb"],
+      "maintainer": "Soumtok <info@soumtok.com>",
+      "category": "Development",
+      "synopsis": "AI-native IDE with agent, Tab, and terminal",
+      "description": "Soumtok Desktop — Cursor-style editor signed into your Soumtok account."
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "allowElevation": true,
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "installerSidebar": "build/installerSidebar.bmp",
+      "installerHeader": "build/installerHeader.bmp",
+      "installerHeaderIcon": "build/icon.ico",
+      "license": "build/license.txt",
+      "include": "build/installer.nsh",
+      "shortcutName": "Soumtok",
+      "uninstallDisplayName": "Soumtok",
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "menuCategory": true,
+      "runAfterFinish": true,
+      "artifactName": "${productName}-Setup-${version}-win-${arch}.${ext}"
     },
     "publish": {
       "provider": "generic",
@@ -77,11 +112,13 @@
     "@homebridge/node-pty-prebuilt-multiarch": "^0.14.1",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
-    "electron": "^37.2.5",
     "monaco-editor": "^0.52.2"
   },
   "devDependencies": {
+    "electron": "^37.2.5",
     "electron-builder": "^26.0.12",
-    "electron-updater": "^6.8.9"
+    "electron-updater": "^6.8.9",
+    "png-to-ico": "^2.1.8",
+    "sharp": "^0.33.5"
   }
 }

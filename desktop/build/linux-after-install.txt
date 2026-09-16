@@ -1,0 +1,5 @@
+Soumtok installed successfully.
+
+Launch from your app menu or run: Soumtok
+
+Sign in with your Soumtok account to use Agent, Tab, and Ctrl+K.

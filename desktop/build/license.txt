@@ -1,0 +1,11 @@
+Soumtok Desktop IDE — License Agreement
+
+Copyright (c) Soumtok. All rights reserved.
+
+By installing Soumtok you agree to the Terms of Service and Privacy Policy
+published at https://soumtok.com
+
+Soumtok Desktop connects to Soumtok services for AI features, sign-in, and updates.
+Third-party extensions are subject to their publishers' terms.
+
+For support: https://soumtok.com

@@ -1,0 +1,44 @@
+name: Desktop Release Builds
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'desktop-v*'
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            pack: pack:win
+          - os: macos-latest
+            pack: pack:mac
+          - os: ubuntu-latest
+            pack: pack:linux
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - working-directory: desktop
+        run: npm ci
+      - working-directory: desktop
+        run: npm run ${{ matrix.pack }}
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - working-directory: desktop
+        run: npm run release:sync
+      - working-directory: desktop
+        run: npm run release:verify
+      - uses: actions/upload-artifact@v4
+        with:
+          name: soumtok-${{ matrix.os }}
+          path: desktop/release/
+          retention-days: 30
