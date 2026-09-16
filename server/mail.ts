@@ -1,23 +1,90 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import nodemailer from 'nodemailer'
-import { env, hasSmtp } from './env.ts'
+import { env, hasResend, hasSmtp } from './env.ts'
 
 const MAIL_TIMEOUT_MS = 20_000
 
+function publicLogoUrl() {
+  return `${env.betterAuthUrl.replace(/\/$/, '')}/images/soumtok-mark.png`
+}
+
+function htmlForDelivery(html?: string) {
+  if (!html) return html
+  return html.replace(/cid:soumtok-mark/g, publicLogoUrl())
+}
+
 function transport() {
+  const pass = env.smtpPass.replace(/^["']|["']$/g, '')
+  const try587 = env.smtpPort === 587
   return nodemailer.createTransport({
     host: env.smtpHost,
-    port: env.smtpPort,
-    secure: env.smtpPort === 465,
+    port: try587 ? 587 : env.smtpPort,
+    secure: !try587 && env.smtpPort === 465,
+    requireTLS: try587,
     auth: {
       user: env.smtpUser,
-      pass: env.smtpPass,
+      pass,
     },
     connectionTimeout: 10_000,
     greetingTimeout: 10_000,
     socketTimeout: MAIL_TIMEOUT_MS,
   })
+}
+
+async function sendViaResend(
+  to: string,
+  subject: string,
+  text: string,
+  html?: string,
+  replyTo?: string,
+) {
+  const res = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${env.resendApiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      from: env.smtpFrom,
+      to: [to],
+      subject,
+      text,
+      ...(html ? { html } : {}),
+      ...(replyTo ? { reply_to: replyTo } : {}),
+    }),
+    signal: AbortSignal.timeout(MAIL_TIMEOUT_MS),
+  })
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '')
+    throw new Error(`Resend ${res.status}: ${detail.slice(0, 240)}`)
+  }
+}
+
+async function sendViaSmtp(
+  to: string,
+  subject: string,
+  text: string,
+  html?: string,
+  replyTo?: string,
+) {
+  const deliveryHtml = htmlForDelivery(html)
+  const send = transport().sendMail({
+    from: env.smtpFrom,
+    to,
+    replyTo,
+    subject,
+    text,
+    html: deliveryHtml,
+    attachments: deliveryHtml ? logoAttachment() : [],
+  })
+
+  await Promise.race([
+    send,
+    new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error('SMTP timed out')), MAIL_TIMEOUT_MS)
+    }),
+  ])
 }
 
 const markPath = join(process.cwd(), 'public/images/soumtok-mark.png')
@@ -160,27 +227,24 @@ export async function sendMail(
   html?: string,
   replyTo?: string,
 ) {
-  if (!hasSmtp()) {
-    console.warn(`[mail] SMTP is not configured. Would send to ${to}: ${subject}\n${text}`)
+  const deliveryHtml = htmlForDelivery(html)
+
+  if (hasResend()) {
+    try {
+      await sendViaResend(to, subject, text, deliveryHtml, replyTo)
+      return
+    } catch (error) {
+      console.error('[mail] Resend failed', error)
+      if (!hasSmtp()) throw error
+    }
+  }
+
+  if (hasSmtp()) {
+    await sendViaSmtp(to, subject, text, html, replyTo)
     return
   }
 
-  const send = transport().sendMail({
-    from: env.smtpFrom,
-    to,
-    replyTo,
-    subject,
-    text,
-    html,
-    attachments: html ? logoAttachment() : [],
-  })
-
-  await Promise.race([
-    send,
-    new Promise<never>((_, reject) => {
-      setTimeout(() => reject(new Error('SMTP timed out')), MAIL_TIMEOUT_MS)
-    }),
-  ])
+  console.warn(`[mail] No mail transport configured. Would send to ${to}: ${subject}\n${text}`)
 }
 
 function escapeHtml(value: string) {

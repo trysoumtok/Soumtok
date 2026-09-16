@@ -17,14 +17,34 @@ npm run release:verify
 
 Output: `desktop/release/`
 
-## 3. Code signing (public release)
+## 3. Code signing (required for public trust)
+
+Without Authenticode signing, Windows shows **“Windows protected your PC”** / **“Unknown publisher”** on every download. That warning cannot be removed by UI changes — you need a code signing certificate.
 
 | Platform | Environment variables |
 |----------|----------------------|
-| Windows | `CSC_LINK` (or `WIN_CSC_LINK`), `CSC_KEY_PASSWORD` |
+| Windows | `WIN_CSC_LINK` (path to `.pfx`), `CSC_KEY_PASSWORD` |
 | macOS | `CSC_LINK`, `CSC_KEY_PASSWORD`, `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID` |
 
-Unsigned builds work for internal beta; Windows SmartScreen and macOS Gatekeeper will warn.
+### Windows SmartScreen checklist
+
+1. **Buy a code signing certificate** — Standard OV (~$200–400/yr) from DigiCert, Sectigo, SSL.com, etc. **EV** certificates build SmartScreen reputation faster (often immediate “Verified publisher: Soumtok”).
+2. **Export as `.pfx`** and set before building:
+   ```bash
+   set WIN_CSC_LINK=E:\certs\soumtok-code-sign.pfx
+   set CSC_KEY_PASSWORD=your-cert-password
+   cd desktop
+   npm run pack:win
+   ```
+3. **Sign every release** — `electron-builder` signs the `.exe` and NSIS installer when those env vars are set (`publisherName: Soumtok` is already in `package.json`).
+4. **Use HTTPS downloads** — soumtok.com serves installers from `/api/desktop/download/` (already configured).
+5. **Reputation builds over time** — Standard certs need enough signed downloads before SmartScreen stops warning. EV avoids the cold-start problem.
+
+Unsigned builds are fine for internal beta only. Public users should never receive unsigned installers.
+
+### macOS
+
+Unsigned builds trigger Gatekeeper. Notarize with Apple after signing (`APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID`).
 
 ## 4. Auto-update hosting
 

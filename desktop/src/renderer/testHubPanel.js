@@ -62,6 +62,9 @@ Prefer rewriting the full updated file contents for each changed path so the liv
     sandboxLog: '',
     lastBenchmarkId: '',
     scoresOpen: false,
+    linksOpen: false,
+    shareBusy: false,
+    activeLiveDeploy: null,
   }
 
   const DEFAULT_COMPARE_PICK = ['deepseek-v4-flash', 'deepseek-chat']
@@ -645,17 +648,366 @@ Prefer rewriting the full updated file contents for each changed path so the liv
     body.textContent = state.sandboxLog || ''
   }
 
+  let shareApiOrigin = ''
+
+  function normalizeShareSlug(value) {
+    return String(value || '')
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9-]+/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-+|-+$/g, '')
+  }
+
+  function suggestShareSlug(title) {
+    const slug = normalizeShareSlug(title)
+    if (slug.length >= 3) return slug.slice(0, 40)
+    return `demo-${Date.now().toString(36).slice(-6)}`
+  }
+
+  function shareSlugError(value) {
+    const slug = normalizeShareSlug(value)
+    if (!slug) return 'Choose a slug for the link'
+    if (slug.length < 3) return 'Slug must be at least 3 characters'
+    if (slug.length > 40) return 'Slug must be 40 characters or fewer'
+    if (!/^[a-z0-9]/.test(slug)) return 'Slug must start with a letter or number'
+    if (!/^[a-z0-9-]+$/.test(slug)) return 'Use only lowercase letters, numbers, and hyphens'
+    return null
+  }
+
+  function setShareDialogError(message) {
+    const err = $('test-hub-share-error')
+    if (!err) return
+    if (message) {
+      err.hidden = false
+      err.textContent = message
+    } else {
+      err.hidden = true
+      err.textContent = ''
+    }
+  }
+
+  function paintShareUrlPreview() {
+    const preview = $('test-hub-share-url-preview')
+    const slugInput = $('test-hub-share-slug')
+    if (!preview || !slugInput) return
+    const slug = normalizeShareSlug(slugInput.value) || 'your-slug'
+    const origin = shareApiOrigin || window.location.origin || 'https://soumtok.com'
+    preview.textContent = `${origin.replace(/\/$/, '')}/t/${slug}/`
+  }
+
+  async function ensureShareApiOrigin() {
+    if (shareApiOrigin) return shareApiOrigin
+    try {
+      const info = await api().appInfo?.()
+      shareApiOrigin = String(info?.api || '').replace(/\/$/, '')
+    } catch {
+      shareApiOrigin = ''
+    }
+    return shareApiOrigin
+  }
+
+  let lastPublishedShareUrl = ''
+
+  function showShareDialogForm() {
+    $('test-hub-share-form')?.removeAttribute('hidden')
+    $('test-hub-share-success')?.setAttribute('hidden', '')
+  }
+
+  function formatShareDuration(minutes) {
+    const m = Math.max(30, Math.min(43200, Math.round(Number(minutes) || 30)))
+    if (m < 60) return `${m} minutes`
+    if (m < 1440) {
+      const h = Math.round(m / 60)
+      return `${h} hour${h === 1 ? '' : 's'}`
+    }
+    const d = Math.round(m / 1440)
+    return `${d} day${d === 1 ? '' : 's'}`
+  }
+
+  async function copyTextToClipboard(text) {
+    const s = String(text || '').trim()
+    if (!s) return false
+    if (api().clipboardWriteText) {
+      try {
+        await api().clipboardWriteText(s)
+        return true
+      } catch {
+        /* fall through */
+      }
+    }
+    if (navigator.clipboard?.writeText) {
+      try {
+        await navigator.clipboard.writeText(s)
+        return true
+      } catch {
+        /* fall through */
+      }
+    }
+    try {
+      const ta = document.createElement('textarea')
+      ta.value = s
+      ta.setAttribute('readonly', '')
+      ta.style.position = 'fixed'
+      ta.style.left = '-9999px'
+      document.body.appendChild(ta)
+      ta.select()
+      const ok = document.execCommand('copy')
+      ta.remove()
+      return ok
+    } catch {
+      return false
+    }
+  }
+
+  function flashCopyButton(btn, restoreLabel = 'Copy link') {
+    if (!btn) return
+    btn.textContent = 'Copied'
+    window.clearTimeout(flashCopyButton._timer)
+    flashCopyButton._timer = window.setTimeout(() => {
+      if (btn.textContent === 'Copied') btn.textContent = restoreLabel
+    }, 2000)
+  }
+
+  function ttlMinutesFromDeploy(row) {
+    if (!row?.expires_at) return 30
+    const expires = new Date(row.expires_at).getTime()
+    const created = row.created_at ? new Date(row.created_at).getTime() : Date.now()
+    return Math.max(30, Math.min(43200, Math.round((expires - created) / 60_000)))
+  }
+
+  function deployMatchesProject(row, projectId, projectLabel) {
+    if (!row || row.expired) return false
+    if (projectId && row.project_id === projectId) return true
+    const label = String(projectLabel || '').trim().toLowerCase()
+    if (!label) return false
+    const rowLabel = String(row.project_title || row.title || '').trim().toLowerCase()
+    return rowLabel === label
+  }
+
+  async function refreshActiveLiveDeploy() {
+    if (!api().testHubListDeploys) {
+      state.activeLiveDeploy = null
+      paintRunViteButton()
+      return null
+    }
+    try {
+      const ws = ensureActiveWorkspace()
+      const projectId = state.activeId || ws.id
+      const projectLabel = ws.title || projectTitle() || ''
+      let rows = (await api().testHubListDeploys({ limit: 10, projectId }))?.rows || []
+      let live = rows.find((row) => !row.expired) || null
+      if (!live) {
+        const allRows = (await api().testHubListDeploys({ limit: 30 }))?.rows || []
+        live =
+          allRows.find((row) => deployMatchesProject(row, projectId, projectLabel)) ||
+          allRows.find((row) => !row.expired) ||
+          null
+      }
+      state.activeLiveDeploy = live
+    } catch {
+      state.activeLiveDeploy = null
+    }
+    paintRunViteButton()
+    return state.activeLiveDeploy
+  }
+
+  function showShareDialogSuccess(url, ttlMinutes, opts = {}) {
+    const existing = Boolean(opts.existing)
+    lastPublishedShareUrl = url || ''
+    $('test-hub-share-form')?.setAttribute('hidden', '')
+    $('test-hub-share-success')?.removeAttribute('hidden')
+    const titleEl = $('test-hub-share-success-title')
+    const lead = $('test-hub-share-success-lead')
+    const urlEl = $('test-hub-share-success-url')
+    const copyBtn = $('test-hub-share-copy-again')
+    const newBtn = $('test-hub-share-new-link')
+    if (titleEl) titleEl.textContent = existing ? 'Link is live' : 'Published successfully'
+    if (lead) {
+      if (existing && state.activeLiveDeploy?.expires_at) {
+        lead.textContent = `Your link is still live — expires ${new Date(state.activeLiveDeploy.expires_at).toLocaleString()}.`
+      } else {
+        lead.textContent = `Your link is live for ${formatShareDuration(ttlMinutes)} — copied to clipboard.`
+      }
+    }
+    if (urlEl) urlEl.textContent = url || ''
+    if (copyBtn) copyBtn.textContent = 'Copy link'
+    if (newBtn) {
+      if (existing) newBtn.removeAttribute('hidden')
+      else newBtn.setAttribute('hidden', '')
+    }
+  }
+
+  function closeShareDialog() {
+    const dialog = $('test-hub-share-dialog')
+    if (dialog) dialog.hidden = true
+    showShareDialogForm()
+    setShareDialogError('')
+    state.shareBusy = false
+    lastPublishedShareUrl = ''
+    paintRunViteButton()
+  }
+
+  async function openSharePublishForm() {
+    const files = filesForExport()
+    if (!Object.keys(files).length || !buildPreviewHtml(files)) {
+      flashSaveHint('Nothing to share — build something first')
+      return
+    }
+    if (state.shareBusy) return
+    const dialog = $('test-hub-share-dialog')
+    const titleInput = $('test-hub-share-name')
+    const slugInput = $('test-hub-share-slug')
+    if (!dialog || !titleInput || !slugInput) {
+      flashSaveHint('Share dialog unavailable — restart Soumtok Desktop')
+      return
+    }
+    if (!api().testHubPublish) {
+      flashSaveHint('Restart Soumtok Desktop to enable Share link')
+      return
+    }
+    await ensureShareApiOrigin()
+    const title = projectTitle().slice(0, 120) || 'Test Hub preview'
+    titleInput.value = title
+    slugInput.value = suggestShareSlug(title)
+    delete slugInput.dataset.touched
+    setShareDialogError('')
+    showShareDialogForm()
+    paintShareUrlPreview()
+    dialog.hidden = false
+    slugInput.focus()
+    slugInput.select()
+  }
+
+  async function handleShareLinkClick(forceNew = false) {
+    const files = filesForExport()
+    if (!Object.keys(files).length || !buildPreviewHtml(files)) {
+      flashSaveHint('Nothing to share — build something first')
+      return
+    }
+    if (state.shareBusy) return
+    if (!api().testHubPublish) {
+      flashSaveHint('Restart Soumtok Desktop to enable Share link')
+      return
+    }
+    await refreshActiveLiveDeploy()
+    const live = state.activeLiveDeploy
+    if (!forceNew && live?.url) {
+      const dialog = $('test-hub-share-dialog')
+      if (!dialog) {
+        flashSaveHint('Share dialog unavailable — restart Soumtok Desktop')
+        return
+      }
+      await ensureShareApiOrigin()
+      showShareDialogSuccess(live.url, ttlMinutesFromDeploy(live), { existing: true })
+      dialog.hidden = false
+      return
+    }
+    await openSharePublishForm()
+  }
+
+  async function confirmSharePublish() {
+    if (state.shareBusy) return
+    const files = filesForExport()
+    const titleInput = $('test-hub-share-name')
+    const slugInput = $('test-hub-share-slug')
+    const confirmBtn = $('test-hub-share-confirm')
+    const title = String(titleInput?.value || projectTitle() || 'Test Hub preview').trim().slice(0, 120)
+    const slugErr = shareSlugError(slugInput?.value || '')
+    if (slugErr) {
+      setShareDialogError(slugErr)
+      slugInput?.focus()
+      return
+    }
+    const slug = normalizeShareSlug(slugInput?.value || '')
+    const ttlMinutes = Math.max(30, Math.min(43200, Number($('test-hub-share-ttl')?.value) || 30))
+    if (!api().testHubPublish) {
+      setShareDialogError('Restart Soumtok Desktop to enable Share link')
+      return
+    }
+    state.shareBusy = true
+    setShareDialogError('')
+    if (confirmBtn) {
+      confirmBtn.disabled = true
+      confirmBtn.textContent = 'Publishing…'
+    }
+    paintRunViteButton()
+    try {
+      const ws = ensureActiveWorkspace()
+      const res = await api().testHubPublish({
+        files,
+        title,
+        slug,
+        projectId: state.activeId || ws.id,
+        projectTitle: ws.title || projectTitle(),
+        ttlMinutes,
+      })
+      if (res?.url) {
+        await copyTextToClipboard(res.url)
+        state.activeLiveDeploy = {
+          id: res.id,
+          url: res.url,
+          slug: res.slug,
+          expires_at: res.expiresAt,
+          created_at: new Date().toISOString(),
+          expired: false,
+          live: true,
+        }
+        showShareDialogSuccess(res.url, res.ttlMinutes)
+        flashSaveHint('Published · link copied')
+        state.linksOpen = true
+        state.scoresOpen = false
+        state.archivesOpen = false
+        void paintDeployLinks()
+        paintRunViteButton()
+        void paintBenchmarkScores()
+        void paintArchivesList()
+      } else {
+        setShareDialogError(
+          res?.error ||
+            'Could not publish — start the API (npm run dev) and sign in, then try again.',
+        )
+      }
+    } catch {
+      setShareDialogError('Could not reach Soumtok — start npm run dev and sign in')
+    } finally {
+      state.shareBusy = false
+      if (confirmBtn) {
+        confirmBtn.disabled = false
+        confirmBtn.textContent = 'Publish'
+      }
+      paintRunViteButton()
+    }
+  }
+
   function paintRunViteButton() {
     const files = state.files || {}
     const vite = isViteProject(files)
-    const busy = state.sandboxBusy || state.busy
+    const busy = state.sandboxBusy || state.busy || state.shareBusy
     const label = state.sandboxBusy ? 'Building…' : 'Run Vite'
+    const canShare = Boolean(Object.keys(files).length && buildPreviewHtml(files))
+    const hasLiveLink = Boolean(state.activeLiveDeploy?.url && !state.activeLiveDeploy?.expired)
+    const shareLabel = state.shareBusy ? 'Publishing…' : hasLiveLink ? 'Manage' : 'Share link'
     for (const id of ['test-hub-run-vite', 'test-hub-preview-run-vite']) {
       const btn = $(id)
       if (!btn) continue
       btn.hidden = !vite
       btn.disabled = busy
       btn.textContent = label
+    }
+    for (const id of ['test-hub-share-link', 'test-hub-preview-share']) {
+      const btn = $(id)
+      if (!btn) continue
+      btn.hidden = !canShare
+      btn.disabled = busy
+      btn.textContent = shareLabel
+      if (hasLiveLink && state.activeLiveDeploy?.url) {
+        btn.title = state.activeLiveDeploy.url
+        btn.classList.add('is-live')
+      } else {
+        btn.title = 'Publish a live share link'
+        btn.classList.remove('is-live')
+      }
     }
     const type = $('test-hub-project-type')
     if (type) {
@@ -670,11 +1022,111 @@ Prefer rewriting the full updated file contents for each changed path so the liv
     }
     const meta = $('test-hub-preview-meta')
     const mode = $('test-hub-preview-mode')
+    const liveLinkWrap = $('test-hub-preview-live-link')
+    const liveUrlEl = $('test-hub-preview-live-url')
+    const liveCopyBtn = $('test-hub-preview-live-copy')
     if (meta && mode) {
       const hasPreview = Boolean(buildPreviewHtml(files))
       meta.hidden = !hasPreview && !vite
       mode.textContent = vite ? 'Vite project — run npm build to verify' : 'Static preview — HTML/CSS/JS inlined'
+      const liveUrl = hasLiveLink ? String(state.activeLiveDeploy?.url || '').trim() : ''
+      meta.classList.toggle('is-live-bar', Boolean(liveUrl))
+      if (liveLinkWrap && liveUrlEl) {
+        if (liveUrl) {
+          liveLinkWrap.removeAttribute('hidden')
+          liveUrlEl.textContent = liveUrl
+          liveUrlEl.href = liveUrl
+          liveUrlEl.title = liveUrl
+        } else {
+          liveLinkWrap.setAttribute('hidden', '')
+          liveUrlEl.textContent = ''
+          liveUrlEl.removeAttribute('href')
+        }
+      }
+      if (liveCopyBtn && liveCopyBtn.textContent === 'Copied' && !liveUrl) {
+        liveCopyBtn.textContent = 'Copy'
+      }
     }
+  }
+
+  function deployStatusLabel(row) {
+    if (row?.expired) return 'Expired'
+    if (row?.live) return 'Live'
+    return 'Saved'
+  }
+
+  async function paintDeployLinks() {
+    const list = $('test-hub-links-list')
+    const panel = $('test-hub-links')
+    const head = $('test-hub-links-head')
+    if (!list || !panel) return
+    panel.hidden = !state.linksOpen
+    if (!state.linksOpen) return
+    const ws = ensureActiveWorkspace()
+    const projectId = state.activeId || ws.id
+    const projectLabel = ws.title || projectTitle() || 'this project'
+    if (head) head.textContent = `Share links · ${projectLabel}`
+    list.innerHTML = '<p class="test-hub-archives-empty">Loading share links…</p>'
+    let rows = []
+    try {
+      rows = (await api().testHubListDeploys?.({ limit: 30, projectId }))?.rows || []
+    } catch {
+      rows = []
+    }
+    state.activeLiveDeploy = rows.find((row) => !row.expired) || null
+    paintRunViteButton()
+    if (!rows.length) {
+      list.innerHTML =
+        '<p class="test-hub-archives-empty">No links for this project yet. Publish from Share link — they stay with this project after refresh.</p>'
+      return
+    }
+    list.innerHTML = rows
+      .map((row) => {
+        const status = deployStatusLabel(row)
+        const statusClass =
+          status === 'Live' ? 'is-live' : status === 'Expired' ? 'is-expired' : 'is-saved'
+        return `<div class="test-hub-link-item" data-id="${escapeAttr(row.id)}">
+          <div class="test-hub-link-copy">
+            <span class="test-hub-archive-title">${escapeHtml(row.title || row.slug || 'Preview')}</span>
+            <span class="test-hub-link-status ${statusClass}">${status}</span>
+            <span class="test-hub-link-url">${escapeHtml(row.url || '')}</span>
+            <span class="test-hub-archive-meta">${row.file_count || 0} files · ${new Date(row.created_at).toLocaleString()}${row.expired ? '' : ` · expires ${new Date(row.expires_at).toLocaleString()}`}</span>
+          </div>
+          <div class="test-hub-link-actions">
+            <button type="button" class="test-hub-link-btn" data-copy="${escapeAttr(row.url || '')}">Copy</button>
+            <button type="button" class="test-hub-link-btn danger" data-delete="${escapeAttr(row.id)}">Delete</button>
+          </div>
+        </div>`
+      })
+      .join('')
+    list.querySelectorAll('[data-copy]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const url = btn.getAttribute('data-copy') || ''
+        if (!url) return
+        const prev = btn.textContent || 'Copy'
+        if (await copyTextToClipboard(url)) {
+          flashCopyButton(btn, prev)
+          flashSaveHint('Copied')
+        } else {
+          flashSaveHint(url)
+        }
+      })
+    })
+    list.querySelectorAll('[data-delete]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const id = btn.getAttribute('data-delete')
+        if (!id || !window.confirm('Delete this share link from your history?')) return
+        btn.disabled = true
+        const res = await api().testHubDeleteDeploy?.({ id })
+        if (res?.error) {
+          flashSaveHint(res.error)
+          btn.disabled = false
+          return
+        }
+        flashSaveHint('Link deleted')
+        void paintDeployLinks()
+      })
+    })
   }
 
   async function paintBenchmarkScores() {
@@ -945,6 +1397,7 @@ Prefer rewriting the full updated file contents for each changed path so the liv
         )
         const active = state.workspaces.find((w) => w.id === saved.activeId) || state.workspaces[0]
         applyWorkspace(active)
+        if (state.linksOpen) void paintDeployLinks()
         return
       }
       const ws = emptyWorkspace({
@@ -1049,6 +1502,8 @@ Prefer rewriting the full updated file contents for each changed path so the liv
     paintFeed()
     paintOutput()
     paint()
+    if (state.linksOpen) void paintDeployLinks()
+    void refreshActiveLiveDeploy()
     schedulePersist()
   }
 
@@ -1071,6 +1526,8 @@ Prefer rewriting the full updated file contents for each changed path so the liv
     paintFeed()
     paintOutput()
     paint()
+    if (state.linksOpen) void paintDeployLinks()
+    void refreshActiveLiveDeploy()
     schedulePersist()
   }
 
@@ -1682,8 +2139,10 @@ Prefer rewriting the full updated file contents for each changed path so the liv
     $('test-hub-show-archives')?.addEventListener('click', () => {
       state.archivesOpen = !state.archivesOpen
       state.scoresOpen = false
+      state.linksOpen = false
       void paintArchivesList()
       void paintBenchmarkScores()
+      void paintDeployLinks()
     })
 
     $('test-hub-save-archive')?.addEventListener('click', async () => {
@@ -1715,11 +2174,77 @@ Prefer rewriting the full updated file contents for each changed path so the liv
 
     $('test-hub-run-vite')?.addEventListener('click', () => void runViteSandbox())
     $('test-hub-preview-run-vite')?.addEventListener('click', () => void runViteSandbox())
+    $('test-hub-share-link')?.addEventListener('click', () => void handleShareLinkClick())
+    $('test-hub-preview-share')?.addEventListener('click', () => void handleShareLinkClick())
+    $('test-hub-preview-live-copy')?.addEventListener('click', async () => {
+      const url =
+        String(state.activeLiveDeploy?.url || '').trim() ||
+        String($('test-hub-preview-live-url')?.textContent || '').trim()
+      if (!url) return
+      const btn = $('test-hub-preview-live-copy')
+      flashCopyButton(btn, 'Copy')
+      const ok = await copyTextToClipboard(url)
+      if (ok) flashSaveHint('Copied')
+      else if (btn) btn.textContent = 'Copy'
+    })
+    $('test-hub-share-cancel')?.addEventListener('click', () => closeShareDialog())
+    $('test-hub-share-done')?.addEventListener('click', () => closeShareDialog())
+    $('test-hub-share-new-link')?.addEventListener('click', () => {
+      setShareDialogError('')
+      void openSharePublishForm()
+    })
+    $('test-hub-share-copy-again')?.addEventListener('click', async () => {
+      const url =
+        lastPublishedShareUrl || String($('test-hub-share-success-url')?.textContent || '').trim()
+      if (!url) return
+      const btn = $('test-hub-share-copy-again')
+      flashCopyButton(btn, 'Copy link')
+      const ok = await copyTextToClipboard(url)
+      if (ok) flashSaveHint('Copied')
+      else {
+        btn.textContent = 'Copy link'
+        flashSaveHint(url)
+      }
+    })
+    $('test-hub-share-confirm')?.addEventListener('click', () => void confirmSharePublish())
+    $('test-hub-share-name')?.addEventListener('input', () => {
+      const slugInput = $('test-hub-share-slug')
+      if (slugInput && !slugInput.dataset.touched) {
+        slugInput.value = suggestShareSlug($('test-hub-share-name')?.value || '')
+      }
+      paintShareUrlPreview()
+    })
+    $('test-hub-share-slug')?.addEventListener('input', () => {
+      const slugInput = $('test-hub-share-slug')
+      if (slugInput) slugInput.dataset.touched = '1'
+      paintShareUrlPreview()
+    })
+    $('test-hub-share-dialog')?.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') closeShareDialog()
+      if (event.key === 'Enter') {
+        event.preventDefault()
+        void confirmSharePublish()
+      }
+    })
     $('test-hub-show-scores')?.addEventListener('click', () => {
       state.scoresOpen = !state.scoresOpen
       state.archivesOpen = false
+      state.linksOpen = false
       void paintBenchmarkScores()
       void paintArchivesList()
+      void paintDeployLinks()
+    })
+    $('test-hub-show-links')?.addEventListener('click', () => {
+      state.linksOpen = !state.linksOpen
+      state.scoresOpen = false
+      state.archivesOpen = false
+      void paintDeployLinks()
+      void paintBenchmarkScores()
+      void paintArchivesList()
+    })
+    $('test-hub-links-close')?.addEventListener('click', () => {
+      state.linksOpen = false
+      void paintDeployLinks()
     })
     $('test-hub-scores-close')?.addEventListener('click', () => {
       state.scoresOpen = false
@@ -1777,6 +2302,7 @@ Prefer rewriting the full updated file contents for each changed path so the liv
       paint()
       mountHubAvatar()
       setHubAvatarState(state.busy ? 'working' : 'idle')
+      void refreshActiveLiveDeploy()
       $('test-hub-input')?.focus()
     }
   }

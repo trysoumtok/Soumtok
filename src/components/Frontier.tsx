@@ -1,10 +1,12 @@
 import { AccentLink, BrandMark } from './ui'
 
 const models = [
-  'DeepSeek V4 Flash',
+  'DeepSeek V4.1 Flash',
   'Claude Opus 5',
-  'Grok 4.5',
+  'Grok 4.6',
   'Gemini 3.8 Flash',
+  'GPT-6 Astra',
+  'Codex',
   'Claude Sonnet 5',
 ]
 

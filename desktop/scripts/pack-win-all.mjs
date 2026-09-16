@@ -15,6 +15,14 @@ const version = pkg.version
 
 execSync('node scripts/generate-installer-assets.mjs', { cwd: desktopDir, stdio: 'inherit' })
 
+if (!process.env.CSC_LINK && !process.env.WIN_CSC_LINK) {
+  console.warn(
+    '\n[!] No code signing certificate (CSC_LINK / WIN_CSC_LINK).\n' +
+      '    Windows SmartScreen will warn until the installer is Authenticode-signed.\n' +
+      '    See desktop/docs/RELEASE.md for setup.\n',
+  )
+}
+
 if (process.platform === 'win32') {
   try {
     execSync('taskkill /IM Soumtok.exe /F', { stdio: 'ignore' })

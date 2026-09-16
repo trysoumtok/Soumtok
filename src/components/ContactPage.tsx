@@ -64,7 +64,7 @@ export function ContactPage() {
   }
 
   return (
-    <div className="theme-app min-h-svh bg-[#0b0b0a] text-white">
+    <div className="theme-app keep-dark min-h-svh bg-[#0b0b0a] text-white">
       <SiteHeader active="contact" />
       <main className="mx-auto w-full max-w-[1120px] px-5 pb-8 pt-16 md:px-10 md:pt-24">
         <div className="grid items-start gap-10 lg:grid-cols-2 lg:gap-16">

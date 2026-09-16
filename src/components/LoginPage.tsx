@@ -255,7 +255,7 @@ export function LoginPage({ mode, force2fa }: { mode: 'in' | 'up'; force2fa?: bo
   }
 
   return (
-    <div className="theme-app relative min-h-svh bg-[#0b0b0a] text-white">
+    <div className="theme-app keep-dark relative min-h-svh bg-[#0b0b0a] text-white">
       <header className="absolute left-4 top-4 z-10 md:left-8 md:top-7">
         <Logo href="/" size="md" />
       </header>

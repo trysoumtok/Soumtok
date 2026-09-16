@@ -1,15 +1,12 @@
 import type { Context, Hono } from 'hono'
 import { getCookie } from 'hono/cookie'
 import { randomUUID } from 'node:crypto'
+import { readSessionCookie } from '../shared/session.ts'
 import { pool } from './db.ts'
 import { env } from './env.ts'
 
 function sessionCookieToken(c: Context) {
-  return (
-    getCookie(c, '__Secure-better-auth.session_token') ||
-    getCookie(c, 'better-auth.session_token') ||
-    ''
-  )
+  return readSessionCookie((name) => getCookie(c, name))
 }
 
 type UserFn = (c: Context) => Promise<{ session?: { token?: string } } | null>
@@ -41,7 +38,6 @@ export function registerDesktopAuth(app: Hono, requireUser: UserFn) {
     const item = row.rows[0] as { session_token: string | null; expires_at: string } | undefined
     if (!item || new Date(item.expires_at).getTime() < Date.now()) return c.json({ status: 'expired' })
     if (!item.session_token) return c.json({ status: 'pending' })
-    await pool.query(`DELETE FROM desktop_login WHERE id = $1`, [id])
     return c.json({ status: 'ready', token: item.session_token })
   })
 

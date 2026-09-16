@@ -22,7 +22,7 @@ export function NotFoundPage() {
   const path = typeof window !== 'undefined' ? window.location.pathname : '/'
 
   return (
-    <div className="theme-app relative flex min-h-svh flex-col bg-[#0b0b0a] text-white">
+    <div className="theme-app keep-dark relative flex min-h-svh flex-col bg-[#0b0b0a] text-white">
       <header className="absolute left-6 top-6 z-20 md:left-8 md:top-7">
         <Logo href="/" size="md" />
       </header>

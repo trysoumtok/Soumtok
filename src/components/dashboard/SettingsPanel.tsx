@@ -15,6 +15,7 @@ import { notifyAvatar } from '../../lib/avatar'
 import { applyTheme, getThemePref, type ThemePref } from '../../lib/theme'
 import { ConfirmCard, DeleteAccountCard } from '../ConfirmCard'
 import { SecuritySettings } from './SecuritySettings'
+import { TestHubShareLinksPanel } from './TestHubShareLinksPanel'
 
 function timeAgo(value: string) {
   const mins = Math.max(1, Math.round((Date.now() - new Date(value).getTime()) / 60000))
@@ -500,6 +501,10 @@ export function SettingsPanel({
           </Card>
         </section>
       </div>
+
+      <section>
+        <TestHubShareLinksPanel />
+      </section>
 
       <section>
         <h2 className="mb-3 text-[13px] text-white/45">Active Sessions</h2>

@@ -1,11 +1,49 @@
-Soumtok Desktop IDE — License Agreement
+SOUMTOK DESKTOP - END USER LICENSE AGREEMENT
 
 Copyright (c) Soumtok. All rights reserved.
 
-By installing Soumtok you agree to the Terms of Service and Privacy Policy
-published at https://soumtok.com
+IMPORTANT - READ CAREFULLY
 
-Soumtok Desktop connects to Soumtok services for AI features, sign-in, and updates.
+This End User License Agreement ("Agreement") is a legal agreement between you
+and Soumtok for the Soumtok Desktop application ("Software").
+
+BY INSTALLING OR USING THE SOFTWARE, YOU AGREE TO THIS AGREEMENT. IF YOU DO NOT
+AGREE, DO NOT INSTALL THE SOFTWARE.
+
+1. LICENSE
+Soumtok grants you a limited, non-exclusive, non-transferable license to install
+and use one copy of the Software on devices you own or control, for your personal
+or internal business use.
+
+2. ACCOUNT AND SERVICES
+The Software connects to Soumtok services for sign-in, AI features, updates,
+and billing. Use of those services is governed by our Terms of Service and
+Privacy Policy:
+  https://soumtok.com/terms
+  https://soumtok.com/privacy
+
+3. UPDATES
+Soumtok may deliver automatic updates. Updates are subject to this Agreement
+unless accompanied by separate terms.
+
+4. THIRD-PARTY COMPONENTS
+The Software may include third-party extensions and open-source components.
 Third-party extensions are subject to their publishers' terms.
 
-For support: https://soumtok.com
+5. RESTRICTIONS
+You may not reverse engineer, redistribute, or sublicense the Software except
+where permitted by law.
+
+6. SUPPORT
+  https://soumtok.com/help
+  info@soumtok.com
+
+7. DISCLAIMER
+THE SOFTWARE IS PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND. SOUMTOK DISCLAIMS
+ALL WARRANTIES TO THE MAXIMUM EXTENT PERMITTED BY LAW.
+
+8. LIMITATION OF LIABILITY
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, SOUMTOK SHALL NOT BE LIABLE FOR ANY
+INDIRECT, INCIDENTAL, SPECIAL, OR CONSEQUENTIAL DAMAGES.
+
+For the full Terms of Service visit https://soumtok.com

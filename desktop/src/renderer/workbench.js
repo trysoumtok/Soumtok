@@ -146,6 +146,9 @@ const state = {
   settingsModelSearch: '',
   settingsModelsExpanded: false,
   settingsConnectorSearch: '',
+  settingsDeployLinks: [],
+  settingsDeployLinksLoading: false,
+  settingsDeployLinksError: '',
   connectorsMarket: null,
   connectorsMine: [],
   connectorsStatus: '',
@@ -294,6 +297,11 @@ function settingsNavIcon(id) {
     connectors: `<svg class="settings-nav-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
       <path d="M10 13a5 5 0 0 0 7.54.54l1.42-1.42a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
       <path d="M14 11a5 5 0 0 0-7.54-.54L5.04 11.9a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+    </svg>`,
+    'test-hub': `<svg class="settings-nav-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="M10 13a5 5 0 0 0 7.54.54l1.42-1.42a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+      <path d="M14 11a5 5 0 0 0-7.54-.54L5.04 11.9a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+      <circle cx="7" cy="7" r="2"/>
     </svg>`,
   }
   return icons[id] || icons.general
@@ -4638,6 +4646,7 @@ function openSettings() {
   void loadAppInfo().then(() => renderSettingsScreen())
   renderSettingsScreen()
   layoutEditor()
+  if (state.settingsTab === 'test-hub') void loadSettingsDeployLinks()
 }
 
 const SETTINGS_NAV = [
@@ -4646,6 +4655,7 @@ const SETTINGS_NAV = [
   { id: 'agents', label: 'Agents' },
   { id: 'keys', label: 'API Keys' },
   { id: 'connectors', label: 'Connectors', aliases: ['mcp', 'marketplace', 'higgsfield', 'plugin'] },
+  { id: 'test-hub', label: 'Test Hub', aliases: ['share', 'links', 'publish', 'deploy'] },
   { id: 'plan', label: 'Plan & Usage' },
 ]
 
@@ -4662,6 +4672,76 @@ function settingsNavHtml() {
         `<button type="button" class="settings-nav-item ${item.id === state.settingsTab ? 'on' : ''}" data-tab="${item.id}">${settingsNavIcon(item.id)}<span>${escapeHtml(item.label)}</span></button>`,
     )
     .join('')
+}
+
+function deployStatusLabel(row) {
+  if (row?.expired) return 'Expired'
+  if (row?.live) return 'Live'
+  return 'Saved'
+}
+
+async function loadSettingsDeployLinks() {
+  state.settingsDeployLinksLoading = true
+  state.settingsDeployLinksError = ''
+  renderSettingsScreen()
+  try {
+    const res = (await api.testHubListDeploys?.({ limit: 30 })) || { rows: [] }
+    if (res.error) {
+      state.settingsDeployLinksError = res.error
+      state.settingsDeployLinks = []
+    } else {
+      state.settingsDeployLinks = res.rows || []
+    }
+  } catch {
+    state.settingsDeployLinksError = 'Could not load share links'
+    state.settingsDeployLinks = []
+  } finally {
+    state.settingsDeployLinksLoading = false
+    renderSettingsScreen()
+    bindSettingsScreen()
+  }
+}
+
+function settingsTestHubHtml() {
+  const rows = state.settingsDeployLinks || []
+  const loading = state.settingsDeployLinksLoading
+  const err = state.settingsDeployLinksError
+  let body = ''
+  if (loading) {
+    body = '<p class="settings-section-desc">Loading share links…</p>'
+  } else if (err) {
+    body = `<p class="settings-section-desc" style="color:#e06c75">${escapeHtml(err)}</p>`
+  } else if (!rows.length) {
+    body = '<p class="settings-section-desc">No share links yet. Publish from Test Hub — links stay here until you delete them.</p>'
+  } else {
+    body = `<div class="settings-card settings-share-links">${rows
+      .map((row) => {
+        const status = deployStatusLabel(row)
+        return `<div class="settings-share-link-row" data-deploy-id="${escapeAttr(row.id)}">
+          <div class="settings-share-link-meta">
+            <span class="settings-share-link-title">${escapeHtml(row.title || row.slug || 'Preview')} · ${escapeHtml(status)}</span>
+            <span class="settings-share-link-url">${escapeHtml(row.url || '')}</span>
+            <span class="settings-share-link-sub">${row.file_count || 0} files · ${escapeHtml(new Date(row.created_at).toLocaleString())}${row.expired ? '' : ` · expires ${escapeHtml(new Date(row.expires_at).toLocaleString())}`}</span>
+          </div>
+          <div class="settings-share-link-actions">
+            <button type="button" class="settings-row-btn" data-deploy-copy="${escapeAttr(row.url || '')}">Copy</button>
+            <button type="button" class="settings-row-btn" data-deploy-delete="${escapeAttr(row.id)}">Delete</button>
+          </div>
+        </div>`
+      })
+      .join('')}</div>`
+  }
+  return `<h1 class="settings-title">Test Hub</h1>
+    ${settingsSection(
+      'Share links',
+      `<p class="settings-section-desc">Published Test Hub previews. You pick how long each link lives (max 30 days). Expired links are removed automatically.</p>
+      <div class="settings-card settings-card-pad" style="padding:0; overflow:hidden;">
+        ${body}
+      </div>
+      <div class="settings-row-actions" style="margin-top:10px;">
+        <button type="button" class="settings-row-btn" id="settings-deploy-refresh" ${loading ? 'disabled' : ''}>Refresh</button>
+      </div>`,
+    )}`
 }
 
 function settingsGeneralHtml() {
@@ -5244,6 +5324,7 @@ function settingsMainHtml() {
   if (state.settingsTab === 'keys') return settingsKeysHtml()
   if (state.settingsTab === 'connectors') return settingsConnectorsHtml()
   if (state.settingsTab === 'plan') return settingsPlanHtml()
+  if (state.settingsTab === 'test-hub') return settingsTestHubHtml()
   return settingsGeneralHtml()
 }
 
@@ -5266,7 +5347,34 @@ function bindSettingsScreen() {
   screen.querySelectorAll('.settings-nav-item').forEach((btn) => {
     btn.onclick = () => {
       state.settingsTab = btn.dataset.tab
+      if (state.settingsTab === 'test-hub') void loadSettingsDeployLinks()
       renderSettingsScreen()
+    }
+  })
+  $('settings-deploy-refresh')?.addEventListener('click', () => void loadSettingsDeployLinks())
+  screen.querySelectorAll('[data-deploy-copy]').forEach((btn) => {
+    btn.onclick = async () => {
+      const url = btn.getAttribute('data-deploy-copy') || ''
+      if (!url) return
+      try {
+        await navigator.clipboard.writeText(url)
+      } catch {
+        window.prompt('Copy link', url)
+      }
+    }
+  })
+  screen.querySelectorAll('[data-deploy-delete]').forEach((btn) => {
+    btn.onclick = async () => {
+      const id = btn.getAttribute('data-deploy-delete')
+      if (!id || !window.confirm('Delete this share link from your history?')) return
+      btn.disabled = true
+      const res = await api.testHubDeleteDeploy?.({ id })
+      btn.disabled = false
+      if (res?.error) {
+        window.alert(res.error)
+        return
+      }
+      void loadSettingsDeployLinks()
     }
   })
   $('settings-search')?.addEventListener('input', (e) => {
@@ -12569,7 +12677,16 @@ async function tryPollLogin() {
     updateAuthContinueUi()
     mountAuthGateAvatar()
     const note = $('auth-note')
-    if (note) note.textContent = 'Sign-in timed out. Click Sign in again.'
+    if (note) {
+      note.textContent = 'Sign-in timed out. Click Sign in again.'
+    }
+    return false
+  }
+  if (data.pending) {
+    setAuthBootLoading(true, 'Finishing sign-in…')
+    const note = $('auth-note')
+    if (note) note.textContent = 'Almost there — click Continue in app or wait a moment.'
+    updateAuthContinueUi()
     return false
   }
   if (data.user) {

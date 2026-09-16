@@ -162,8 +162,8 @@ html[data-theme="light"] .theme-app [class*="171716"] {
   background-color: var(--app-recessed) !important;
 }
 
-html[data-theme="light"] .theme-app,
-html[data-theme="light"] .theme-app [class*="text-white"] {
+html[data-theme="light"] .theme-app:not(.keep-dark),
+html[data-theme="light"] .theme-app:not(.keep-dark) [class*="text-white"] {
   color: #0b0b0a !important;
 }
 
@@ -453,6 +453,12 @@ html[data-theme="light"] .brand-logo {
   opacity: 1;
 }
 
+html[data-surface="marketing"] .logo-mark,
+html[data-surface="marketing"] .brand-logo {
+  filter: none !important;
+  opacity: 1 !important;
+}
+
 html[data-theme="light"] .theme-app .window .logo-mark,
 html[data-theme="light"] .theme-app .keep-dark .logo-mark {
   filter: brightness(0) invert(1);
@@ -466,8 +472,8 @@ html[data-theme="light"] .thin-scroll::-webkit-scrollbar-thumb {
   background: rgba(23, 22, 20, 0.18);
 }
 
-html[data-theme="light"] .theme-app header,
-html[data-theme="light"] .theme-app main {
+html[data-theme="light"] .theme-app:not(.keep-dark) header,
+html[data-theme="light"] .theme-app:not(.keep-dark) main {
   background: var(--app-bg);
   color: var(--app-fg);
 }
@@ -490,9 +496,40 @@ html[data-theme="light"] .theme-app [class*="rounded-2xl"] {
   border-color: rgba(11, 11, 10, 0.16);
 }
 
-html[data-theme="light"] .theme-app h1,
-html[data-theme="light"] .theme-app h2 {
+html[data-theme="light"] .theme-app:not(.keep-dark) h1,
+html[data-theme="light"] .theme-app:not(.keep-dark) h2 {
   color: #0b0b0a !important;
+}
+
+/* Marketing / landing — always dark even when dashboard theme is light or system-light */
+html[data-theme="light"] .theme-app.keep-dark,
+html[data-surface="marketing"] body {
+  background: #0b0b0a !important;
+  color: #fff !important;
+  color-scheme: dark;
+}
+
+html[data-theme="light"] .theme-app.keep-dark {
+  background: #0b0b0a !important;
+  color: #fff !important;
+}
+
+html[data-theme="light"] .theme-app.keep-dark header,
+html[data-theme="light"] .theme-app.keep-dark main,
+html[data-theme="light"] .theme-app.keep-dark footer {
+  background: transparent !important;
+  color: inherit !important;
+}
+
+html[data-theme="light"] .theme-app.keep-dark h1,
+html[data-theme="light"] .theme-app.keep-dark h2,
+html[data-theme="light"] .theme-app.keep-dark h3 {
+  color: #fff !important;
+}
+
+html[data-theme="light"] .theme-app.keep-dark .brand-logo {
+  filter: none !important;
+  opacity: 1 !important;
 }
 
 body {

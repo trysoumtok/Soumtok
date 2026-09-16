@@ -12,6 +12,8 @@ import {
   hasGoogle,
   hasPayhero,
   hasPaypal,
+  hasMail,
+  hasResend,
   hasSmtp,
   hasTwilio,
   canonicalAuthHost,
@@ -126,7 +128,8 @@ app.get('/api/health', (c) =>
     github: hasGithub(),
     oauth: oauthRedirectUris(),
     storage: hasBunny(),
-    mail: hasSmtp(),
+    mail: hasMail(),
+    resend: hasResend(),
     sms: hasTwilio(),
     image: hasImageGen(),
     paypal: hasPaypal(),
@@ -523,9 +526,17 @@ app.post('/api/me/verify/email/send', async (c) => {
     await sendMail(session.user.email, mail.subject, mail.text, mail.html)
   } catch (error) {
     console.error('[verify/email/send]', error)
+    if (openAccessForBuilding()) {
+      console.warn(`[verify/email/send] openAccess fallback code for ${session.user.email}: ${code}`)
+      return c.json({
+        ok: true,
+        via: 'log',
+        message: 'Email server blocked on Railway — code logged on server until Resend is configured.',
+      })
+    }
     return c.json({ error: 'Could not send the email code right now. Try again in a minute.' }, 502)
   }
-  return c.json({ ok: true, via: hasSmtp() ? 'email' : 'log' })
+  return c.json({ ok: true, via: hasResend() ? 'resend' : hasSmtp() ? 'email' : 'log' })
 })
 
 app.post('/api/me/verify/email/confirm', async (c) => {

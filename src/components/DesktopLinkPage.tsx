@@ -7,18 +7,25 @@ export function DesktopLinkPage({ id }: { id: string }) {
   useEffect(() => {
     let cancelled = false
     async function run() {
-      try {
-        const res = await fetch('/api/desktop/finish', {
-          method: 'POST',
-          credentials: 'include',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id }),
-        })
-        if (!res.ok) throw new Error('Could not connect the app')
-        if (!cancelled) setState('done')
-      } catch {
-        if (!cancelled) setState('error')
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const res = await fetch('/api/desktop/finish', {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id }),
+          })
+          if (res.ok) {
+            if (!cancelled) setState('done')
+            return
+          }
+          if (res.status !== 401 && res.status !== 410) break
+        } catch {
+          /* retry */
+        }
+        await new Promise((r) => setTimeout(r, 400 * (attempt + 1)))
       }
+      if (!cancelled) setState('error')
     }
     void run()
     return () => {
@@ -27,7 +34,7 @@ export function DesktopLinkPage({ id }: { id: string }) {
   }, [id])
 
   return (
-    <div className="theme-app min-h-svh bg-[#0b0b0a] text-white">
+    <div className="theme-app keep-dark min-h-svh bg-[#0b0b0a] text-white">
       <header className="flex items-center gap-2 px-5 py-4">
         <BrandMark className="h-6 w-auto" />
         <span className="text-[15px] font-medium">Soumtok</span>

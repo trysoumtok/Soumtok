@@ -58,7 +58,7 @@ export function HelpPage() {
   }, [query])
 
   return (
-    <div className="theme-app min-h-svh bg-[#0b0b0a] text-white">
+    <div className="theme-app keep-dark min-h-svh bg-[#0b0b0a] text-white">
       <SiteHeader active="help" />
       <main className="mx-auto w-full max-w-[720px] px-5 pb-24 pt-16 md:pt-20">
         <h1 className="text-center text-[32px] font-medium tracking-[-0.045em] sm:text-[40px] md:text-[48px]">How can we help?</h1>

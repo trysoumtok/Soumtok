@@ -284,8 +284,20 @@
               <aside class="test-hub-output" aria-label="Output">
                 <div class="test-hub-pane on" id="test-hub-preview-pane" role="tabpanel">
                   <div class="test-hub-preview-meta" id="test-hub-preview-meta" hidden>
-                    <span id="test-hub-preview-mode" class="test-hub-preview-mode">Static preview</span>
-                    <button type="button" class="test-hub-preview-vite-btn" id="test-hub-preview-run-vite" hidden>npm build</button>
+                    <div class="test-hub-preview-meta-main">
+                      <span id="test-hub-preview-mode" class="test-hub-preview-mode">Static preview</span>
+                      <div class="test-hub-preview-live-link" id="test-hub-preview-live-link" hidden>
+                        <div class="test-hub-preview-live-field">
+                          <span class="test-hub-preview-live-badge"><span class="test-hub-preview-live-dot" aria-hidden="true"></span>Live</span>
+                          <a id="test-hub-preview-live-url" class="test-hub-preview-live-url" href="#" target="_blank" rel="noopener noreferrer"></a>
+                          <button type="button" class="test-hub-preview-live-copy" id="test-hub-preview-live-copy">Copy</button>
+                        </div>
+                      </div>
+                    </div>
+                    <div class="test-hub-preview-meta-actions">
+                      <button type="button" class="test-hub-preview-share-btn" id="test-hub-preview-share" hidden>Share link</button>
+                      <button type="button" class="test-hub-preview-vite-btn" id="test-hub-preview-run-vite" hidden>npm build</button>
+                    </div>
                   </div>
                   <div class="test-hub-preview-empty" id="test-hub-preview-empty">Build something — live preview appears here.</div>
                   <div class="test-hub-preview-stack" id="test-hub-preview-stack" hidden>
@@ -315,9 +327,11 @@
                       <div class="test-hub-code-toolbar-actions">
                         <span id="test-hub-project-type" class="test-hub-project-type" hidden></span>
                         <button type="button" class="test-hub-code-action" id="test-hub-show-scores" title="Model benchmark scores">Scores</button>
+                        <button type="button" class="test-hub-code-action" id="test-hub-show-links" title="Published share links">Links</button>
                         <button type="button" class="test-hub-code-action" id="test-hub-show-archives" title="Saved builds">Builds</button>
                         <button type="button" class="test-hub-code-action" id="test-hub-save-archive" title="Save build to archive">Save</button>
                         <button type="button" class="test-hub-code-action" id="test-hub-run-vite" title="npm install + build in a local sandbox" hidden>Run Vite</button>
+                        <button type="button" class="test-hub-code-action" id="test-hub-share-link" title="Publish a live share link" hidden>Share link</button>
                         <button type="button" class="test-hub-code-action" id="test-hub-export-folder" title="Save files to folder">Save to folder</button>
                         <button type="button" class="test-hub-code-action primary" id="test-hub-export-zip" title="Download zip">Download</button>
                       </div>
@@ -335,6 +349,13 @@
                         <button type="button" class="test-hub-sandbox-log-close" id="test-hub-sandbox-log-close" aria-label="Close">×</button>
                       </div>
                       <pre id="test-hub-sandbox-log-body" class="test-hub-sandbox-log-body"></pre>
+                    </div>
+                    <div class="test-hub-archives" id="test-hub-links" hidden>
+                      <div class="test-hub-archives-head">
+                        <span id="test-hub-links-head">Share links</span>
+                        <button type="button" class="test-hub-archives-close" id="test-hub-links-close" aria-label="Close">×</button>
+                      </div>
+                      <div id="test-hub-links-list" class="test-hub-archives-list"></div>
                     </div>
                     <div class="test-hub-archives" id="test-hub-archives" hidden>
                       <div class="test-hub-archives-head">
@@ -540,6 +561,50 @@
         <div class="prompt-row">
           <button type="button" class="ghost" id="project-switch-cancel">Stay here</button>
           <button type="button" class="primary" id="project-switch-confirm">Save session &amp; open</button>
+        </div>
+      </div>
+    </div>
+    <div id="test-hub-share-dialog" hidden role="dialog" aria-modal="true" aria-labelledby="test-hub-share-heading">
+      <div class="prompt-card test-hub-share-card">
+        <div id="test-hub-share-form">
+          <p id="test-hub-share-heading" class="test-hub-share-heading">Publish share link</p>
+          <p class="test-hub-share-lead">Pick a slug and how long it stays live (max 30 days — then it’s deleted automatically).</p>
+          <label class="test-hub-share-field">
+            <span>Title</span>
+            <input type="text" id="test-hub-share-name" maxlength="120" autocomplete="off" />
+          </label>
+          <label class="test-hub-share-field">
+            <span>Test slug</span>
+            <input type="text" id="test-hub-share-slug" maxlength="40" autocomplete="off" placeholder="my-demo" spellcheck="false" />
+          </label>
+          <label class="test-hub-share-field">
+            <span>How long live</span>
+            <select id="test-hub-share-ttl" class="test-hub-share-select">
+              <option value="30">30 minutes</option>
+              <option value="60">1 hour</option>
+              <option value="360">6 hours</option>
+              <option value="1440">24 hours</option>
+              <option value="10080">7 days</option>
+              <option value="43200">30 days (max)</option>
+            </select>
+          </label>
+          <p id="test-hub-share-url-preview" class="test-hub-share-url-preview"></p>
+          <p id="test-hub-share-error" class="test-hub-share-error" hidden></p>
+          <div class="prompt-row">
+            <button type="button" class="ghost" id="test-hub-share-cancel">Cancel</button>
+            <button type="button" class="primary" id="test-hub-share-confirm">Publish</button>
+          </div>
+        </div>
+        <div id="test-hub-share-success" hidden>
+          <p id="test-hub-share-success-title" class="test-hub-share-success-title">Published successfully</p>
+          <p id="test-hub-share-success-lead" class="test-hub-share-success-lead">Your link is live — copied to clipboard.</p>
+          <p id="test-hub-share-success-url" class="test-hub-share-success-url"></p>
+          <p class="test-hub-share-success-hint">Find it anytime under Links or Settings → Test Hub.</p>
+          <div class="prompt-row test-hub-share-success-actions">
+            <button type="button" class="ghost" id="test-hub-share-new-link" hidden>New link</button>
+            <button type="button" class="ghost" id="test-hub-share-copy-again">Copy link</button>
+            <button type="button" class="primary" id="test-hub-share-done">Done</button>
+          </div>
         </div>
       </div>
     </div>

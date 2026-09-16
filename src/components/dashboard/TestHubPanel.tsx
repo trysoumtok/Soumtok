@@ -11,6 +11,16 @@ import { resolveModelPricing } from '../../../shared/modelPricing'
 import { ModelBriefSheet } from './ModelBriefSheet'
 import { SoumtokGlobeAvatar } from '../SoumtokGlobeAvatar'
 import {
+  formatShareDuration,
+  normalizeTestHubSlug,
+  SHARE_TTL_DEFAULT_MINUTES,
+  SHARE_TTL_OPTIONS,
+  suggestTestHubSlug,
+  testHubSharePath,
+  testHubSlugError,
+} from '../../../shared/testHubDeploy'
+import { TestHubShareLinksPanel } from './TestHubShareLinksPanel'
+import {
   buildPreviewHtml,
   buildTestHubApiMessages,
   extractBuildArtifacts,
@@ -200,6 +210,25 @@ export function TestHubPanel() {
   const [archivesOpen, setArchivesOpen] = useState(false)
   const [archives, setArchives] = useState<{ id: string; title: string; updatedAt: string; fileCount: number }[]>([])
   const [status, setStatus] = useState('')
+  const [shareBusy, setShareBusy] = useState(false)
+  const [shareOpen, setShareOpen] = useState(false)
+  const [shareTitle, setShareTitle] = useState('')
+  const [shareSlug, setShareSlug] = useState('')
+  const [shareSlugTouched, setShareSlugTouched] = useState(false)
+  const [shareError, setShareError] = useState('')
+  const [sharePublishedUrl, setSharePublishedUrl] = useState('')
+  const [sharePublishedTtl, setSharePublishedTtl] = useState(SHARE_TTL_DEFAULT_MINUTES)
+  const [shareTtlMinutes, setShareTtlMinutes] = useState(SHARE_TTL_DEFAULT_MINUTES)
+  const [shareCopyLabel, setShareCopyLabel] = useState('Copy link')
+  const [linksOpen, setLinksOpen] = useState(false)
+  const [linksRefreshKey, setLinksRefreshKey] = useState(0)
+  const [activeLiveDeploy, setActiveLiveDeploy] = useState<{
+    url: string
+    expires_at: string
+    created_at?: string
+    expired?: boolean
+  } | null>(null)
+  const [shareExisting, setShareExisting] = useState(false)
   const [briefModel, setBriefModel] = useState<CodingModel | null>(null)
   const [docs, setDocs] = useState<{ id: string; title: string }[]>([])
   const [docsOpen, setDocsOpen] = useState(false)
@@ -401,6 +430,111 @@ export function TestHubPanel() {
       setBusy(false)
     }
   }
+
+  const canShare = Boolean(previewHtml && artifactPaths.length)
+  const hasLiveLink = Boolean(activeLiveDeploy?.url && !activeLiveDeploy?.expired)
+
+  useEffect(() => {
+    let cancelled = false
+    void fetch(`/api/test-hub/deploys?limit=5&project=${encodeURIComponent(activeId)}`, { credentials: 'include' })
+      .then((r) => r.json())
+      .then((data: { rows?: typeof activeLiveDeploy[] }) => {
+        if (cancelled) return
+        setActiveLiveDeploy((data.rows || []).find((row) => row && !row.expired) || null)
+      })
+      .catch(() => {
+        if (!cancelled) setActiveLiveDeploy(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [activeId, linksRefreshKey])
+
+  const openSharePublishForm = useCallback(() => {
+    if (!canShare) return
+    const title = messages.find((m) => m.role === 'user')?.content.trim().slice(0, 120) || 'Test Hub preview'
+    setShareTitle(title)
+    setShareSlug(suggestTestHubSlug(title))
+    setShareSlugTouched(false)
+    setShareError('')
+    setSharePublishedUrl('')
+    setShareExisting(false)
+    setShareCopyLabel('Copy link')
+    setShareTtlMinutes(SHARE_TTL_DEFAULT_MINUTES)
+    setShareOpen(true)
+  }, [canShare, messages])
+
+  const handleShareClick = useCallback(() => {
+    if (!canShare) return
+    if (activeLiveDeploy?.url) {
+      const expires = new Date(activeLiveDeploy.expires_at).getTime()
+      const created = activeLiveDeploy.created_at ? new Date(activeLiveDeploy.created_at).getTime() : Date.now()
+      setSharePublishedUrl(activeLiveDeploy.url)
+      setSharePublishedTtl(Math.max(30, Math.round((expires - created) / 60_000)))
+      setShareExisting(true)
+      setShareCopyLabel('Copy link')
+      setShareOpen(true)
+      return
+    }
+    openSharePublishForm()
+  }, [canShare, activeLiveDeploy, openSharePublishForm])
+
+  const publishShareLink = useCallback(async () => {
+    if (shareBusy || !canShare) return
+    const slugErr = testHubSlugError(shareSlug)
+    if (slugErr) {
+      setShareError(slugErr)
+      return
+    }
+    const slug = normalizeTestHubSlug(shareSlug)
+    const title = shareTitle.trim().slice(0, 120) || 'Test Hub preview'
+    setShareBusy(true)
+    setShareError('')
+    try {
+      const res = await fetch('/api/test-hub/publish', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          files: artifacts,
+          title,
+          slug,
+          projectId: activeId,
+          projectTitle: workspaceTitle(messages, workspaces.find((w) => w.id === activeId)?.title || 'Project'),
+          ttlMinutes: shareTtlMinutes,
+        }),
+      })
+      const data = (await res.json()) as { url?: string; error?: string; ttlMinutes?: number }
+      if (!res.ok) {
+        setShareError(data.error || `Publish failed (${res.status})`)
+        return
+      }
+      if (data.url) {
+        try {
+          await navigator.clipboard.writeText(data.url)
+        } catch {
+          /* success UI still shows the link */
+        }
+        setSharePublishedUrl(data.url)
+        setSharePublishedTtl(data.ttlMinutes || shareTtlMinutes)
+        setShareExisting(false)
+        setShareCopyLabel('Copy link')
+        setActiveLiveDeploy({
+          url: data.url,
+          expires_at: data.expiresAt || '',
+          created_at: new Date().toISOString(),
+          expired: false,
+        })
+        setStatus(`Published · link copied · live ${formatShareDuration(data.ttlMinutes || shareTtlMinutes)}`)
+        setLinksOpen(true)
+        setLinksRefreshKey((n) => n + 1)
+      }
+    } catch {
+      setShareError('Could not publish share link')
+    } finally {
+      setShareBusy(false)
+    }
+  }, [shareBusy, canShare, artifacts, shareSlug, shareTitle, shareTtlMinutes, activeId, messages, workspaces])
 
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-[#0e0e0d]">
@@ -741,7 +875,36 @@ export function TestHubPanel() {
             </OutTab>
           </div>
           {outputTab === 'preview' ? (
-            <div className="relative min-h-0 flex-1 bg-white">
+            <div className="relative flex min-h-0 flex-1 flex-col bg-white">
+              {canShare ? (
+                <div className="shrink-0 border-b border-black/10 bg-[#eef0f3] px-3 py-2">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0 flex-1">
+                      <p className="text-[10.5px] text-black/45">
+                        {hasLiveLink ? 'Static preview · share link is live' : 'Live preview · publish a share link'}
+                      </p>
+                      {hasLiveLink && activeLiveDeploy?.url ? (
+                        <PreviewLiveLinkBar url={activeLiveDeploy.url} onCopied={() => setStatus('Copied')} />
+                      ) : null}
+                    </div>
+                    <button
+                      type="button"
+                      disabled={shareBusy}
+                      title={hasLiveLink ? activeLiveDeploy?.url : 'Publish a live share link'}
+                      className={`shrink-0 self-end rounded-md border px-3 py-1.5 text-[10.5px] font-medium disabled:opacity-45 ${
+                        hasLiveLink ? 'mt-5' : ''
+                      } ${
+                        hasLiveLink
+                          ? 'border-black/12 bg-white text-black/70 hover:bg-black/[0.03]'
+                          : 'border-[#007acc]/30 bg-[#007acc]/10 text-[#007acc] hover:bg-[#007acc]/15'
+                      }`}
+                      onClick={handleShareClick}
+                    >
+                      {shareBusy ? 'Publishing…' : hasLiveLink ? 'Manage' : 'Share link'}
+                    </button>
+                  </div>
+                </div>
+              ) : null}
               {!previewHtml ? (
                 <p className="absolute inset-0 flex items-center justify-center bg-[#0c0c0b] px-6 text-center text-[13px] text-white/35">
                   Build something — live preview appears here as the model replies.
@@ -751,7 +914,7 @@ export function TestHubPanel() {
                   title="Test Hub preview"
                   sandbox="allow-scripts allow-same-origin"
                   srcDoc={previewHtml}
-                  className="absolute inset-0 h-full w-full border-0 bg-white"
+                  className="min-h-0 flex-1 w-full border-0 bg-white"
                 />
               )}
             </div>
@@ -767,7 +930,10 @@ export function TestHubPanel() {
               status={status}
               archivesOpen={archivesOpen}
               archives={archives}
-              onToggleArchives={() => setArchivesOpen((o) => !o)}
+              onToggleArchives={() => {
+                setArchivesOpen((o) => !o)
+                setLinksOpen(false)
+              }}
               onCloseArchives={() => setArchivesOpen(false)}
               onSaveArchive={() => {
                 const title =
@@ -815,6 +981,22 @@ export function TestHubPanel() {
                 if (res.ok) setStatus(`Saved ${res.count} file${res.count === 1 ? '' : 's'} to folder`)
                 else if (res.error) setStatus(res.error)
               }}
+              onShareLink={handleShareClick}
+              shareLinkLabel={shareBusy ? 'Publishing…' : hasLiveLink ? 'Link live' : 'Share link'}
+              shareBusy={shareBusy}
+              canShare={canShare}
+              linksOpen={linksOpen}
+              linksRefreshKey={linksRefreshKey}
+              onToggleLinks={() => {
+                setLinksOpen((open) => {
+                  const next = !open
+                  if (next) setArchivesOpen(false)
+                  return next
+                })
+              }}
+              projectId={activeId}
+              projectTitle={workspaceTitle(messages, workspaces.find((w) => w.id === activeId)?.title || 'Project')}
+              onCloseLinks={() => setLinksOpen(false)}
               onDownloadFiles={() => {
                 for (const path of artifactPaths) {
                   downloadBlob(path.replace(/\//g, '-'), new Blob([artifacts[path]], { type: 'text/plain' }))
@@ -825,6 +1007,141 @@ export function TestHubPanel() {
           )}
         </aside>
       </div>
+      {shareOpen ? (
+        <div
+          className="fixed inset-0 z-50 grid place-items-center bg-black/55 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="test-hub-share-title"
+        >
+          <div className="w-full max-w-md rounded-lg border border-white/10 bg-[#252526] p-4 text-white shadow-xl">
+            {sharePublishedUrl ? (
+              <>
+                <h2 id="test-hub-share-title" className="text-[15px] font-semibold text-emerald-400">
+                  {shareExisting ? 'Link is live' : 'Published successfully'}
+                </h2>
+                <p className="mt-1 text-[12px] text-white/70">
+                  {shareExisting && activeLiveDeploy?.expires_at
+                    ? `Your link is still live — expires ${new Date(activeLiveDeploy.expires_at).toLocaleString()}.`
+                    : `Your link is live for ${formatShareDuration(sharePublishedTtl)} — copied to clipboard.`}
+                </p>
+                <p className="mt-3 break-all rounded-md border border-[#007acc]/25 bg-[#007acc]/10 px-3 py-2 font-mono text-[12px] text-[#5b8ef5]">
+                  {sharePublishedUrl}
+                </p>
+                <p className="mt-2 text-[11px] text-white/40">It also appears in Links below and in Settings → Test Hub.</p>
+                <div className="mt-4 flex flex-wrap justify-end gap-2">
+                  {shareExisting ? (
+                    <button
+                      type="button"
+                      className="rounded-md px-3 py-1.5 text-[12px] text-white/60 hover:text-white/85"
+                      onClick={() => openSharePublishForm()}
+                    >
+                      New link
+                    </button>
+                  ) : null}
+                  <button
+                    type="button"
+                    className="rounded-md px-3 py-1.5 text-[12px] text-white/60 hover:text-white/85"
+                    onClick={() => {
+                      void navigator.clipboard.writeText(sharePublishedUrl).then(
+                        () => {
+                          setShareCopyLabel('Copied')
+                          setStatus('Copied')
+                          window.setTimeout(() => setShareCopyLabel('Copy link'), 2000)
+                        },
+                        () => setStatus(sharePublishedUrl),
+                      )
+                    }}
+                  >
+                    {shareCopyLabel}
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded-md bg-[#007acc] px-3 py-1.5 text-[12px] font-semibold text-white"
+                    onClick={() => {
+                      setShareOpen(false)
+                      setSharePublishedUrl('')
+                      setShareExisting(false)
+                    }}
+                  >
+                    Done
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <h2 id="test-hub-share-title" className="text-[14px] font-semibold text-white/95">
+                  Publish share link
+                </h2>
+                <p className="mt-1 text-[12px] text-white/45">Pick a slug and duration (max 30 days — then auto-deleted).</p>
+                <label className="mt-4 block text-[11px] text-white/50">
+                  Title
+                  <input
+                    value={shareTitle}
+                    onChange={(e) => {
+                      const next = e.target.value
+                      setShareTitle(next)
+                      if (!shareSlugTouched) setShareSlug(suggestTestHubSlug(next))
+                    }}
+                    className="mt-1 w-full rounded-md border border-white/10 bg-[#1e1e1e] px-2.5 py-2 text-[13px] text-white/90"
+                  />
+                </label>
+                <label className="mt-3 block text-[11px] text-white/50">
+                  Test slug
+                  <input
+                    value={shareSlug}
+                    onChange={(e) => {
+                      setShareSlugTouched(true)
+                      setShareSlug(e.target.value)
+                    }}
+                    className="mt-1 w-full rounded-md border border-white/10 bg-[#1e1e1e] px-2.5 py-2 font-mono text-[13px] text-white/90"
+                    placeholder="my-demo"
+                    spellCheck={false}
+                  />
+                </label>
+                <p className="mt-3 break-all font-mono text-[11px] text-[#5b8ef5]">
+                  {typeof window !== 'undefined'
+                    ? `${window.location.origin}${testHubSharePath(normalizeTestHubSlug(shareSlug) || 'your-slug')}`
+                    : ''}
+                </p>
+                <label className="mt-3 block text-[11px] text-white/50">
+                  How long live
+                  <select
+                    value={shareTtlMinutes}
+                    onChange={(e) => setShareTtlMinutes(Number(e.target.value))}
+                    className="mt-1 w-full rounded-md border border-white/10 bg-[#1e1e1e] px-2.5 py-2 text-[13px] text-white/90"
+                  >
+                    {SHARE_TTL_OPTIONS.map((opt) => (
+                      <option key={opt.minutes} value={opt.minutes}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                {shareError ? <p className="mt-2 text-[12px] text-[#e06c75]">{shareError}</p> : null}
+                <div className="mt-4 flex justify-end gap-2">
+                  <button
+                    type="button"
+                    className="rounded-md px-3 py-1.5 text-[12px] text-white/60 hover:text-white/85"
+                    onClick={() => setShareOpen(false)}
+                    disabled={shareBusy}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded-md bg-[#007acc] px-3 py-1.5 text-[12px] font-semibold text-white disabled:opacity-45"
+                    onClick={() => void publishShareLink()}
+                    disabled={shareBusy}
+                  >
+                    {shareBusy ? 'Publishing…' : 'Publish'}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      ) : null}
 
       <input ref={fileRef} type="file" multiple className="hidden" onChange={(e) => void attachFiles([...(e.target.files || [])])} />
       <input
@@ -855,6 +1172,16 @@ function CodeWorkspace({
   onDownload,
   onSaveToFolder,
   onDownloadFiles,
+  onShareLink,
+  shareLinkLabel,
+  shareBusy,
+  canShare,
+  linksOpen,
+  linksRefreshKey,
+  onToggleLinks,
+  onCloseLinks,
+  projectId,
+  projectTitle,
 }: {
   paths: string[]
   files: Record<string, string>
@@ -871,6 +1198,16 @@ function CodeWorkspace({
   onDownload: () => void
   onSaveToFolder: () => void
   onDownloadFiles: () => void
+  onShareLink: () => void
+  shareLinkLabel: string
+  shareBusy: boolean
+  canShare: boolean
+  linksOpen: boolean
+  linksRefreshKey: number
+  onToggleLinks: () => void
+  onCloseLinks: () => void
+  projectId: string
+  projectTitle: string
 }) {
   if (!paths.length) {
     return (
@@ -892,15 +1229,30 @@ function CodeWorkspace({
           </span>
         </div>
         <div className="flex flex-wrap gap-1.5">
+          {canShare ? (
+            <CodeAction primary disabled={shareBusy} onClick={onShareLink}>
+              {shareLinkLabel}
+            </CodeAction>
+          ) : null}
+          <CodeAction onClick={onToggleLinks}>Links</CodeAction>
           <CodeAction onClick={onToggleArchives}>Builds</CodeAction>
           <CodeAction onClick={onSaveArchive}>Save</CodeAction>
           <CodeAction onClick={onSaveToFolder}>Save to folder</CodeAction>
           <CodeAction onClick={onDownloadFiles}>Download files</CodeAction>
-          <CodeAction primary onClick={onDownload}>
-            Download
-          </CodeAction>
+          <CodeAction onClick={onDownload}>Download</CodeAction>
         </div>
       </div>
+      {linksOpen && (
+        <div className="shrink-0 border-b border-[#333] bg-[#1a1a18] px-3 py-2">
+          <div className="mb-2 flex items-center justify-between text-[11px] text-white/45">
+            <span>Share links · {projectTitle}</span>
+            <button type="button" className="text-white/50 hover:text-white/80" onClick={onCloseLinks}>
+              ×
+            </button>
+          </div>
+          <TestHubShareLinksPanel compact refreshKey={linksRefreshKey} projectId={projectId} projectTitle={projectTitle} />
+        </div>
+      )}
       {archivesOpen && (
         <div className="shrink-0 border-b border-[#333] bg-[#1a1a18]">
           <div className="flex items-center justify-between px-3 py-1.5 text-[11px] text-white/45">
@@ -1333,6 +1685,43 @@ function parseCodeRows(body: string) {
     for (const line of lines) rows.push({ type: 'add', text: line })
   }
   return { rows, added, removed }
+}
+
+function PreviewLiveLinkBar({ url, onCopied }: { url: string; onCopied?: () => void }) {
+  const [copyLabel, setCopyLabel] = useState('Copy')
+  return (
+    <div className="mt-1.5 flex min-w-0 items-stretch overflow-hidden rounded-md border border-black/10 bg-white shadow-[inset_0_1px_0_rgba(255,255,255,0.8)]">
+      <span className="inline-flex shrink-0 items-center gap-1.5 border-r border-black/8 bg-[#f7f8fa] px-2.5 text-[10px] font-medium text-black/50">
+        <span className="h-1.5 w-1.5 rounded-full bg-[#3fb950] shadow-[0_0_0_2px_rgba(63,185,80,0.15)]" aria-hidden="true" />
+        Live
+      </span>
+      <a
+        href={url}
+        target="_blank"
+        rel="noopener noreferrer"
+        title={url}
+        className="min-w-0 flex-1 truncate px-2.5 py-1.5 font-mono text-[11px] leading-none text-[#0066b8] hover:text-[#004f8f]"
+      >
+        {url}
+      </a>
+      <button
+        type="button"
+        className="shrink-0 border-l border-black/8 bg-[#f7f8fa] px-3 py-1.5 text-[10.5px] font-medium text-black/65 hover:bg-[#eef0f3] hover:text-black/85"
+        onClick={() => {
+          void navigator.clipboard.writeText(url).then(
+            () => {
+              setCopyLabel('Copied')
+              onCopied?.()
+              window.setTimeout(() => setCopyLabel('Copy'), 2000)
+            },
+            () => onCopied?.(),
+          )
+        }}
+      >
+        {copyLabel}
+      </button>
+    </div>
+  )
 }
 
 function Bubble({

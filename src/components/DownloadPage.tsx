@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   detectDesktopPlatform,
   desktopDownloadUrl,
@@ -59,27 +59,100 @@ function firstAvailable(items: DesktopDownloadItem[]) {
   return items.find((item) => item.available) ?? items[0] ?? null
 }
 
+type DownloadNotice = {
+  label: string
+  filename: string
+  phase: 'starting' | 'retry'
+}
+
+function triggerFileDownload(filename: string) {
+  const url = desktopDownloadUrl(filename)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = filename
+  anchor.rel = 'noopener'
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+}
+
+const downloadHover =
+  'transition-all duration-200 hover:scale-[1.04] hover:shadow-[0_10px_36px_rgba(255,255,255,0.14)] active:scale-[0.98]'
+
+function DownloadNoticeBanner({
+  notice,
+  onRetry,
+  onDismiss,
+}: {
+  notice: DownloadNotice
+  onRetry: () => void
+  onDismiss: () => void
+}) {
+  return (
+    <div
+      role="status"
+      className="fixed bottom-6 left-1/2 z-50 w-[min(92vw,440px)] -translate-x-1/2 rounded-2xl border border-white/15 bg-[#161615] px-5 py-4 shadow-[0_20px_60px_rgba(0,0,0,0.55)]"
+    >
+      <div className="flex items-start gap-3">
+        <span
+          className={`mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-full ${
+            notice.phase === 'starting' ? 'bg-white/10 text-white' : 'bg-amber-400/15 text-amber-200'
+          }`}
+        >
+          {notice.phase === 'starting' ? (
+            <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/25 border-t-white" />
+          ) : (
+            <DownloadIcon />
+          )}
+        </span>
+        <div className="min-w-0 flex-1">
+          {notice.phase === 'starting' ? (
+            <>
+              <p className="text-[14px] font-medium text-white">Download starting…</p>
+              <p className="mt-1 text-[13px] leading-6 text-white/50">
+                {notice.label} should begin in a few seconds. Large installers can take a moment.
+              </p>
+            </>
+          ) : (
+            <>
+              <p className="text-[14px] font-medium text-white">Didn&apos;t start?</p>
+              <p className="mt-1 text-[13px] leading-6 text-white/50">
+                Try again —{' '}
+                <button type="button" onClick={onRetry} className="font-medium text-white underline hover:text-white/90">
+                  click here
+                </button>{' '}
+                to download {notice.label}.
+              </p>
+            </>
+          )}
+        </div>
+        <button
+          type="button"
+          onClick={onDismiss}
+          className="shrink-0 text-[18px] leading-none text-white/35 hover:text-white/70"
+          aria-label="Dismiss"
+        >
+          ×
+        </button>
+      </div>
+    </div>
+  )
+}
+
 function DownloadButton({
   item,
   disabled,
   compact,
+  pending,
+  onDownload,
 }: {
   item: DesktopDownloadItem | null
   disabled?: boolean
   compact?: boolean
+  pending?: boolean
+  onDownload: (item: DesktopDownloadItem) => void
 }) {
-  if (!item || disabled) {
-    return (
-      <span
-        className={`inline-flex items-center justify-center rounded-full border border-white/10 text-white/35 ${
-          compact ? 'px-5 py-2 text-[14px]' : 'px-6 py-3 text-[15px]'
-        }`}
-      >
-        Coming soon
-      </span>
-    )
-  }
-  if (!item.available) {
+  if (!item || disabled || !item.available) {
     return (
       <span
         className={`inline-flex items-center justify-center rounded-full border border-white/10 text-white/35 ${
@@ -91,16 +164,18 @@ function DownloadButton({
     )
   }
   return (
-    <a
-      href={desktopDownloadUrl(item.filename)}
-      download={item.filename}
-      className={`inline-flex items-center justify-center gap-2 rounded-full bg-white font-medium text-black no-underline transition hover:bg-[#f2f2f0] ${
-        compact ? 'px-5 py-2 text-[14px]' : 'px-6 py-3 text-[15px]'
-      }`}
+    <button
+      type="button"
+      onClick={() => onDownload(item)}
+      className={`group inline-flex items-center justify-center gap-2 rounded-full bg-white font-medium text-black ${downloadHover} ${
+        pending ? 'animate-pulse' : ''
+      } ${compact ? 'px-5 py-2 text-[14px]' : 'px-6 py-3 text-[15px]'}`}
     >
-      <DownloadIcon />
-      Download
-    </a>
+      <span className="transition-transform duration-200 group-hover:translate-y-0.5">
+        <DownloadIcon />
+      </span>
+      {pending ? 'Starting…' : 'Download'}
+    </button>
   )
 }
 
@@ -109,11 +184,15 @@ function PlatformSummaryRow({
   label,
   item,
   disabled,
+  pending,
+  onDownload,
 }: {
   platform: 'macos' | 'windows' | 'linux'
   label: string
   item: DesktopDownloadItem | null
   disabled?: boolean
+  pending?: boolean
+  onDownload: (item: DesktopDownloadItem) => void
 }) {
   return (
     <div className="flex items-center justify-between gap-4 border-t border-white/[0.06] py-5 first:border-t-0 sm:py-6">
@@ -123,24 +202,38 @@ function PlatformSummaryRow({
         </span>
         <span className="text-[16px] text-white/90 sm:text-[17px]">{label}</span>
       </div>
-      <DownloadButton item={item} disabled={disabled} compact />
+      <DownloadButton item={item} disabled={disabled} compact pending={pending} onDownload={onDownload} />
     </div>
   )
 }
 
-function BuildRow({ item, disabled }: { item: DesktopDownloadItem; disabled?: boolean }) {
+function BuildRow({
+  item,
+  disabled,
+  pending,
+  onDownload,
+}: {
+  item: DesktopDownloadItem
+  disabled?: boolean
+  pending?: boolean
+  onDownload: (item: DesktopDownloadItem) => void
+}) {
   return (
     <div className="flex items-center justify-between gap-4 border-t border-white/[0.06] px-1 py-3 first:border-t-0">
       <span className="text-[13px] text-white/75">{item.label}</span>
       {item.available && !disabled ? (
-        <a
-          href={desktopDownloadUrl(item.filename)}
-          download={item.filename}
-          className="inline-flex items-center gap-1.5 text-[13px] text-white/55 no-underline transition hover:text-white"
+        <button
+          type="button"
+          onClick={() => onDownload(item)}
+          className={`group inline-flex items-center gap-1.5 text-[13px] text-white/55 transition hover:text-white ${downloadHover} rounded-full px-2 py-1 hover:bg-white/[0.06] ${
+            pending ? 'animate-pulse text-white' : ''
+          }`}
         >
-          Download
-          <DownloadIcon />
-        </a>
+          {pending ? 'Starting…' : 'Download'}
+          <span className="transition-transform duration-200 group-hover:translate-y-0.5">
+            <DownloadIcon />
+          </span>
+        </button>
       ) : (
         <span className="text-[12px] text-white/30">Coming soon</span>
       )}
@@ -153,11 +246,15 @@ function PlatformBuilds({
   label,
   items,
   disabled,
+  pendingFilename,
+  onDownload,
 }: {
   platform: 'macos' | 'windows' | 'linux'
   label: string
   items: DesktopDownloadItem[]
   disabled?: boolean
+  pendingFilename?: string | null
+  onDownload: (item: DesktopDownloadItem) => void
 }) {
   return (
     <div className="rounded-2xl border border-white/[0.08] bg-[#111110] p-5 sm:p-6">
@@ -165,7 +262,17 @@ function PlatformBuilds({
         <PlatformIcon platform={platform} />
         {label}
       </div>
-      <div>{items.map((item) => <BuildRow key={item.id} item={item} disabled={disabled} />)}</div>
+      <div>
+        {items.map((item) => (
+          <BuildRow
+            key={item.id}
+            item={item}
+            disabled={disabled}
+            pending={pendingFilename === item.filename}
+            onDownload={onDownload}
+          />
+        ))}
+      </div>
     </div>
   )
 }
@@ -174,10 +281,14 @@ function ReleaseSection({
   release,
   disabled,
   defaultOpen,
+  pendingFilename,
+  onDownload,
 }: {
   release: DesktopRelease
   disabled?: boolean
   defaultOpen?: boolean
+  pendingFilename?: string | null
+  onDownload: (item: DesktopDownloadItem) => void
 }) {
   const [open, setOpen] = useState(defaultOpen ?? release.latest)
 
@@ -212,9 +323,30 @@ function ReleaseSection({
       {open && (
         <div className="border-t border-white/[0.06] px-4 pb-5 pt-4">
           <div className="grid gap-3 md:grid-cols-3">
-            <PlatformBuilds platform="macos" label="macOS" items={release.macos} disabled={disabled} />
-            <PlatformBuilds platform="windows" label="Windows" items={release.windows} disabled={disabled} />
-            <PlatformBuilds platform="linux" label="Linux" items={release.linux} disabled={disabled} />
+            <PlatformBuilds
+              platform="macos"
+              label="macOS"
+              items={release.macos}
+              disabled={disabled}
+              pendingFilename={pendingFilename}
+              onDownload={onDownload}
+            />
+            <PlatformBuilds
+              platform="windows"
+              label="Windows"
+              items={release.windows}
+              disabled={disabled}
+              pendingFilename={pendingFilename}
+              onDownload={onDownload}
+            />
+            <PlatformBuilds
+              platform="linux"
+              label="Linux"
+              items={release.linux}
+              disabled={disabled}
+              pendingFilename={pendingFilename}
+              onDownload={onDownload}
+            />
           </div>
           <a
             href={release.releaseNotesUrl}
@@ -230,14 +362,84 @@ function ReleaseSection({
   )
 }
 
+function HeroDownloadButton({
+  item,
+  label,
+  variant = 'solid',
+  pending,
+  onDownload,
+  icon,
+}: {
+  item: DesktopDownloadItem
+  label: string
+  variant?: 'solid' | 'outline'
+  pending?: boolean
+  onDownload: (item: DesktopDownloadItem) => void
+  icon?: ReactNode
+}) {
+  const solid = variant === 'solid'
+  return (
+    <button
+      type="button"
+      onClick={() => onDownload(item)}
+      className={`group inline-flex items-center justify-center gap-2 rounded-full px-8 py-3.5 text-[16px] font-medium ${downloadHover} ${
+        solid
+          ? 'bg-white text-black hover:bg-[#f2f2f0]'
+          : 'border border-white/20 text-white hover:bg-white/5'
+      } ${pending ? 'animate-pulse' : ''}`}
+    >
+      {icon}
+      <span className="transition-transform duration-200 group-hover:translate-y-0.5">
+        {pending ? 'Starting…' : label}
+      </span>
+    </button>
+  )
+}
+
 export function DownloadPage() {
   const { data: session } = useSession()
   const [manifest, setManifest] = useState<DesktopReleaseManifest | null>(null)
   const [config, setConfig] = useState<DesktopClientConfig | null>(null)
+  const [notice, setNotice] = useState<DownloadNotice | null>(null)
+  const [pendingFilename, setPendingFilename] = useState<string | null>(null)
+  const retryTimer = useRef<number | null>(null)
+  const clearTimer = useRef<number | null>(null)
   const platform = useMemo(
     () => detectDesktopPlatform(navigator.userAgent, navigator.platform),
     [],
   )
+
+  const clearDownloadTimers = useCallback(() => {
+    if (retryTimer.current) window.clearTimeout(retryTimer.current)
+    if (clearTimer.current) window.clearTimeout(clearTimer.current)
+    retryTimer.current = null
+    clearTimer.current = null
+  }, [])
+
+  const startDownload = useCallback(
+    (item: DesktopDownloadItem) => {
+      clearDownloadTimers()
+      setPendingFilename(item.filename)
+      setNotice({ label: item.label, filename: item.filename, phase: 'starting' })
+      triggerFileDownload(item.filename)
+      retryTimer.current = window.setTimeout(() => {
+        setNotice((current) =>
+          current?.filename === item.filename && current.phase === 'starting'
+            ? { ...current, phase: 'retry' }
+            : current,
+        )
+        setPendingFilename(null)
+      }, 6000)
+      clearTimer.current = window.setTimeout(() => {
+        setNotice((current) => (current?.filename === item.filename ? null : current))
+      }, 20000)
+    },
+    [clearDownloadTimers],
+  )
+
+  useEffect(() => {
+    return () => clearDownloadTimers()
+  }, [clearDownloadTimers])
 
   useEffect(() => {
     let cancelled = false
@@ -262,7 +464,24 @@ export function DownloadPage() {
     null
 
   return (
-    <div className="theme-app min-h-svh bg-[#0b0b0a] text-white">
+    <div className="theme-app keep-dark min-h-svh bg-[#0b0b0a] text-white">
+      {notice && (
+        <DownloadNoticeBanner
+          notice={notice}
+          onRetry={() => {
+            const item =
+              latest?.windows.find((row) => row.filename === notice.filename) ||
+              latest?.macos.find((row) => row.filename === notice.filename) ||
+              latest?.linux.find((row) => row.filename === notice.filename)
+            if (item) startDownload(item)
+          }}
+          onDismiss={() => {
+            clearDownloadTimers()
+            setNotice(null)
+            setPendingFilename(null)
+          }}
+        />
+      )}
       <Nav
         onDownload={() => navigate('/download')}
         onSignIn={() => navigate('/login')}
@@ -289,10 +508,13 @@ export function DownloadPage() {
 
           <div className="mt-10 flex flex-wrap items-center justify-center gap-4">
             {primary?.available && !disabled ? (
-              <PillButton href={desktopDownloadUrl(primary.filename)} size="lg">
-                <PlatformIcon platform={platform === 'unknown' ? 'windows' : platform} />
-                {primaryLabel}
-              </PillButton>
+              <HeroDownloadButton
+                item={primary}
+                label={primaryLabel}
+                pending={pendingFilename === primary.filename}
+                onDownload={startDownload}
+                icon={<PlatformIcon platform={platform === 'unknown' ? 'windows' : platform} />}
+              />
             ) : (
               <PillButton
                 variant="outline"
@@ -303,10 +525,14 @@ export function DownloadPage() {
               </PillButton>
             )}
             {platform === 'windows' && winAlt && winAlt.available && !disabled && (
-              <PillButton href={desktopDownloadUrl(winAlt.filename)} variant="outline" size="lg">
-                <PlatformIcon platform="windows" />
-                {winAlt.label.includes('ARM') ? 'Windows (ARM64)' : winAlt.label}
-              </PillButton>
+              <HeroDownloadButton
+                item={winAlt}
+                label={winAlt.label.includes('ARM') ? 'Windows (ARM64)' : winAlt.label}
+                variant="outline"
+                pending={pendingFilename === winAlt.filename}
+                onDownload={startDownload}
+                icon={<PlatformIcon platform="windows" />}
+              />
             )}
           </div>
 
@@ -338,18 +564,24 @@ export function DownloadPage() {
                   label="macOS"
                   item={latest ? firstAvailable(latest.macos) : null}
                   disabled={disabled}
+                  pending={Boolean(latest && pendingFilename === firstAvailable(latest.macos)?.filename)}
+                  onDownload={startDownload}
                 />
                 <PlatformSummaryRow
                   platform="windows"
                   label="Windows"
                   item={latest ? firstAvailable(latest.windows) : null}
                   disabled={disabled}
+                  pending={Boolean(latest && pendingFilename === firstAvailable(latest.windows)?.filename)}
+                  onDownload={startDownload}
                 />
                 <PlatformSummaryRow
                   platform="linux"
                   label="Linux"
                   item={latest ? firstAvailable(latest.linux) : null}
                   disabled={disabled}
+                  pending={Boolean(latest && pendingFilename === firstAvailable(latest.linux)?.filename)}
+                  onDownload={startDownload}
                 />
               </div>
             </article>
@@ -400,6 +632,8 @@ export function DownloadPage() {
                 release={release}
                 disabled={disabled}
                 defaultOpen={release.latest}
+                pendingFilename={pendingFilename}
+                onDownload={startDownload}
               />
             ))}
             {!manifest && (

@@ -3,6 +3,7 @@ import { emptyProfile, fetchProfile, fetchTwoFactorStatus, isOnboardingComplete,
 import { signOut, useSession } from './lib/auth-client'
 import { sessionTimedOut } from '../shared/session'
 import { navigate, openTab, usePath } from './lib/nav'
+import { isMarketingPath, setMarketingSurface } from './lib/theme'
 import { DownloadPage } from './components/DownloadPage'
 import { HomeLanding } from './components/HomeLanding'
 import { LoginPage } from './components/LoginPage'
@@ -60,6 +61,10 @@ export default function App() {
   const [profile, setProfile] = useState<Profile | null | undefined>(undefined)
   const [need2fa, setNeed2fa] = useState(false)
   const openDownload = () => navigate('/download')
+
+  useEffect(() => {
+    setMarketingSurface(isMarketingPath(path))
+  }, [path])
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)

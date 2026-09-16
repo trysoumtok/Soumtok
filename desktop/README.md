@@ -33,9 +33,11 @@ Sign in when prompted, open a folder, use **Agent** (Ctrl+I) or the side panel.
 |---------|-------------|
 | `npm run dev` | Launch Electron (dev) |
 | `npm run start` | Same as dev |
-| `npm run pack:win` | Windows NSIS installer → `desktop/release/` |
-| `npm run pack:mac` | macOS DMG |
-| `npm run pack:linux` | Linux AppImage |
+| `npm run installer:assets` | Generate branded ICO, NSIS art, DMG background |
+| `npm run pack:win` | `Soumtok-Setup-{version}-win-x64.exe` + `.zip` |
+| `npm run pack:mac` | `.dmg` + `.zip` (x64 + arm64, on Mac) |
+| `npm run pack:linux` | `.AppImage` + `.deb` |
+| `npm run pack:all` | All platforms (use CI or each OS) |
 | `npm run test:desktop` | From **repo root** — harness & integration tests |
 
 ## Environment
@@ -70,9 +72,16 @@ User data: `~/.soumtok/ide` (settings, extensions) and `~/.soumtok/workspaces` (
 
 ```bash
 cd desktop
-npm run pack:win          # or pack:mac / pack:linux
-npm run release:verify    # checks latest.yml + prints upload steps
+npm run pack:win          # → release/Soumtok-Setup-0.1.0-win-x64.exe
+npm run release:verify    # checks latest.yml + upload steps
 ```
+
+**Installer style (Cursor-like):**
+- **Windows** — dark NSIS wizard, Soumtok logo sidebar, header strip, license, desktop shortcut, launch when done
+- **macOS** — branded DMG, drag Soumtok to Applications
+- **Linux** — AppImage + deb with menu icon
+
+CI builds all three: `.github/workflows/desktop-release.yml` (tag `desktop-v*` or manual).
 
 See [docs/RELEASE.md](docs/RELEASE.md) for signing and CDN upload.
 

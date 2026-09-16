@@ -2,14 +2,12 @@ import { useEffect } from 'react'
 import { usePath } from '../lib/nav'
 import { AgentsFeature } from './AgentsFeature'
 import { Automations } from './Automations'
-import { ChangelogAbout } from './ChangelogAbout'
 import { Faq } from './Faq'
 import { Footer, TryNow } from './Footer'
 import { Frontier } from './Frontier'
 import { Hero } from './Hero'
 import { Nav } from './Nav'
 import { Pricing } from './Pricing'
-import { Testimonials } from './Testimonials'
 import { TrustedBy } from './TrustedBy'
 
 export function HomeLanding({
@@ -32,7 +30,7 @@ export function HomeLanding({
   }, [path])
 
   return (
-    <div className="theme-app min-h-svh bg-[#0b0b0a] text-white">
+    <div className="theme-app keep-dark min-h-svh bg-[#0b0b0a] text-white">
       <Nav
         hasAvatar={hasAvatar}
         onDownload={onDownload}
@@ -45,9 +43,7 @@ export function HomeLanding({
         <TrustedBy />
         <AgentsFeature />
         <Automations />
-        <Testimonials />
         <Frontier />
-        <ChangelogAbout />
         <Pricing />
         <Faq />
         <TryNow onStart={onAccount} />

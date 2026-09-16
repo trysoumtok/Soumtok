@@ -17,7 +17,7 @@ export function Bone({ className = '', light = false }: { className?: string; li
 
 export function PageSkeleton() {
   return (
-    <div className="theme-app min-h-svh bg-[#0b0b0a] text-white">
+    <div className="theme-app keep-dark min-h-svh bg-[#0b0b0a] text-white">
       <div className="loader-bar" />
       <div className="border-b border-white/5">
         <div className="page-wrap flex h-[64px] items-center justify-between">
@@ -49,7 +49,7 @@ export function PageSkeleton() {
 
 export function LoginSkeleton() {
   return (
-    <div className="theme-app grid min-h-svh place-items-center bg-[#0b0b0a] px-6">
+    <div className="theme-app keep-dark grid min-h-svh place-items-center bg-[#0b0b0a] px-6">
       <div className="w-full max-w-[400px]">
         <Bone className="mx-auto h-10 w-72 rounded-lg" />
         <Bone className="mx-auto mt-4 h-4 w-40 rounded-full" />

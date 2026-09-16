@@ -45,6 +45,7 @@ const needed = [
   'SMTP_HOST',
   'SMTP_PORT',
   'SMTP_FROM',
+  'RESEND_API_KEY',
 ]
 
 const mode = process.argv[1] && process.argv.includes('--set') ? 'set' : process.argv.includes('--set') ? 'set' : 'check'

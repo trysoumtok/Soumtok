@@ -18,6 +18,7 @@ export const env = {
   smtpUser: process.env.SMTP_USER?.trim() ?? '',
   smtpPass: process.env.SMTP_PASS?.trim() ?? '',
   smtpFrom: process.env.SMTP_FROM?.trim() || process.env.SMTP_USER?.trim() || 'Soumtok <info@soumtok.com>',
+  resendApiKey: (process.env.RESEND_API_KEY || process.env.SOUMTOK_RESEND_API_KEY)?.trim() ?? '',
   twilioSid: process.env.TWILIO_ACCOUNT_SID?.trim() ?? '',
   twilioToken: process.env.TWILIO_AUTH_TOKEN?.trim() ?? '',
   twilioFrom: process.env.TWILIO_FROM?.trim() ?? '',
@@ -149,6 +150,15 @@ export function hasBunny() {
 
 export function hasSmtp() {
   return Boolean(env.smtpUser && env.smtpPass)
+}
+
+export function hasResend() {
+  return Boolean(env.resendApiKey)
+}
+
+/** True when the app can deliver email (HTTP API or SMTP). */
+export function hasMail() {
+  return hasResend() || hasSmtp()
 }
 
 export function hasTwilio() {

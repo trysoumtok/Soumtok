@@ -2118,6 +2118,7 @@ function assertInside(event, filePath) {
 }
 
 ipcMain.handle('auth:login', async (_e, mode) => {
+  desktopLoginTokens.clear()
   const started = await api('POST', '/api/desktop/start', { mode: mode === 'up' ? 'up' : 'in' }).catch(() => ({
     status: 0,
     data: null,
@@ -2139,20 +2140,32 @@ ipcMain.handle('auth:login', async (_e, mode) => {
   return { pendingId: id, user: null, api: API }
 })
 
+const desktopLoginTokens = new Map()
+
+async function completeDesktopLogin(token, loginId = '') {
+  const sessionToken = String(token || '').trim()
+  if (!sessionToken) return { expired: false, user: null, api: API }
+  if (loginId) desktopLoginTokens.set(loginId, sessionToken)
+  await applySessionToken(sessionToken)
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const user = await sessionUser()
+    if (user.user) {
+      if (loginId) desktopLoginTokens.delete(loginId)
+      return { expired: false, user: user.user, api: API }
+    }
+    await new Promise((r) => setTimeout(r, 200 + attempt * 150))
+  }
+  return { expired: false, user: null, api: API, pending: true }
+}
+
 ipcMain.handle('auth:poll', async (_e, id) => {
   const loginId = String(id || '').trim()
   if (!loginId) return sessionUser()
+  const cached = desktopLoginTokens.get(loginId)
+  if (cached) return completeDesktopLogin(cached, loginId)
   const poll = await api('GET', `/api/desktop/poll/${encodeURIComponent(loginId)}`).catch(() => ({ data: null }))
   if (poll.data?.status === 'expired') return { expired: true, user: null, api: API }
-  if (poll.data?.token) {
-    await applySessionToken(poll.data.token)
-    let user = await sessionUser()
-    if (!user.user) {
-      await new Promise((r) => setTimeout(r, 400))
-      user = await sessionUser()
-    }
-    return { expired: false, user: user.user, api: API }
-  }
+  if (poll.data?.token) return completeDesktopLogin(poll.data.token, loginId)
   return { expired: false, user: null, api: API }
 })
 
@@ -2168,14 +2181,20 @@ async function applySessionToken(token) {
     expirationDate: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 48,
   }
   const names = secure
-    ? ['__Secure-better-auth.session_token', 'better-auth.session_token']
-    : ['better-auth.session_token']
+    ? [
+        '__Secure-soumtok.session_token',
+        'soumtok.session_token',
+        '__Secure-better-auth.session_token',
+        'better-auth.session_token',
+      ]
+    : ['soumtok.session_token', 'better-auth.session_token']
   for (const name of names) {
     await authSession().cookies.set({ ...base, name })
   }
 }
 
 ipcMain.handle('auth:logout', async () => {
+  desktopLoginTokens.clear()
   await authSession().clearStorageData()
   applyUserScope(null)
   return { user: null }
