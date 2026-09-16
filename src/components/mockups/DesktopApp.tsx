@@ -31,13 +31,23 @@ export function DesktopApp() {
                 >
                   <div className="flex items-start gap-2">
                     <span
-                      className={`mt-0.5 grid h-4 w-4 place-items-center rounded-full border ${
+                      className={`mt-0.5 grid h-4 w-4 shrink-0 place-items-center overflow-hidden rounded-full border ${
                         item.done
                           ? 'border-emerald-400/70 text-emerald-400'
-                          : 'border-white/20 text-transparent'
+                          : 'border-white/20'
                       }`}
                     >
-                      {item.done ? '✓' : ''}
+                      {item.done ? (
+                        <svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden>
+                          <path
+                            d="M2.1 5.15 4.05 7.1 7.9 2.9"
+                            stroke="currentColor"
+                            strokeWidth="1.4"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          />
+                        </svg>
+                      ) : null}
                     </span>
                     <div className="min-w-0">
                       <p className="truncate text-[12.5px] text-white/90">{item.title}</p>

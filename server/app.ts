@@ -7,7 +7,7 @@ import {
   env,
   hasBunny,
   hasDatabase,
-  hasFal,
+  hasImageGen,
   hasGithub,
   hasGoogle,
   hasPayhero,
@@ -15,6 +15,8 @@ import {
   hasSmtp,
   hasTwilio,
   isAllowedOrigin,
+  oauthRedirectUris,
+  openAccessForBuilding,
 } from './env.ts'
 import { contactInboxEmail, sendMail, verificationEmail } from './mail.ts'
 import { consumeCode, issueCode } from './verify.ts'
@@ -29,19 +31,25 @@ import { registerAccountKeys } from './account-keys.ts'
 import { registerPlugins } from './plugins.ts'
 import { registerConnectors } from './connectors.ts'
 import { registerDevice } from './device.ts'
+import { registerDesktopAuth } from './desktop-auth.ts'
+import { registerTestHub } from './testHub.ts'
 import { registerSkills } from './skills.ts'
+import { registerSeo } from './seo.ts'
 import { hashSecret } from './secrets.ts'
 import { BLOCKED_EMAIL_MESSAGE, isBlockedEmail } from './blocked-emails.ts'
 
 export const app = new Hono()
+registerSeo(app)
 registerGithubSetup(app)
 registerGithub(app, requireReadyUser)
 registerStudio(app, requireReadyUser)
+registerTestHub(app, requireReadyUser)
 registerBilling(app, requireReadyUser)
 registerAccountKeys(app, requireReadyUser)
 registerPlugins(app, requireReadyUser)
 registerConnectors(app, requireReadyUser)
 registerDevice(app, requireReadyUser)
+registerDesktopAuth(app, requireUser)
 registerSkills(app, requireReadyUser)
 registerTwoFactorGate(app, requireUser)
 
@@ -100,10 +108,11 @@ app.get('/api/health', (c) =>
     database: hasDatabase(),
     google: hasGoogle(),
     github: hasGithub(),
+    oauth: oauthRedirectUris(),
     storage: hasBunny(),
     mail: hasSmtp(),
     sms: hasTwilio(),
-    image: hasFal(),
+    image: hasImageGen(),
     paypal: hasPaypal(),
     payhero: hasPayhero(),
     coding: {
@@ -113,6 +122,7 @@ app.get('/api/health', (c) =>
       deepseek: Boolean(env.deepseekKey),
       xai: Boolean(env.xaiKey),
     },
+    openAccess: openAccessForBuilding(),
   }),
 )
 

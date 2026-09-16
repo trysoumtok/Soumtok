@@ -2,6 +2,7 @@ import { getMigrations } from 'better-auth/db/migration'
 import { auth } from './auth.ts'
 import { pool } from './db.ts'
 import { hasDatabase } from './env.ts'
+import { testHubBenchmarksSql } from './testHub.ts'
 
 const documentsSql = `
 CREATE TABLE IF NOT EXISTS documents (
@@ -334,6 +335,15 @@ CREATE TABLE IF NOT EXISTS blocked_emails (
 );
 `
 
+const desktopLoginSql = `
+CREATE TABLE IF NOT EXISTS desktop_login (
+  id TEXT PRIMARY KEY,
+  session_token TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  expires_at TIMESTAMPTZ NOT NULL
+);
+`
+
 export async function migrate() {
   if (!hasDatabase() || !auth || !pool) {
     throw new Error('Set DATABASE_URL in .env to a Neon Postgres URL first')
@@ -352,6 +362,8 @@ export async function migrate() {
   await pool.query(automationsSql)
   await pool.query(accountKeysSql)
   await pool.query(blockedEmailsSql)
+  await pool.query(desktopLoginSql)
+  await pool.query(testHubBenchmarksSql)
 }
 
 if (import.meta.url === `file://${process.argv[1].replaceAll('\\', '/')}` || process.argv[1]?.endsWith('migrate.ts')) {

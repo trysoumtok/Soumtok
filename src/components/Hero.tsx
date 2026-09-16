@@ -19,8 +19,8 @@ export function Hero({
           A coding agent for the desks that actually ship.
         </h1>
         <p className="mt-5 max-w-[540px] text-[16px] leading-7 text-white/55 sm:mt-6 sm:text-[17px]">
-          Open Studio, attach GitHub, pick a model, and hand the work over. Pay with M-Pesa or
-          PayPal. Built for builders across Africa and the diaspora.
+          Africa’s most affordable powerful coding platform. Start from $13.99 a month. Open Studio,
+          attach GitHub, pick a model, and hand the work over.
         </p>
         <div className="mt-8 flex flex-wrap items-center gap-3">
           <PillButton onClick={() => (session?.user ? onAccount() : navigate('/signup'))}>

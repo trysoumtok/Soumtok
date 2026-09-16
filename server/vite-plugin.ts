@@ -10,7 +10,15 @@ export function soumtokApi(): Plugin {
       let ready: Promise<void> | null = null
 
       server.middlewares.use(async (req, res, next) => {
-        if (!req.url?.startsWith('/api/')) {
+        const path = req.url?.split('?')[0] || ''
+        if (
+          !path.startsWith('/api/') &&
+          path !== '/sitemap.xml' &&
+          path !== '/sitemap_index.xml' &&
+          path !== '/docs/sitemap.xml' &&
+          path !== '/robots.txt' &&
+          path !== '/llms.txt'
+        ) {
           next()
           return
         }

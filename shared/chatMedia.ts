@@ -24,13 +24,21 @@ export type ModelMedia = {
   pdf: boolean
 }
 
+/** DeepSeek V4.1 Flash (`deepseek-flash`) is multimodal. Chat/reasoner/Pro are text-only. */
+export function deepseekSeesImages(modelId: string) {
+  const id = (modelId || '').toLowerCase()
+  if (!/deepseek/.test(id)) return false
+  if (/deepseek-chat$|reasoner|coder/.test(id) && !/vision/.test(id)) return false
+  if (/v4-pro/.test(id) && !/vision/.test(id)) return false
+  return /vision|deepseek-flash|v4-flash/.test(id)
+}
+
 /** What this coding model can actually see. Not every model takes media. */
 export function modelMedia(modelId: string): ModelMedia {
   const id = (modelId || '').toLowerCase()
   if (/gemma|gpt-3\.5/.test(id)) return { image: false, video: false, pdf: false }
   if (/deepseek/.test(id)) {
-    const vision = /vision/.test(id)
-    return { image: vision, video: false, pdf: false }
+    return { image: deepseekSeesImages(id), video: false, pdf: false }
   }
   const image =
     /gemini|claude|grok|gpt-4o|gpt-4\.1|gpt-4-turbo|^gpt-4$|gpt-5|gpt-6|codex|o3|o4|vision/.test(id)
@@ -39,8 +47,235 @@ export function modelMedia(modelId: string): ModelMedia {
   return { image, video, pdf }
 }
 
-export function messageHasBody(item: { content?: string; files?: ChatFile[] }) {
+export function messageHasBody(item: {
+  role?: string
+  content?: string
+  files?: ChatFile[]
+  tool_calls?: unknown[]
+  tool_call_id?: string
+}) {
+  if (item.role === 'tool') return Boolean(item.tool_call_id)
+  if (item.role === 'assistant' && item.tool_calls?.length) return true
   return Boolean(item.content?.trim() || item.files?.length)
+}
+
+/** Drop orphan tool rows and ensure tool_call ids before provider APIs (desktop multi-round harness). */
+export function normalizeChatMessagesForAgent(messages: ChatTurn[]): ChatTurn[] {
+  const kept: ChatTurn[] = []
+  for (const item of messages) {
+    if (item.role === 'tool') {
+      const id = item.tool_call_id
+      if (!id) continue
+      const parent = [...kept]
+        .reverse()
+        .find((m) => m.role === 'assistant' && m.tool_calls?.some((tc) => tc.id === id))
+      if (parent) kept.push(item)
+      continue
+    }
+    if (!messageHasBody(item)) continue
+    if (item.role === 'assistant' && item.tool_calls?.length) {
+      kept.push({
+        ...item,
+        content: item.content?.trim() ? item.content : '',
+        tool_calls: item.tool_calls.map((tc, index) => ({
+          ...tc,
+          id: tc.id || `call_${index}_${kept.length}`,
+        })),
+      })
+      continue
+    }
+    kept.push(item)
+  }
+  return kept
+}
+
+/** OpenAI/DeepSeek require tool rows to follow their assistant tool_calls with no gaps. */
+export function repairToolConversation(messages: ChatTurn[]): ChatTurn[] {
+  const normalized = normalizeChatMessagesForAgent(messages)
+  const out: ChatTurn[] = []
+  let pendingIds: Set<string> | null = null
+
+  const dropIncompleteToolTurn = () => {
+    while (out.length && out[out.length - 1].role === 'tool') out.pop()
+    const last = out[out.length - 1]
+    if (last?.role === 'assistant' && last.tool_calls?.length) out.pop()
+    pendingIds = null
+  }
+
+  for (const item of normalized) {
+    if (pendingIds?.size) {
+      if (item.role === 'tool' && item.tool_call_id && pendingIds.has(item.tool_call_id)) {
+        out.push(item)
+        pendingIds.delete(item.tool_call_id)
+        if (!pendingIds.size) pendingIds = null
+        continue
+      }
+      dropIncompleteToolTurn()
+    }
+    if (item.role === 'tool') continue
+    if (item.role === 'assistant' && item.tool_calls?.length) {
+      out.push(item)
+      pendingIds = new Set(item.tool_calls.map((tc) => tc.id).filter(Boolean) as string[])
+      continue
+    }
+    out.push(item)
+  }
+  if (pendingIds?.size) dropIncompleteToolTurn()
+  return out
+}
+
+/** Shape-repair only. Length budgeting lives in compactConversation — never cap here. */
+function toolContentPassthrough(text: unknown) {
+  return String(text ?? '')
+}
+
+function toolTurnDigest(
+  assistant: ChatTurn,
+  tools: ChatTurn[],
+): string {
+  const header = assistant.content?.trim() ? `${assistant.content.trim()}\n\n` : ''
+  const body = tools
+    .map((t) => `[${t.name || 'tool'}]\n${toolContentPassthrough(t.content)}`)
+    .join('\n\n---\n\n')
+  return `${header}Tool results on the user's machine:\n${body}`
+}
+
+function providerToolCalls(item: ChatTurn) {
+  return (item.tool_calls || []).map((tc, index) => ({
+    ...tc,
+    id: tc.id || `call_${index}`,
+    type: 'function' as const,
+    function: {
+      name: tc.function?.name || 'tool',
+      arguments: tc.function?.arguments || '{}',
+    },
+  }))
+}
+
+function providerToolRow(callId: string, name: string, content: unknown): ChatTurn {
+  return {
+    role: 'tool',
+    tool_call_id: callId,
+    name: name || 'tool',
+    content: toolContentPassthrough(content) || '(no output)',
+  }
+}
+
+/**
+ * OpenAI / DeepSeek / GPT-5.5: every `role: tool` must sit immediately after the
+ * assistant `tool_calls` it answers, in that same order, with matching ids.
+ * Interstitial user/image rows (follow-up attaches, harness nudges) are moved
+ * to after the tool results so they cannot break the chain.
+ */
+export function flattenToolTurnsForProvider(messages: ChatTurn[]): ChatTurn[] {
+  const raw = (messages || []).filter(Boolean)
+  const toolIndex = new Map<string, ChatTurn>()
+  for (const item of raw) {
+    if (item.role === 'tool' && item.tool_call_id && !toolIndex.has(item.tool_call_id)) {
+      toolIndex.set(item.tool_call_id, item)
+    }
+  }
+  const claimed = new Set<string>()
+  const out: ChatTurn[] = []
+  for (const item of raw) {
+    if (item.role === 'assistant' && item.tool_calls?.length) {
+      const calls = providerToolCalls(item)
+      out.push({
+        role: 'assistant',
+        content: item.content?.trim() ? item.content : '',
+        tool_calls: calls,
+      })
+      for (const tc of calls) {
+        const hit = toolIndex.get(tc.id)
+        claimed.add(tc.id)
+        out.push(
+          providerToolRow(
+            tc.id,
+            hit?.name || tc.function.name,
+            hit?.content || '(tool produced no result — continue with what you have.)',
+          ),
+        )
+      }
+      continue
+    }
+    if (item.role === 'tool') {
+      if (item.tool_call_id && claimed.has(item.tool_call_id)) continue
+      out.push({
+        role: 'user',
+        content: `[${item.name || 'tool'}]\n${toolContentPassthrough(item.content)}`,
+      })
+      if (item.tool_call_id) claimed.add(item.tool_call_id)
+      continue
+    }
+    out.push(item)
+  }
+  return out.filter(
+    (m) => messageHasBody(m) || (m.role === 'assistant' && m.tool_calls?.length),
+  )
+}
+
+/** True when every tool row immediately follows its assistant tool_calls in id order. */
+export function isProviderToolChainValid(messages: ChatTurn[]): boolean {
+  let pending: string[] | null = null
+  for (const item of messages || []) {
+    if (pending?.length) {
+      if (item.role !== 'tool' || item.tool_call_id !== pending[0]) return false
+      pending.shift()
+      if (!pending.length) pending = null
+      continue
+    }
+    if (item.role === 'tool') return false
+    if (item.role === 'assistant' && item.tool_calls?.length) {
+      pending = item.tool_calls.map((tc) => tc.id).filter(Boolean)
+      if (!pending.length) return false
+    }
+  }
+  return !pending?.length
+}
+
+/**
+ * Flatten to a valid OpenAI tool chain. Never fold to a 12k digest — that
+ * blinds the model (one 48KB read plus grep becomes ~9KB of mush).
+ * If flatten is still illegal, repair at the source and flatten again.
+ */
+export function messagesForProvider(messages: ChatTurn[]): ChatTurn[] {
+  const flat = flattenToolTurnsForProvider(messages)
+  if (isProviderToolChainValid(flat)) return flat
+  return flattenToolTurnsForProvider(repairToolConversation(messages))
+}
+
+/** Persisted / follow-up history: no tool or tool_calls roles (avoids provider chain errors). */
+export function storageSafeModelMessages(messages: ChatTurn[]): ChatTurn[] {
+  const flat = flattenToolTurnsForProvider(repairToolConversation(messages))
+  const out: ChatTurn[] = []
+  for (let i = 0; i < flat.length; i++) {
+    const item = flat[i]
+    if (item.role === 'assistant' && item.tool_calls?.length) {
+      const tools: ChatTurn[] = []
+      let j = i + 1
+      while (j < flat.length && flat[j].role === 'tool') {
+        tools.push(flat[j])
+        j++
+      }
+      out.push({ role: 'user', content: toolTurnDigest(item, tools) })
+      i = j - 1
+      continue
+    }
+    if (item.role === 'tool') {
+      out.push({
+        role: 'user',
+        content: `[${item.name || 'tool'}]\n${toolContentPassthrough(item.content)}`,
+      })
+      continue
+    }
+    if (item.role === 'assistant') {
+      const text = typeof item.content === 'string' ? item.content.trim() : ''
+      if (text) out.push({ role: 'assistant', content: text })
+      continue
+    }
+    out.push(item)
+  }
+  return out.filter((m) => messageHasBody(m))
 }
 
 export function filesNeedMedia(files: ChatFile[]): ModelMedia {
@@ -104,7 +339,7 @@ export function analyzeAttachment(input: {
     lines.push('', 'Extracted text:', input.text.slice(0, 8000))
     if (input.text.length > 8000) lines.push('\n…truncated')
   } else if (kind === 'image') {
-    lines.push('', 'Image stored in your documents. Vision models receive the pixels.')
+    lines.push('', 'Screenshot/image attached. The model receives the pixels (or a vision description in SOUMTOK VISION).')
   } else if (kind === 'video') {
     lines.push('', 'Video stored in your documents. Gemini can watch it.')
   } else if (kind === 'pdf') {
@@ -127,6 +362,11 @@ export function slimChatFiles(files?: ChatFile[]) {
     analysis: file.analysis,
     dataUrl: file.id ? undefined : file.dataUrl,
   }))
+}
+
+/** This-turn composer attachments only. History images stay on their original user message. */
+export function collectAttachedImages(files?: ChatFile[], _messages?: ChatTurn[]): ChatFile[] {
+  return (Array.isArray(files) ? files : []).filter(Boolean)
 }
 
 /** Providers only accept https URLs or data:base64. Relative /api/files paths fail. */
@@ -152,9 +392,13 @@ function textForUnsupported(files: ChatFile[], media: ModelMedia) {
       continue
     }
     if (file.mime.startsWith('image/') && !media.image) {
-      bits.push(
-        `Attached image ${file.name}. This model cannot see images. Switch to Claude, Gemini, GPT, Grok, or DeepSeek V4 Flash Vision.`,
-      )
+      if (file.analysis?.trim()) {
+        bits.push(`Attached image ${file.name} (Soumtok vision wrap — read this instead of pixels):\n${file.analysis.trim()}`)
+      } else {
+        bits.push(
+          `Attached image ${file.name}. A vision description belongs in ATTACHMENTS / SOUMTOK VISION. Treat that as what the user showed you. Do not say you cannot see images.`,
+        )
+      }
       continue
     }
     if (file.mime.startsWith('video/') && !media.video) {
@@ -185,7 +429,7 @@ export function toChatCompletionsMessages(messages: ChatTurn[], modelId: string,
       return { role: item.role, content: item.content }
     }
     const extra = textForUnsupported(item.files, media)
-    const text = [item.content.trim(), extra].filter(Boolean).join('\n\n') || 'See the attached files.'
+    const text = [String(item.content || '').trim(), extra].filter(Boolean).join('\n\n') || 'See the attached files.'
 
     if (provider === 'anthropic') {
       const parts: Record<string, unknown>[] = [{ type: 'text', text }]
@@ -223,25 +467,45 @@ export function toChatCompletionsMessages(messages: ChatTurn[], modelId: string,
 
 export function toResponsesInput(messages: ChatTurn[], modelId: string) {
   const media = modelMedia(modelId)
-  return messages
-    .filter((item) => item.role !== 'system' && item.role !== 'tool')
-    .map((item) => {
-      if (item.role === 'assistant' && item.tool_calls?.length) {
-        return { role: 'assistant', content: item.content || '', tool_calls: item.tool_calls }
+  const chain = flattenToolTurnsForProvider(messages)
+  const out: Record<string, unknown>[] = []
+  for (let i = 0; i < chain.length; i++) {
+    const item = chain[i]
+    if (item.role === 'system') continue
+    if (item.role === 'assistant' && item.tool_calls?.length) {
+      for (const tc of item.tool_calls) {
+        out.push({
+          type: 'function_call',
+          call_id: tc.id,
+          name: tc.function?.name || 'tool',
+          arguments: tc.function?.arguments || '{}',
+        })
       }
-      if (item.role !== 'user' || !item.files?.length) {
-        return { role: item.role, content: item.content }
+      continue
+    }
+    if (item.role === 'tool') {
+      out.push({
+        type: 'function_call_output',
+        call_id: item.tool_call_id,
+        output: String(item.content || ''),
+      })
+      continue
+    }
+    if (item.role !== 'user' || !item.files?.length) {
+      out.push({ role: item.role, content: item.content })
+      continue
+    }
+    const extra = textForUnsupported(item.files, media)
+    const text = [String(item.content || '').trim(), extra].filter(Boolean).join('\n\n') || 'See the attached files.'
+    const parts: Record<string, unknown>[] = [{ type: 'input_text', text }]
+    for (const file of item.files) {
+      if (file.mime.startsWith('image/') && media.image && isProviderMediaUrl(file.dataUrl)) {
+        parts.push({ type: 'input_image', image_url: file.dataUrl })
       }
-      const extra = textForUnsupported(item.files, media)
-      const text = [item.content.trim(), extra].filter(Boolean).join('\n\n') || 'See the attached files.'
-      const parts: Record<string, unknown>[] = [{ type: 'input_text', text }]
-      for (const file of item.files) {
-        if (file.mime.startsWith('image/') && media.image && isProviderMediaUrl(file.dataUrl)) {
-          parts.push({ type: 'input_image', image_url: file.dataUrl })
-        }
-      }
-      return { role: 'user', content: parts }
-    })
+    }
+    out.push({ role: 'user', content: parts })
+  }
+  return out
 }
 
 export function promptChars(item: ChatTurn) {

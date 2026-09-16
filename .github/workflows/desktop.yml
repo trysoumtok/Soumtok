@@ -1,0 +1,44 @@
+name: Desktop CI
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'desktop/**'
+      - 'shared/**'
+      - 'package.json'
+      - '.github/workflows/desktop.yml'
+  pull_request:
+    paths:
+      - 'desktop/**'
+      - 'shared/**'
+      - 'package.json'
+      - '.github/workflows/desktop.yml'
+
+jobs:
+  test-desktop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install root dependencies
+        run: npm ci
+
+      - name: Install desktop dependencies
+        working-directory: desktop
+        run: npm ci
+
+      - name: Run desktop integration tests
+        run: npm run test:desktop
+
+      - name: Syntax-check main process
+        run: node --check desktop/src/main/index.js
+
+      - name: Syntax-check renderer
+        run: node --check desktop/src/renderer/workbench.js

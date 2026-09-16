@@ -3,6 +3,7 @@ import { usePath } from '../lib/nav'
 import { AgentsFeature } from './AgentsFeature'
 import { Automations } from './Automations'
 import { ChangelogAbout } from './ChangelogAbout'
+import { Faq } from './Faq'
 import { Footer, TryNow } from './Footer'
 import { Frontier } from './Frontier'
 import { Hero } from './Hero'
@@ -48,6 +49,7 @@ export function HomeLanding({
         <Frontier />
         <ChangelogAbout />
         <Pricing />
+        <Faq />
         <TryNow onStart={onAccount} />
       </main>
       <Footer />

@@ -6,6 +6,7 @@ import { signOut, useSession } from '../../lib/auth-client'
 import { navigate, openTab } from '../../lib/nav'
 import { avatarUrl } from '../../lib/avatar'
 import { applyTheme, getThemePref, type ThemePref } from '../../lib/theme'
+import type { AgentDriver } from '../../../shared/soumtokBot'
 import { CreateProfileModal } from './CreateProfileModal'
 
 function MenuIcon({ d }: { d: string }) {
@@ -24,6 +25,8 @@ export function AccountMenu({
   collapsed,
   onDownload,
   onProfileSaved,
+  agentDriver,
+  onAgentDriverChange,
 }: {
   name: string
   plan?: string
@@ -32,6 +35,8 @@ export function AccountMenu({
   collapsed?: boolean
   onDownload?: () => void
   onProfileSaved?: () => void
+  agentDriver?: AgentDriver
+  onAgentDriverChange?: (driver: AgentDriver) => void
 }) {
   const { data: session } = useSession()
   const [open, setOpen] = useState(false)
@@ -199,6 +204,14 @@ export function AccountMenu({
         )}
       </div>
 
+      <MenuRow
+        icon={<MenuIcon d="M4 5.5h8v5H4v-5Zm1 7h6M6 4.5V3M10 4.5V3" />}
+        label="Open Test Hub"
+        onClick={() => {
+          closeMenu()
+          navigate('/dashboard/studio/test-hub')
+        }}
+      />
       <div className="my-1 h-px bg-white/[0.06]" />
 
       <MenuRow
@@ -353,11 +366,15 @@ export function AccountMenu({
           <img
             src={avatarUrl(avatarBust)}
             alt=""
-            className="h-8 w-8 shrink-0 rounded-full object-cover"
+            className={`h-8 w-8 shrink-0 rounded-full object-cover ${agentDriver === 'bot' ? 'ring-2 ring-[#f54e00]' : ''}`}
             onError={() => setPhotoFailed(true)}
           />
         ) : (
-          <span className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-white/10 text-[12px]">{initial}</span>
+          <span
+            className={`grid h-8 w-8 shrink-0 place-items-center rounded-full bg-white/10 text-[12px] ${agentDriver === 'bot' ? 'ring-2 ring-[#f54e00]' : ''}`}
+          >
+            {initial}
+          </span>
         )}
         {!collapsed && (
           <>

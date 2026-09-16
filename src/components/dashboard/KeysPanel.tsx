@@ -663,13 +663,13 @@ export function KeysPanel() {
           {providerKeys.map((item) => (
             <div
               key={item.id}
-              className="flex items-center justify-between gap-3 rounded-xl border border-white/[0.06] bg-[#141413] px-4 py-3 text-[13px]"
+              className="ui-kv-row ui-kv-stack-sm min-w-0 rounded-xl border border-white/[0.06] bg-[#141413] px-4 py-3 text-[13px]"
             >
-              <div>
-                <p className="text-white">{KEY_PROVIDERS.find((row) => row.id === item.provider)?.name || item.provider}</p>
+              <div className="min-w-0">
+                <p className="truncate text-white">{KEY_PROVIDERS.find((row) => row.id === item.provider)?.name || item.provider}</p>
                 <p className="text-[12px] text-white/40">••••{item.last4}</p>
               </div>
-              <button type="button" className="text-white/40 hover:text-white" onClick={() => providerDelete.ask(item.provider)}>
+              <button type="button" className="shrink-0 text-white/40 hover:text-white" onClick={() => providerDelete.ask(item.provider)}>
                 Delete
               </button>
             </div>

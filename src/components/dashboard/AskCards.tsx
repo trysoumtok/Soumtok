@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { livePlanEstimate, type AgentEvent, type AskQuestion } from '../../../shared/agent'
 import { formatUserCode } from '../../../shared/connectLinks'
+import { normalizeLiveStep } from '../../../shared/toolFeed'
 import { PluginLogo } from './PluginLogos'
 
 export function AskCard({
@@ -220,45 +221,107 @@ export function AgentLiveCard({
   files,
   elapsed,
   steps = [],
+  done = false,
+  picked,
+  preview,
+  understanding,
 }: {
   mode: string
   step: string
   files: string[]
   elapsed: number
   steps?: string[]
+  done?: boolean
+  picked?: string
+  preview?: { path: string; text: string }
+  understanding?: string
 }) {
   const seconds = Math.max(0, Math.floor(elapsed))
   const clock = seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`
-  const active = step.toLowerCase()
+  const shown = normalizeLiveStep(step)
+  const lower = shown.toLowerCase()
+  const chatty = _mode === 'chat' || _mode === 'ask' || _mode === 'plan'
+  const active = files.at(-1) || preview?.path || ''
+  const writing = active ? `Writing ${active}` : 'Writing the change'
+  const analyzing = /analyz|understand/.test(lower)
+  const handed = /passed to the model/.test(lower)
+  const work =
+    shown && !analyzing && !handed && !/^working$/i.test(shown)
+      ? shown
+      : chatty
+        ? 'Answering'
+        : writing
+  const stages = ['Analyzing and understanding', 'Passed to the model', work]
+  const phase = done ? 3 : analyzing ? 0 : handed ? 1 : 2
+  const header = done ? stages[2] : stages[Math.min(phase, 2)]
+  const snippet = preview?.text
+    ? preview.text.split('\n').slice(-14).join('\n')
+    : ''
   return (
-    <div className="max-w-[560px]">
-      <div className="flex items-baseline justify-between gap-3">
-        <p className="min-w-0 truncate text-[14px] text-white">{step || 'Working'}</p>
-        <span className="shrink-0 text-[12px] tabular-nums text-white/35">{clock}</span>
+    <div className="max-w-[520px] rounded-xl border border-white/[0.08] bg-[#141413] px-3.5 py-3">
+      <div className="flex items-center justify-between gap-3">
+        <p className="flex min-w-0 items-center gap-2 truncate text-[13px] font-medium text-white">
+          {done ? (
+            <span className="h-3.5 w-3.5 shrink-0 rounded-full border border-white/35" />
+          ) : (
+            <span className="h-3.5 w-3.5 shrink-0 animate-spin rounded-full border border-white/25 border-t-white/80" />
+          )}
+          <span className="truncate">{header}</span>
+        </p>
+        <span className="shrink-0 text-[12px] tabular-nums text-white/40">{clock}</span>
       </div>
+      {picked ? <p className="mt-1 truncate pl-[22px] text-[11px] text-white/35">{picked}</p> : null}
+      {!done && analyzing && understanding ? (
+        <p className="mt-1 pl-[22px] text-[13px] leading-5 text-white/55">{understanding}</p>
+      ) : null}
+      <ol className="mt-2.5 space-y-1">
+        {stages.map((item, index) => {
+          const on = !done && index === phase
+          const finished = done || index < phase
+          return (
+            <li
+              key={`${item}-${index}`}
+              className={`flex gap-2.5 text-[13px] leading-5 ${
+                on ? 'text-white' : finished ? 'text-white/45' : 'text-white/28'
+              }`}
+            >
+              <span className="w-4 shrink-0 tabular-nums text-white/30">{finished ? '✓' : `${index + 1}.`}</span>
+              <span className="min-w-0 truncate">{item}</span>
+            </li>
+          )
+        })}
+      </ol>
       {steps.length > 0 && (
         <ol className="mt-3 space-y-1.5">
-          {steps.map((item, index) => {
-            const on = active.includes(item.slice(0, 18).toLowerCase())
-            return (
-              <li key={item} className={`flex gap-3 text-[13px] leading-5 ${on ? 'text-white/80' : 'text-white/35'}`}>
-                <span className="w-4 shrink-0 tabular-nums text-white/30">{index + 1}.</span>
-                <span>{item}</span>
-              </li>
-            )
-          })}
+          {steps.map((item, index) => (
+            <li key={item} className="flex gap-3 text-[13px] leading-5 text-white/35">
+              <span className="w-4 shrink-0 tabular-nums text-white/30">{index + 1}.</span>
+              <span>{item}</span>
+            </li>
+          ))}
         </ol>
       )}
       {files.length > 0 && (
-        <ul className="mt-3 space-y-1">
+        <div className="mt-3 flex flex-wrap gap-1">
           {files.map((path) => (
-            <li key={path} className="flex gap-2 font-mono text-[12px] leading-5 text-white/70">
-              <span className="shrink-0 text-[#f54e00]">✓</span>
-              <span className="min-w-0 truncate">{path}</span>
-            </li>
+            <span
+              key={path}
+              className={`max-w-full truncate rounded-md border px-1.5 py-0.5 font-mono text-[11px] ${
+                path === active
+                  ? 'border-[#f54e00]/40 bg-[#f54e00]/10 text-white'
+                  : 'border-white/10 bg-white/[0.04] text-white/70'
+              }`}
+            >
+              {path}
+            </span>
           ))}
-        </ul>
+        </div>
       )}
+      {snippet && !done ? (
+        <pre className="mt-3 max-h-44 overflow-hidden rounded-lg border border-white/[0.08] bg-[#0d0d0c] px-2.5 py-2 font-mono text-[11px] leading-[1.45] text-white/70">
+          {snippet}
+        </pre>
+      ) : null}
     </div>
   )
 }

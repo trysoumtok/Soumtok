@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  catalogConnectTargets,
   classifyLink,
   formatUserCode,
   matchUnconnectedCatalog,
+  mentionsCatalogName,
   mintUserCode,
   splitTextWithLinks,
   wantsCatalogConnect,
@@ -39,4 +41,15 @@ test('unconnected catalog matches firebase even without a hosted MCP URL', () =>
   )
   assert.equal(wantsCatalogConnect('build with firebase'), true)
   assert.equal(wantsCatalogConnect('what is firebase'), false)
+})
+
+test('light/dark footer edits do not start a GitHub connect card', () => {
+  const prompt = 'i mean add a section at the footer for the theme changer change to light to dark go on'
+  assert.equal(mentionsCatalogName(prompt, 'gh'), false)
+  assert.equal(mentionsCatalogName('use gh for this', 'gh'), true)
+  assert.equal(mentionsCatalogName('add a linear-gradient', 'linear'), false)
+  assert.equal(matchUnconnectedCatalog(prompt, []).some((item) => item.id === 'github'), false)
+  assert.equal(catalogConnectTargets(prompt, [], { codingFollowUp: true }).length, 0)
+  assert.ok(catalogConnectTargets('connect github', []).some((item) => item.id === 'github'))
+  assert.ok(catalogConnectTargets('build with firebase', []).some((item) => item.id === 'firebase'))
 })

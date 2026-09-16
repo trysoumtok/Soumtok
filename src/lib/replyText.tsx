@@ -1,44 +1,85 @@
 import type { ReactNode } from 'react'
-import { classifyLink, linkChipClass, splitTextWithLinks, type ClassifiedLink } from '../../shared/connectLinks'
+import { classifyLink, splitTextWithLinks, type ClassifiedLink } from '../../shared/connectLinks'
+import { parseReplyBlocks, type ReplyBlock } from '../../shared/replyFormat'
 
-type Block =
-  | { type: 'h'; level: number; text: string }
-  | { type: 'p'; text: string }
-  | { type: 'ul'; items: string[] }
-  | { type: 'ol'; items: string[] }
-
-/** Light markdown for assistant replies: headings, point-form lists, paragraphs, bold, code, links. */
+/** Light markdown for assistant replies: headings, lists, tables, paragraphs, bold, code, links. */
 export function ReplyMarkdown({ text }: { text: string }) {
-  const blocks = parseBlocks(text)
+  const blocks = parseReplyBlocks(text)
   return (
     <div className="space-y-4 text-[14px] leading-7 text-white/80">
-      {blocks.map((block, index) => {
-        if (block.type === 'h') {
-          const size = block.level === 1 ? 'text-[18px]' : block.level === 2 ? 'text-[16px]' : 'text-[15px]'
-          return (
-            <h2 key={index} className={`${size} font-medium tracking-tight text-white ${index === 0 ? '' : 'pt-2'}`}>
-              {inline(block.text)}
-            </h2>
-          )
-        }
-        if (block.type === 'ul' || block.type === 'ol') {
-          const Tag = block.type === 'ol' ? 'ol' : 'ul'
-          return (
-            <Tag key={index} className={`space-y-3.5 ${block.type === 'ol' ? 'list-decimal' : 'list-disc'} pl-5 marker:text-white/35`}>
-              {block.items.map((item, itemIndex) => (
-                <Point key={itemIndex} text={item} />
-              ))}
-            </Tag>
-          )
-        }
-        return (
-          <p key={index} className="whitespace-pre-wrap">
-            {inline(block.text)}
-          </p>
-        )
-      })}
+      {blocks.map((block, index) => (
+        <ReplyBlockView key={index} block={block} first={index === 0} />
+      ))}
     </div>
   )
+}
+
+function ReplyBlockView({ block, first }: { block: ReplyBlock; first: boolean }) {
+  if (block.type === 'h') {
+    const size = block.level === 1 ? 'text-[18px]' : block.level === 2 ? 'text-[16px]' : 'text-[15px]'
+    return (
+      <h2 className={`${size} font-medium tracking-tight text-white ${first ? '' : 'pt-2'}`}>
+        {inline(block.text)}
+      </h2>
+    )
+  }
+  if (block.type === 'table') return <RecordTable headers={block.headers} rows={block.rows} />
+  if (block.type === 'ul' || block.type === 'ol') {
+    const Tag = block.type === 'ol' ? 'ol' : 'ul'
+    return (
+      <Tag className={`space-y-3.5 ${block.type === 'ol' ? 'list-decimal' : 'list-disc'} pl-5 marker:text-white/35`}>
+        {block.items.map((item, itemIndex) => (
+          <Point key={itemIndex} text={item} />
+        ))}
+      </Tag>
+    )
+  }
+  return <p className="whitespace-pre-wrap">{inline(block.text)}</p>
+}
+
+function RecordTable({ headers, rows }: { headers: string[]; rows: string[][] }) {
+  const cols = Math.max(headers.length, ...rows.map((row) => row.length), 1)
+  const labels = Array.from({ length: cols }, (_, index) => headers[index] || '')
+  return (
+    <div className="overflow-x-auto rounded-xl border border-white/10">
+      <table className="w-full min-w-[320px] border-collapse text-left text-[13px]">
+        <thead>
+          <tr className="border-b border-white/10 bg-white/[0.03]">
+            {labels.map((header, index) => (
+              <th key={index} className="px-3 py-2 font-medium text-white/45">
+                {inline(header || ' ')}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, rowIndex) => (
+            <tr key={rowIndex} className="border-t border-white/[0.07]">
+              {labels.map((_, col) => (
+                <td key={col} className="px-3 py-2 align-top text-white/80">
+                  {cell(row[col] || '', col, labels)}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+function cell(text: string, col: number, headers: string[]) {
+  const header = (headers[col] || '').toLowerCase()
+  const codeish = /type|name|host|value|target|data|content/.test(header) || col > 0
+  const body = stripWrap(text)
+  if (!codeish) return inline(text)
+  return (
+    <code className="whitespace-pre-wrap break-all font-mono text-[12px] text-white/90">{body}</code>
+  )
+}
+
+function stripWrap(text: string) {
+  return text.trim().replace(/^`+|`+$/g, '')
 }
 
 function Point({ text }: { text: string }) {
@@ -68,138 +109,16 @@ function Point({ text }: { text: string }) {
   )
 }
 
-function parseBlocks(raw: string): Block[] {
-  const lines = raw.replace(/\r\n/g, '\n').trim().split('\n')
-  const blocks: Block[] = []
-  let i = 0
-
-  while (i < lines.length) {
-    const line = lines[i]
-    if (!line.trim()) {
-      i += 1
-      continue
-    }
-
-    const heading = /^(#{1,3})\s+(.+)\s*$/.exec(line)
-    if (heading) {
-      blocks.push({ type: 'h', level: heading[1].length, text: heading[2].trim() })
-      i += 1
-      continue
-    }
-
-    const bullet = /^\s*[-*]\s+(.+)/.exec(line)
-    const numbered = /^\s*\d+\.\s+(.+)/.exec(line)
-    if (bullet || numbered) {
-      const ordered = Boolean(numbered)
-      const items: string[] = []
-      while (i < lines.length) {
-        const cur = lines[i]
-        if (!cur.trim()) {
-          const next = nextFilled(lines, i + 1)
-          if (!next || isHeading(next)) break
-          if (isListItem(next, true) || isListItem(next, false)) {
-            i = skipBlanks(lines, i)
-            continue
-          }
-          items[items.length - 1] += `\n\n${next.trim()}`
-          i = skipBlanks(lines, i) + 1
-          continue
-        }
-        const item = ordered ? /^\s*\d+\.\s+(.+)/.exec(cur) : /^\s*[-*]\s+(.+)/.exec(cur)
-        if (item) {
-          items.push(item[1])
-          i += 1
-          continue
-        }
-        if (isHeading(cur) || isListItem(cur, !ordered)) break
-        if (items.length) {
-          items[items.length - 1] += ` ${cur.trim()}`
-          i += 1
-          continue
-        }
-        break
-      }
-      if (items.length) blocks.push({ type: ordered ? 'ol' : 'ul', items })
-      continue
-    }
-
-    const chunk = [line]
-    i += 1
-    while (i < lines.length && lines[i].trim() && !isHeading(lines[i]) && !isListItem(lines[i], false) && !isListItem(lines[i], true)) {
-      chunk.push(lines[i])
-      i += 1
-    }
-    blocks.push({ type: 'p', text: chunk.join('\n') })
-  }
-
-  return blocks
-}
-
-function isHeading(line: string) {
-  return /^#{1,3}\s+\S/.test(line)
-}
-
-function isListItem(line: string, ordered: boolean) {
-  return ordered ? /^\s*\d+\.\s+\S/.test(line) : /^\s*[-*]\s+\S/.test(line)
-}
-
-function nextFilled(lines: string[], from: number) {
-  for (let i = from; i < lines.length; i += 1) {
-    if (lines[i].trim()) return lines[i]
-  }
-  return ''
-}
-
-function skipBlanks(lines: string[], from: number) {
-  let i = from
-  while (i < lines.length && !lines[i].trim()) i += 1
-  return i
-}
-
 export function ChatLinkChip({ link }: { link: ClassifiedLink }) {
   return (
     <a
       href={link.url}
       target="_blank"
       rel="noreferrer"
-      className={`my-0.5 inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[12px] no-underline ${linkChipClass(link.kind)}`}
+      className="break-all text-[#9ec4ff] underline decoration-white/25 underline-offset-2 hover:text-white"
     >
-      <LinkGlyph kind={link.kind} />
-      <span className="max-w-[240px] truncate">{link.label}</span>
+      {link.label}
     </a>
-  )
-}
-
-function LinkGlyph({ kind }: { kind: ClassifiedLink['kind'] }) {
-  if (kind === 'github') {
-    return (
-      <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="currentColor" aria-hidden>
-        <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8" />
-      </svg>
-    )
-  }
-  if (kind === 'auth') {
-    return (
-      <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden>
-        <rect x="3" y="7" width="10" height="7" rx="1.5" />
-        <path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2" />
-      </svg>
-    )
-  }
-  if (kind === 'share') {
-    return (
-      <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden>
-        <circle cx="4" cy="8" r="2" />
-        <circle cx="12" cy="4" r="2" />
-        <circle cx="12" cy="12" r="2" />
-        <path d="M6 7.2 10 4.8M6 8.8 10 11.2" />
-      </svg>
-    )
-  }
-  return (
-    <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden>
-      <path d="M6.5 9.5 4.2 7.2a2.4 2.4 0 0 1 3.4-3.4L10 6.2M9.5 6.5l2.3 2.3a2.4 2.4 0 0 1-3.4 3.4L6 9.8" />
-    </svg>
   )
 }
 

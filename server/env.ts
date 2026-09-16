@@ -5,7 +5,7 @@ config()
 export const env = {
   databaseUrl: process.env.DATABASE_URL?.trim() ?? '',
   betterAuthSecret: process.env.BETTER_AUTH_SECRET?.trim() ?? '',
-  betterAuthUrl: process.env.BETTER_AUTH_URL?.trim() || 'http://localhost:5173',
+  betterAuthUrl: (process.env.BETTER_AUTH_URL?.trim() || 'http://localhost:5173').replace(/\/$/, ''),
   googleClientId: process.env.GOOGLE_CLIENT_ID?.trim() ?? '',
   googleClientSecret: process.env.GOOGLE_CLIENT_SECRET?.trim() ?? '',
   githubClientId: process.env.GITHUB_CLIENT_ID?.trim() ?? '',
@@ -22,6 +22,7 @@ export const env = {
   twilioToken: process.env.TWILIO_AUTH_TOKEN?.trim() ?? '',
   twilioFrom: process.env.TWILIO_FROM?.trim() ?? '',
   falKey: process.env.FAL_KEY?.trim() ?? '',
+  replicateToken: (process.env.REPLICATE_API_TOKEN || process.env.REPLICATE_API_KEY)?.trim() ?? '',
   openaiKey: process.env.OPENAI_API_KEY?.trim() ?? '',
   anthropicKey: process.env.ANTHROPIC_API_KEY?.trim() ?? '',
   googleAiKey: process.env.GOOGLE_AI_API_KEY?.trim() ?? '',
@@ -40,6 +41,18 @@ export const env = {
   payheroLipwaUrl: process.env.PAYHERO_LIPWA_URL?.trim() ?? '',
   mpesaKesPerUsd: Number(process.env.MPESA_KES_PER_USD) || 130,
   port: Number(process.env.PORT) || 3000,
+  /** While building Soumtok: any model + no trial token cap (set on Railway/local). */
+  openAccess: process.env.SOUMTOK_OPEN_ACCESS === '1',
+}
+
+/** Local dev or explicit flag — skip trial model list and trial token quota. */
+export function openAccessForBuilding() {
+  if (env.openAccess) return true
+  try {
+    return isLocalHost(new URL(env.betterAuthUrl).hostname)
+  } catch {
+    return false
+  }
 }
 
 function isLocalHost(hostname: string) {
@@ -65,6 +78,15 @@ export const trustedOrigins = [
   'https://soumtok.com',
   'https://www.soumtok.com',
 ]
+
+export function oauthRedirectUris() {
+  const base = env.betterAuthUrl.replace(/\/$/, '')
+  return {
+    baseUrl: base,
+    google: `${base}/api/auth/callback/google`,
+    github: `${base}/api/auth/callback/github`,
+  }
+}
 
 export function hasDatabase() {
   return env.databaseUrl.startsWith('postgres')
@@ -92,6 +114,15 @@ export function hasTwilio() {
 
 export function hasFal() {
   return Boolean(env.falKey)
+}
+
+export function hasReplicate() {
+  return Boolean(env.replicateToken)
+}
+
+/** Still-image generation: Replicate (Flux 2 Max) or Fal Schnell fallback. */
+export function hasImageGen() {
+  return hasReplicate() || hasFal()
 }
 
 export function platformKey(provider: string) {

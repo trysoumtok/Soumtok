@@ -1,0 +1,45 @@
+# Soumtok
+
+> Africa's #1 AI coding platform.
+
+Soumtok is Africa's #1 AI coding platform. The most affordable powerful coding agent — start from $13.99 a month. Open Studio, attach a repo, pick a model, and ship.
+
+## Product
+
+- Studio chat with frontier models
+- GitHub as the source of truth — agents open branches and pull requests
+- Plugins, connectors, and skills
+- Cloud agents that ship as pull requests
+
+## Links
+
+- Home: https://soumtok.com
+- Docs: https://soumtok.com/docs
+- Help: https://soumtok.com/help
+- Contact: https://soumtok.com/contact
+- GitHub: https://github.com/Soumtok
+- Email: support@soumtok.com
+
+## Docs
+
+- [Docs](https://soumtok.com/docs): Africa's #1 AI coding platform. Studio, GitHub, models, and how the desk works.
+- [Quick start](https://soumtok.com/docs/quick-start): Create an account, finish onboarding, open Studio, and ship your first chat on Soumtok.
+- [Accounts](https://soumtok.com/docs/accounts): Sign up with Google, GitHub, or email. Sessions, verification, and how Soumtok accounts work.
+- [Handle & public profile](https://soumtok.com/docs/profile): Claim a handle people can find. Public profiles, reserved paths, and privacy on Soumtok.
+- [Studio chat](https://soumtok.com/docs/studio): Studio is the desk. Attach GitHub, pick a model, add skills, and hand the work to the agent.
+- [Models](https://soumtok.com/docs/models): DeepSeek, Gemini, Claude, Grok, and GPT in one picker. Bring your own keys when you want.
+- [Codebase](https://soumtok.com/docs/codebase): Grant GitHub repos, attach a project to chat, and keep GitHub as the source of truth.
+- [Automations](https://soumtok.com/docs/automations): Recurring Studio jobs on a repo — triggers, tools, and spend, without leaving Soumtok.
+- [Cloud agents](https://soumtok.com/docs/agents): Cloud agents open a branch and a pull request on GitHub. The contract is a PR, not a zip.
+- [Dashboard](https://soumtok.com/docs/dashboard): Overview, usage, members, billing, and the rest of the workspace around Studio.
+- [GitHub](https://soumtok.com/docs/github): Connect the Soumtok GitHub App, grant repos, and let agents open pull requests.
+- [Plugins](https://soumtok.com/docs/plugins): Install MCP plugins so Studio can talk to the tools you already use.
+- [Connectors](https://soumtok.com/docs/connectors): Link Slack, Linear, Figma, and the rest. Soumtok talks to the stack you already pay for.
+- [Skills](https://soumtok.com/docs/skills): Packaged instructions the agent can load. Built-in skills plus the ones you upload.
+- [API keys](https://soumtok.com/docs/keys): Platform keys and bring-your-own keys for OpenAI, Anthropic, Google, DeepSeek, and xAI.
+- [Billing](https://soumtok.com/docs/billing): Plans, usage, included tokens, and how billing works on Soumtok.
+- [Settings & security](https://soumtok.com/docs/settings): Profile, appearance, two-factor, sessions, and how Soumtok handles your account.
+- [API](https://soumtok.com/docs/api): Auth, Studio, GitHub, and billing endpoints for the Soumtok HTTP API.
+- [CLI](https://soumtok.com/docs/cli): Run Soumtok locally with Vite, Neon, and the same Studio desk you use in production.
+- [Plans](https://soumtok.com/docs/plans): Pro from $13.99 a month. Trial is free. What is included and how to upgrade.
+- [Company](https://soumtok.com/docs/company): Soumtok is built in Nairobi. Contact, GitHub org, and how we talk about the product.

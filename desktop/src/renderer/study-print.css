@@ -1,0 +1,664 @@
+body{margin:0;background:#f3ece0;font-family:ui-sans-serif,system-ui,sans-serif;color:#161412}
+.ms-doc {
+  background: #f3ece0;
+  color: #161412;
+  border-radius: 2px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.45);
+  overflow: visible;
+}
+.ms-cover {
+  position: relative;
+  overflow: hidden;
+  background: #141210;
+  color: #f3ece0;
+  min-height: min(920px, 100vh);
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 40px 56px;
+  break-after: page;
+  page-break-after: always;
+}
+.ms-cover::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 8px;
+  background: #f54e00;
+}
+.ms-cover-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+}
+.ms-powered {
+  margin: 0;
+  font-size: 12px;
+  color: #cbbba8;
+}
+.ms-lockup {
+  height: 28px;
+  width: auto;
+}
+.ms-lockup.invert {
+  filter: brightness(0) invert(1);
+}
+.ms-cover-center {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 48px 0;
+}
+.ms-provider-mark {
+  width: 96px;
+  height: 96px;
+  border-radius: 24px;
+  background: #f3ece0;
+  display: grid;
+  place-items: center;
+}
+.ms-provider-mark img {
+  width: 56px;
+  height: 56px;
+  object-fit: contain;
+}
+.ms-cover-provider {
+  margin: 28px 0 0;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: #f54e00;
+}
+.ms-cover h1 {
+  margin: 12px 0 0;
+  max-width: 18ch;
+  font-size: 52px;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  line-height: 1.05;
+}
+.ms-cover-line {
+  margin: 16px 0 0;
+  font-size: 16px;
+  color: #d8cfc3;
+}
+.ms-cover-price {
+  margin: 12px 0 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: #f3ece0;
+}
+.ms-cover-gen {
+  margin: 22px 0 0;
+  font-size: 12px;
+  color: #8a8176;
+}
+.ms-cover-bottom {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  font-size: 11px;
+  color: #8a8176;
+}
+.ms-body {
+  padding: 40px 48px 56px;
+}
+.ms-dochead {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 16px;
+  padding-bottom: 16px;
+  border-bottom: 2px solid #161412;
+}
+.ms-id {
+  margin: 4px 0 0;
+  font-size: 13px;
+  color: #5c564e;
+}
+.ms-id code {
+  font-size: 12px;
+}
+.ms-gallery {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  margin-top: 8px;
+}
+.ms-figure {
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid #e4d9c8;
+  border-radius: 16px;
+  background: #fffaf3;
+}
+.ms-figure img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+.ms-figure figcaption {
+  padding: 10px 12px 12px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #3d3832;
+}
+.ms-figure figcaption span {
+  display: block;
+  margin-top: 4px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #8a8176;
+}
+.ms-quote {
+  margin: 0 0 12px;
+  padding: 16px 18px;
+  border: 1px solid #e4d9c8;
+  border-radius: 16px;
+  background: #fffaf3;
+}
+.ms-quote p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.65;
+}
+.ms-quote cite {
+  display: block;
+  margin-top: 8px;
+  font-style: normal;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #f54e00;
+}
+.ms-sources {
+  margin: 0;
+  padding-left: 18px;
+}
+.ms-sources a {
+  color: #b33c00;
+  font-weight: 600;
+}
+.ms-url {
+  font-size: 11px;
+  color: #8a8176;
+  word-break: break-all;
+}
+.ms-eyebrow {
+  margin: 0;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: #f54e00;
+}
+.ms-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 28px;
+}
+.ms-stat {
+  padding: 12px 14px;
+  border: 1px solid #e4d9c8;
+  border-radius: 12px;
+  background: #fffaf3;
+}
+.ms-stat-hint {
+  margin: 0;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #f54e00;
+}
+.ms-stat-value {
+  margin: 4px 0 0;
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+}
+.ms-stat-label {
+  margin: 2px 0 0;
+  font-size: 11px;
+  color: #6b645c;
+}
+.ms-toc {
+  margin-top: 36px;
+  padding: 22px 24px;
+  border: 1px solid #e4d9c8;
+  border-radius: 16px;
+  background: #fffaf3;
+}
+.ms-toc ol {
+  margin: 12px 0 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 16px;
+  list-style: none;
+}
+.ms-toc li {
+  display: flex;
+  gap: 10px;
+  font-size: 13px;
+}
+.ms-toc-n {
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  color: #f54e00;
+}
+.ms-split {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 16px;
+  margin: 48px 0 16px;
+  padding-top: 28px;
+  border-top: 1px solid #e4d9c8;
+}
+.ms-split h2 {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+}
+.ms-lead {
+  margin: 0 0 16px;
+  max-width: 62ch;
+  font-size: 14px;
+  line-height: 1.6;
+  color: #3d3832;
+}
+.ms-chart {
+  padding: 20px;
+  border: 1px solid #e4d9c8;
+  border-radius: 16px;
+  background: #fffaf3;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.ms-bar-top {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+  font-weight: 500;
+}
+.ms-bar-n {
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  color: #f54e00;
+}
+.ms-bar-track {
+  margin-top: 4px;
+  height: 8px;
+  border-radius: 999px;
+  background: #e4d9c8;
+  overflow: hidden;
+}
+.ms-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: #f54e00;
+}
+.ms-bar-note {
+  margin: 4px 0 0;
+  font-size: 11px;
+  color: #6b645c;
+}
+.ms-chapter {
+  margin-top: 40px;
+}
+.ms-ch-kicker {
+  margin: 0;
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  color: #f54e00;
+}
+.ms-chapter h2 {
+  margin: 4px 0 0;
+  font-size: 26px;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+}
+.ms-chapter p {
+  margin: 14px 0 0;
+  max-width: 66ch;
+  font-size: 15px;
+  line-height: 1.75;
+  color: #2a2622;
+}
+.ms-list {
+  margin: 14px 0 0;
+  padding-left: 20px;
+  max-width: 66ch;
+}
+.ms-list li {
+  font-size: 14px;
+  line-height: 1.65;
+  color: #3d3832;
+  margin-bottom: 6px;
+}
+.ms-table-wrap {
+  overflow-x: auto;
+  border: 1px solid #e4d9c8;
+  border-radius: 12px;
+}
+.ms-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  text-align: left;
+}
+.ms-table thead {
+  background: #141210;
+  color: #f3ece0;
+}
+.ms-table th,
+.ms-table td {
+  padding: 10px 12px;
+  vertical-align: top;
+}
+.ms-table tbody tr {
+  border-top: 1px solid #e4d9c8;
+}
+.ms-table tbody tr:nth-child(even) {
+  background: #fffaf3;
+}
+.ms-table td.strong,
+.ms-spec th {
+  font-weight: 600;
+}
+.ms-spec th {
+  width: 34%;
+  color: #5c564e;
+  background: #fffaf3;
+}
+.ms-cards {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 16px;
+}
+.ms-card {
+  padding: 16px;
+  border: 1px solid #e4d9c8;
+  border-radius: 14px;
+  background: #fffaf3;
+}
+.ms-card-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+.ms-card-body {
+  margin: 8px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #3d3832;
+}
+.ms-card-meta {
+  margin: 8px 0 0;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: #f54e00;
+}
+.ms-price-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+.ms-price-card .ms-card-meta {
+  margin: 0;
+}
+.ms-price-sub {
+  margin-top: 8px;
+  font-size: 13px;
+  color: #6b645c;
+}
+.ms-price-table-title {
+  margin: 20px 0 8px;
+  font-size: 14px;
+  font-weight: 600;
+}
+.ms-price-tips {
+  margin-top: 12px;
+}
+.ms-timeline {
+  margin: 0;
+  padding: 0 0 0 22px;
+  border-left: 2px solid #f54e00;
+  list-style: none;
+}
+.ms-timeline li {
+  position: relative;
+  padding: 0 0 22px 4px;
+}
+.ms-timeline li::before {
+  content: "";
+  position: absolute;
+  left: -29px;
+  top: 6px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #f54e00;
+}
+.ms-time-when {
+  margin: 0;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #f54e00;
+}
+.ms-time-title {
+  margin: 4px 0 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+.ms-timeline p {
+  margin: 6px 0 0;
+  font-size: 14px;
+  line-height: 1.6;
+  color: #3d3832;
+}
+.ms-faq {
+  padding-bottom: 16px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid #e4d9c8;
+}
+.ms-faq-q {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+.ms-faq p + p,
+.ms-faq p:not(.ms-faq-q) {
+  margin: 6px 0 0;
+  font-size: 14px;
+  line-height: 1.6;
+  color: #3d3832;
+}
+.ms-footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 48px;
+  background: #141210;
+  color: #cbbba8;
+  font-size: 11px;
+}
+.ms-footer img {
+  width: 16px;
+  height: 16px;
+  vertical-align: -3px;
+  margin-right: 6px;
+}
+@media (max-width: 720px) {
+  .ms-stats,
+  .ms-toc ol,
+  .ms-cards {
+    grid-template-columns: 1fr 1fr;
+  }
+  .ms-cover,
+  .ms-body,
+  .ms-footer {
+    padding-left: 24px;
+    padding-right: 24px;
+  }
+  .ms-cover h1 { font-size: 34px; }
+}
+
+@page {
+  size: A4 portrait;
+  margin: 12mm 14mm;
+}
+
+@media print {
+  html,
+  body {
+    margin: 0;
+    padding: 0;
+    background: #f3ece0;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  .ms-doc {
+    overflow: visible !important;
+    box-shadow: none;
+    border-radius: 0;
+    width: 100%;
+    max-width: none;
+  }
+
+  .ms-cover {
+    min-height: 0;
+    height: 100vh;
+    max-height: 100vh;
+    box-sizing: border-box;
+    padding: 32px 40px 28px;
+    overflow: visible;
+    break-after: page;
+    page-break-after: always;
+  }
+
+  .ms-cover h1 {
+    font-size: 40px;
+  }
+
+  .ms-cover-center {
+    padding: 32px 0;
+  }
+
+  .ms-body {
+    padding: 0 0 24px;
+  }
+
+  .ms-hero {
+    font-size: 16px;
+    line-height: 1.65;
+  }
+
+  .ms-split {
+    margin-top: 28px;
+    padding-top: 20px;
+    break-inside: auto;
+    page-break-inside: auto;
+  }
+
+  .ms-split h2 {
+    break-after: avoid;
+    page-break-after: avoid;
+  }
+
+  .ms-chapter {
+    break-inside: auto;
+    page-break-inside: auto;
+  }
+
+  .ms-chapter h2,
+  .ms-ch-kicker {
+    break-after: avoid;
+    page-break-after: avoid;
+  }
+
+  .ms-chapter p,
+  .ms-list li {
+    orphans: 3;
+    widows: 3;
+  }
+
+  .ms-stat,
+  .ms-card,
+  .ms-quote,
+  .ms-figure,
+  .ms-faq,
+  .ms-bar,
+  .ms-toc {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  .ms-table-wrap {
+    break-inside: auto;
+    page-break-inside: auto;
+    overflow: visible;
+  }
+
+  .ms-table thead {
+    display: table-header-group;
+  }
+
+  .ms-table tr {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  .ms-chart {
+    break-inside: auto;
+    page-break-inside: auto;
+  }
+
+  .ms-gallery {
+    grid-template-columns: 1fr;
+    gap: 16px;
+  }
+
+  .ms-figure img {
+    max-height: 240mm;
+    object-fit: contain;
+  }
+
+  .ms-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ms-cards {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ms-toc ol {
+    grid-template-columns: 1fr;
+  }
+
+  .ms-footer {
+    break-inside: avoid;
+    page-break-inside: avoid;
+    margin-top: 16px;
+  }
+}

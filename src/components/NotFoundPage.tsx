@@ -1,4 +1,3 @@
-import { useEffect } from 'react'
 import { useSession } from '../lib/auth-client'
 import { navigate } from '../lib/nav'
 import { Logo } from './ui'
@@ -21,13 +20,6 @@ function ChipIcon() {
 export function NotFoundPage() {
   const { data: session } = useSession()
   const path = typeof window !== 'undefined' ? window.location.pathname : '/'
-
-  useEffect(() => {
-    document.title = '404 · Soumtok'
-    return () => {
-      document.title = 'Soumtok'
-    }
-  }, [])
 
   return (
     <div className="theme-app relative flex min-h-svh flex-col bg-[#0b0b0a] text-white">

@@ -12,6 +12,7 @@ import {
 test('extracts urls and flags web questions', () => {
   assert.deepEqual(extractUrls('see https://example.com/docs and https://example.com/docs'), ['https://example.com/docs'])
   assert.equal(needsWeb('what is the latest on rust 2024'), true)
+  assert.equal(needsWeb('add the real svg logo of kfc'), true)
   assert.equal(needsWeb('make the header sticky'), false)
 })
 

@@ -1,5 +1,7 @@
 import { cloneElement, isValidElement, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactElement, type ReactNode, type RefObject } from 'react'
 import type { AgentEvent } from '../../../shared/agent'
+import { previewStamp } from '../../../shared/preview'
+import { filesFromClipboard } from '../../lib/chatFiles'
 import { Bone } from '../Loaders'
 import { CodeEditor } from './CodeEditor'
 
@@ -32,6 +34,7 @@ export function StudioDesktop({
   onSaveFile,
   openFile,
   onRunCommand,
+  onPasteFiles,
 }: {
   html: string
   files: Record<string, string>
@@ -46,6 +49,7 @@ export function StudioDesktop({
   onSaveFile: (path: string, content: string) => void
   openFile?: string
   onRunCommand?: (command: string) => Promise<string>
+  onPasteFiles?: (files: File[]) => void
 }) {
   const desk = useRef<HTMLDivElement>(null)
   const seq = useRef(1)
@@ -199,6 +203,7 @@ export function StudioDesktop({
                   files={files}
                   busy={busy}
                   control={control}
+                  onPasteFiles={onPasteFiles}
                 />
               )}
               {win.kind === 'files' && (
@@ -390,11 +395,11 @@ function BrowserChrome({
   siteTitle,
   html,
   files,
-  busy,
   onMoveWindow,
   onClose,
   onMin,
   onMax,
+  onPasteFiles,
 }: {
   siteTitle?: string
   origin?: string
@@ -406,41 +411,81 @@ function BrowserChrome({
   onClose?: () => void
   onMin?: () => void
   onMax?: () => void
+  onPasteFiles?: (files: File[]) => void
 }) {
   const frame = useRef<HTMLIFrameElement>(null)
-  const stamp = `${html || ''}\n${Object.entries(files || {}).map(([key, value]) => `${key}:${value.length}`).join('|')}`
+  const stamp = previewStamp(html || '', files || {})
+  const seq = useRef(0)
   const [path, setPath] = useState('')
-  const [frameReady, setFrameReady] = useState(false)
-  const [loadKey, setLoadKey] = useState(0)
-  const href = path ? `${window.location.origin}${path}` : ''
+  const [served, setServed] = useState('')
+  const [bust, setBust] = useState(0)
+  const href = path && served ? `${window.location.origin}${path}${path.includes('?') ? '&' : '?'}v=${served}.${bust}` : ''
   const label = siteTitle || 'Preview'
-  const waiting = Boolean(busy) || Boolean(html) || Object.keys(files || {}).length > 0
-  const showSkeleton = waiting && !frameReady
+  const refreshing = Boolean(stamp) && served !== stamp
+  const showSkeleton = !href
 
   useEffect(() => {
-    setFrameReady(false)
     if (!html && !Object.keys(files || {}).length) {
       setPath('')
+      setServed('')
       return
     }
-    let cancel = false
-    void fetch('/api/studio/site', {
-      method: 'POST',
-      credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ html: html || '', files: files || {} }),
-    })
-      .then((res) => res.json())
-      .then((data: { path?: string }) => {
-        if (cancel || !data.path) return
-        setPath(data.path)
-        setLoadKey((value) => value + 1)
+    const next = ++seq.current
+    const ac = new AbortController()
+    const timer = window.setTimeout(() => {
+      void fetch('/api/studio/site', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        signal: ac.signal,
+        body: JSON.stringify({ html: html || '', files: files || {}, seq: next }),
       })
-      .catch(() => undefined)
+        .then((res) => res.json())
+        .then((data: { path?: string }) => {
+          if (next !== seq.current || !data.path) return
+          setPath(data.path)
+          setServed(stamp)
+        })
+        .catch(() => undefined)
+    }, 80)
     return () => {
-      cancel = true
+      ac.abort()
+      window.clearTimeout(timer)
     }
+    // stamp already covers html + files bodies
   }, [stamp])
+
+  useEffect(() => {
+    const node = frame.current
+    if (!node || !onPasteFiles) return undefined
+    let doc: Document | null = null
+    const onPaste = (event: ClipboardEvent) => {
+      const files = filesFromClipboard(event.clipboardData)
+      if (!files.length) return
+      event.preventDefault()
+      event.stopPropagation()
+      onPasteFiles(files)
+    }
+    function attach() {
+      try {
+        doc?.removeEventListener('paste', onPaste)
+        doc = node.contentDocument
+        doc?.addEventListener('paste', onPaste)
+      } catch {
+        doc = null
+      }
+    }
+    node.addEventListener('load', attach)
+    attach()
+    return () => {
+      node.removeEventListener('load', attach)
+      try {
+        doc?.removeEventListener('paste', onPaste)
+      } catch {
+        /* ignore */
+      }
+    }
+  }, [href, onPasteFiles])
 
   function openOutside() {
     if (!href) return
@@ -477,10 +522,7 @@ function BrowserChrome({
           type="button"
           aria-label="Reload"
           className="grid h-8 w-8 place-items-center rounded-full text-[#5f6368] hover:bg-[#f1f3f4]"
-          onClick={() => {
-            const node = frame.current
-            if (node) node.src = node.src
-          }}
+          onClick={() => setBust((value) => value + 1)}
         >
           ↻
         </button>
@@ -500,15 +542,19 @@ function BrowserChrome({
       <div className="relative min-h-0 flex-1 overflow-hidden bg-white" aria-busy={showSkeleton}>
         {href ? (
           <iframe
-            key={`${path}-${loadKey}`}
+            key={`${path}-${served}-${bust}`}
             ref={frame}
             title={label}
             src={href}
             className={`h-full w-full border-0 bg-white ${showSkeleton ? 'opacity-0' : 'opacity-100'}`}
-            onLoad={() => setFrameReady(true)}
           />
         ) : null}
         {showSkeleton || !href ? <PreviewPageSkeleton /> : null}
+        {refreshing && href ? (
+          <div className="pointer-events-none absolute inset-x-0 top-0 z-10 h-0.5 overflow-hidden bg-[#1a73e8]/20">
+            <div className="h-full w-1/3 animate-pulse bg-[#1a73e8]" />
+          </div>
+        ) : null}
       </div>
     </div>
   )

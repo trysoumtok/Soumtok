@@ -3,6 +3,7 @@ import {
   addConnector,
   addPlugin,
   connectConnector,
+  startConnectorOauth,
   deleteConnectorToken,
   fetchConnectors,
   probeConnector,
@@ -371,10 +372,24 @@ function ConnectorDetail({
     setHasToken(Boolean(item.hasToken))
   }, [item.id, item.last_check, item.hasToken])
 
+  useEffect(() => {
+    const flag = new URLSearchParams(window.location.search).get('oauth')
+    if (flag === 'ok' && !item.connected) void connect(true)
+    // one-shot after OAuth callback
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [item.id])
+
   async function connect(signedIn = false) {
     setBusy(true)
     setStatus('')
     try {
+      if (!signedIn) {
+        const oauth = await startConnectorOauth(item.id).catch(() => null)
+        if (oauth?.actionUrl) {
+          window.location.href = oauth.actionUrl
+          return
+        }
+      }
       const data = await connectConnector(item.id)
       if (data.mcp) setMcp(data.mcp)
       const login = data.loginUrl || data.signupUrl || connectorLoginUrl(item.plugin_id || '')
@@ -583,8 +598,11 @@ export function ConnectorsPanel({ path, plan }: { path: string; plan?: string })
     const existing = rows.find((row) => row.plugin_id === id)
     if (existing) {
       if (!existing.connected) {
-        const login = connectorLoginUrl(id)
-        if (login) openVendorLogin(login)
+        const oauth = await startConnectorOauth(existing.id).catch(() => null)
+        if (oauth?.actionUrl) {
+          window.location.href = oauth.actionUrl
+          return
+        }
       }
       navigate(connectorConnectPath(existing.slug))
       return
@@ -597,12 +615,16 @@ export function ConnectorsPanel({ path, plan }: { path: string; plan?: string })
     try {
       const data = await addConnector({ catalogId: id })
       if (data.plugin) await addPlugin({ pluginId: data.plugin.id }).catch(() => undefined)
-      const login = data.loginUrl || connectorLoginUrl(id)
-      if (login) openVendorLogin(login)
       await reload()
-      if (data.connector) {
-        if (data.connector.id) await connectConnector(data.connector.id).catch(() => undefined)
+      if (data.connector?.id) {
+        const oauth = await startConnectorOauth(data.connector.id).catch(() => null)
+        if (oauth?.actionUrl) {
+          window.location.href = oauth.actionUrl
+          return
+        }
+        await connectConnector(data.connector.id).catch(() => undefined)
         navigate(connectorConnectPath(data.connector.slug))
+        return
       }
     } catch (error) {
       setStatus(error instanceof Error ? error.message : 'Could not add connector')

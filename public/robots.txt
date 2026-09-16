@@ -1,0 +1,14 @@
+User-agent: *
+Allow: /
+Disallow: /api/
+Disallow: /dashboard
+Disallow: /checkout
+Disallow: /onboarding
+Disallow: /connect
+Disallow: /login
+Disallow: /signup
+Disallow: /team
+
+Host: https://soumtok.com
+
+Sitemap: https://soumtok.com/sitemap_index.xml

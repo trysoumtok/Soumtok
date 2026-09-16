@@ -37,6 +37,27 @@ export function resolveSiteFile(files: Record<string, string>, html: string, raw
   return fileLookup(files, name) || ''
 }
 
+/** Only apply a newer preview POST. Older in-flight uploads must not overwrite. */
+export function acceptSiteSeq(stored: number | undefined, incoming: unknown) {
+  const next = typeof incoming === 'number' ? incoming : Number(incoming)
+  if (!Number.isFinite(next)) return true
+  if (stored == null) return true
+  return next >= stored
+}
+
+/** Changes when any preview file body changes, even if the length stays the same. */
+export function previewStamp(html: string, files: Record<string, string>) {
+  const parts = [html || '']
+  for (const path of Object.keys(files).sort()) parts.push(path, files[path] || '')
+  const text = parts.join('\u0001')
+  let hash = 2166136261
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i)
+    hash = Math.imul(hash, 16777619)
+  }
+  return `${text.length.toString(36)}-${(hash >>> 0).toString(36)}`
+}
+
 export function inlineAssets(html: string, files: Record<string, string>) {
   let page = html
   page = page.replace(/<link\b[^>]*href=["']([^"']+)["'][^>]*>/gi, (tag, href) => {
@@ -50,6 +71,13 @@ export function inlineAssets(html: string, files: Record<string, string>) {
     const js = fileLookup(files, String(src))
     if (!js) return tag
     return `<script${pre}${post}>${js}</script>`
+  })
+  page = page.replace(/<img\b([^>]*?)\bsrc=["']([^"']+)["']([^>]*)>/gi, (tag, pre, src, post) => {
+    if (/^https?:|^data:/i.test(src)) return tag
+    const body = fileLookup(files, String(src))
+    if (!body) return tag
+    if (!/\.svg(\?|$)/i.test(src) && !/^\s*<svg[\s>]/i.test(body)) return tag
+    return `<img${pre}src="data:image/svg+xml;charset=utf-8,${encodeURIComponent(body)}"${post}>`
   })
   const css =
     files['styles/main.css'] || files['src/index.css'] || files['index.css'] || files['styles.css'] || ''

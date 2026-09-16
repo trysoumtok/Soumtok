@@ -38,9 +38,16 @@ function GoogleIcon() {
 
 function postLoginPath() {
   try {
+    const params = new URLSearchParams(window.location.search)
+    const desktop = params.get('desktop') || sessionStorage.getItem('soumtok-desktop') || ''
+    if (desktop) {
+      sessionStorage.setItem('soumtok-desktop', desktop)
+      return `/desktop-link/${desktop}`
+    }
     const next = sessionStorage.getItem('soumtok-next') || ''
     if (
       next.startsWith('/connect/') ||
+      next.startsWith('/desktop-link/') ||
       next.startsWith('/checkout') ||
       next.startsWith('/team') ||
       next.startsWith('/dashboard')
@@ -69,6 +76,12 @@ export function LoginPage({ mode, force2fa }: { mode: 'in' | 'up'; force2fa?: bo
   const [magicInfo, setMagicInfo] = useState(false)
 
   useEffect(() => {
+    try {
+      const desktop = new URLSearchParams(window.location.search).get('desktop')
+      if (desktop) sessionStorage.setItem('soumtok-desktop', desktop)
+    } catch {
+      /* private mode */
+    }
     fetchHealth().then((health) => {
       setDbReady(health.database)
       setGoogleReady(health.google)

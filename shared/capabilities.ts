@@ -1,3 +1,5 @@
+import { wantsBrandAsset } from './brandLogo.ts'
+
 export type SkillMatch = { id: string; name: string; score: number; reason: string }
 
 export type PromptCommand = {
@@ -36,6 +38,7 @@ export function extractUrls(text: string) {
 
 export function needsWeb(text: string) {
   if (extractUrls(text).length) return true
+  if (wantsBrandAsset(text)) return true
   return /\b(search the web|look up|look it up|latest|according to|wikipedia|fetch|browse|who is|what is|what are|news|current|today|source|cite|documentation for)\b/i.test(
     text,
   )

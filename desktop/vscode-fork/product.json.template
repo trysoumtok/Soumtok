@@ -1,0 +1,27 @@
+{
+  "nameShort": "Soumtok",
+  "nameLong": "Soumtok Code",
+  "applicationName": "soumtok-code",
+  "dataFolderName": ".soumtok-code",
+  "win32MutexName": "soumtokcode",
+  "win32DirName": "Soumtok Code",
+  "win32NameVersion": "Soumtok Code",
+  "win32RegValueName": "SoumtokCode",
+  "win32AppUserModelId": "Soumtok.Code",
+  "win32ShellNameShort": "S&oumtok Code",
+  "darwinBundleIdentifier": "com.soumtok.code",
+  "linuxIconName": "soumtok-code",
+  "serverApplicationName": "soumtok-code-server",
+  "serverDataFolderName": ".soumtok-code-server",
+  "tunnelApplicationName": "soumtok-code-tunnel",
+  "licenseName": "MIT",
+  "licenseUrl": "https://github.com/microsoft/vscode/blob/main/LICENSE.txt",
+  "reportIssueUrl": "https://soumtok.com/support",
+  "urlProtocol": "soumtok",
+  "extensionsGallery": {
+    "serviceUrl": "https://open-vsx.org/vscode/gallery",
+    "itemUrl": "https://open-vsx.org/vscode/item",
+    "resourceUrlTemplate": "https://open-vsx.org/vscode/asset/{publisher}/{name}/{version}/{path}"
+  },
+  "linkProtectionTrustedDomains": ["https://soumtok.com", "https://open-vsx.org"]
+}

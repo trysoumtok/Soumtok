@@ -52,6 +52,23 @@ html[data-theme="light"] body {
   color: var(--app-fg);
 }
 
+.bot-shell {
+  background: #050505;
+  color: #fff;
+}
+
+.bot-composer-sticky {
+  flex-shrink: 0;
+}
+.bot-composer-pill textarea {
+  font-family: var(--font-sans);
+  letter-spacing: normal;
+}
+.bot-composer-circle svg {
+  width: 18px;
+  height: 18px;
+}
+
 .theme-app aside {
   background: var(--app-aside);
 }
@@ -870,6 +887,31 @@ canvas {
   -webkit-overflow-scrolling: touch;
 }
 
+/* Label + value rows: avoid mixed column word-wrap in narrow panels */
+.theme-app .ui-kv-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 16px;
+  row-gap: 4px;
+}
+.theme-app .ui-kv-row > :first-child {
+  min-width: 0;
+}
+.theme-app .ui-kv-row > :last-child {
+  white-space: nowrap;
+  text-align: right;
+}
+@media (max-width: 480px) {
+  .theme-app .ui-kv-row.ui-kv-stack-sm {
+    grid-template-columns: 1fr;
+  }
+  .theme-app .ui-kv-row.ui-kv-stack-sm > :last-child {
+    text-align: left;
+    white-space: normal;
+  }
+}
+
 .mobile-drawer {
   position: fixed;
   inset: 0;
@@ -914,4 +956,33 @@ canvas {
   right: -10px;
   border-bottom-left-radius: 10px;
   box-shadow: -2px 2px 0 2px #fff;
+}
+
+@media print {
+  body * {
+    visibility: hidden;
+  }
+
+  #model-brief-print,
+  #model-brief-print * {
+    visibility: visible;
+  }
+
+  #model-brief-print {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    max-width: none;
+    min-height: auto;
+    border-radius: 0;
+    box-shadow: none;
+    background: #f3ece0;
+  }
+
+  #model-brief-print header {
+    min-height: 100vh;
+    break-after: page;
+    page-break-after: always;
+  }
 }

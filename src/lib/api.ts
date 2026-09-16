@@ -732,6 +732,22 @@ export async function connectConnector(id: string) {
   return data
 }
 
+export async function startConnectorOauth(id: string) {
+  const res = await fetch(`/api/connectors/${id}/oauth/start?json=1`, { credentials: 'include' })
+  const data = (await res.json()) as {
+    url?: string | null
+    actionUrl?: string | null
+    authorizationUrl?: string | null
+    noAuth?: boolean
+    error?: string
+  }
+  if (res.status === 401) throw new Error('Sign in required')
+  const actionUrl = data.actionUrl || data.url || data.authorizationUrl || null
+  if (data.noAuth) return { actionUrl: null as string | null, noAuth: true as const }
+  if (!res.ok) throw new Error(data.error || 'Could not start OAuth')
+  return { actionUrl, noAuth: false as const }
+}
+
 export async function removeConnector(id: string) {
   const res = await fetch(`/api/connectors/${id}`, { method: 'DELETE', credentials: 'include' })
   if (!res.ok) throw new Error('Could not remove connector')
@@ -1138,6 +1154,7 @@ export async function streamStudio(
     onRound?: (text: string) => void
     onResult?: (result: { name: string; ok: boolean; text: string; files?: Record<string, string>; command?: string }) => void
     onTools?: (tools: { name: string; args: Record<string, string> }[]) => void
+    onProgress?: (calls: { name: string; path?: string; chars: number; content?: string }[]) => void
   },
 ): Promise<StudioRun & { files?: Record<string, string> }> {
   const res = await fetch('/api/studio/complete/stream', {
@@ -1186,6 +1203,7 @@ export async function streamStudio(
         tools?: { name: string; args: Record<string, string> }[]
         result?: { name: string; ok: boolean; text: string; files?: Record<string, string>; command?: string }
         files?: Record<string, string>
+        progress?: { name: string; path?: string; chars: number; content?: string }[]
       } & StudioRun
       if (payload.error) throw new Error(payload.error)
       if (payload.reset) {
@@ -1197,6 +1215,7 @@ export async function streamStudio(
         onText(text)
       }
       if (payload.tools) opts?.onTools?.(payload.tools)
+      if (payload.progress) opts?.onProgress?.(payload.progress)
       if (payload.result) opts?.onResult?.(payload.result)
       if (payload.round != null && payload.text) opts?.onRound?.(payload.text)
       if (payload.done) final = { ...payload, text: payload.text || text, files: payload.files }

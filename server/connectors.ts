@@ -6,7 +6,8 @@ import { pool } from './db.ts'
 import { env } from './env.ts'
 import { encryptSecret, decryptSecret } from './secrets.ts'
 import { githubAccessToken } from './github.ts'
-import { authorizeUrl, oauthRedirect, pkceChallenge, type OauthServerMeta } from './oauth.ts'
+import { authorizeUrl, oauthRedirect, pkceChallenge } from './oauth.ts'
+import { discoverMcpOauth } from './mcpOauth.ts'
 
 type ReadyFn = (c: { req: { raw: Request } }) => Promise<{
   session: { user: { id: string } } | null
@@ -243,7 +244,7 @@ async function openMcp(
     const init = await mcpRpc(url.toString(), 'initialize', {
       id: 1,
       params: {
-        protocolVersion: '2025-03-26',
+        protocolVersion: '2025-06-18',
         capabilities: { tools: {}, resources: {}, prompts: {} },
         clientInfo: { name: 'soumtok', version: '1.0' },
       },
@@ -372,37 +373,6 @@ async function probeOauth(authUrl: string | null): Promise<ProbeStep> {
     label: 'Verifying OAuth configuration',
     status: 'skip',
     detail: 'Could not read OAuth metadata. Pick how users should sign in.',
-  }
-}
-
-async function discoverMcpOauth(mcpUrl: string) {
-  const url = parseMcpUrl(mcpUrl)
-  if (!url) throw new Error('That MCP URL is not allowed')
-  let issuer = url.origin
-  try {
-    const res = await fetchUrl(new URL('/.well-known/oauth-protected-resource', url.origin).toString(), {
-      method: 'GET',
-      headers: { Accept: 'application/json' },
-    })
-    if (res.ok) {
-      const data = (await res.json().catch(() => ({}))) as { authorization_servers?: string[] }
-      if (data.authorization_servers?.[0]) issuer = data.authorization_servers[0]
-    }
-  } catch {
-    /* use origin */
-  }
-  const metaRes = await fetchUrl(new URL('/.well-known/oauth-authorization-server', issuer).toString(), {
-    method: 'GET',
-    headers: { Accept: 'application/json' },
-  })
-  if (!metaRes.ok) throw new Error('No OAuth metadata on that server. Paste a token instead.')
-  const meta = (await metaRes.json()) as OauthServerMeta
-  if (!meta.authorization_endpoint || !meta.token_endpoint) throw new Error('OAuth metadata is incomplete')
-  return {
-    authorization_endpoint: meta.authorization_endpoint,
-    token_endpoint: meta.token_endpoint,
-    registration_endpoint: meta.registration_endpoint,
-    resource: url.toString(),
   }
 }
 
@@ -729,7 +699,12 @@ export function registerConnectors(app: Hono, requireReadyUser: ReadyFn) {
     const connector = row.rows[0] as { id: string; mcp_url: string; oauth_client_id?: string | null } | undefined
     if (!connector) return c.json({ error: 'Connector not found' }, 404)
     try {
+      if (!parseMcpUrl(connector.mcp_url)) return c.json({ error: 'Saved URL is not usable.' }, 400)
       const discovered = await discoverMcpOauth(connector.mcp_url)
+      if (discovered.noAuth || !discovered.authorization_endpoint || !discovered.token_endpoint) {
+        if (c.req.query('json')) return c.json({ url: null, actionUrl: null, noAuth: true })
+        return c.redirect(`${env.betterAuthUrl.replace(/\/$/, '')}/dashboard/connectors?oauth=ok`, 302)
+      }
       const redirect = oauthRedirect(env.betterAuthUrl)
       let clientId = connector.oauth_client_id || ''
       let clientSecret = ''
@@ -773,9 +748,9 @@ export function registerConnectors(app: Hono, requireReadyUser: ReadyFn) {
         state: pkce.state,
         code_challenge: pkce.challenge,
         code_challenge_method: 'S256',
-        resource: discovered.resource,
+        resource: discovered.resource || connector.mcp_url,
       })
-      if (c.req.query('json')) return c.json({ url: location })
+      if (c.req.query('json')) return c.json({ url: location, actionUrl: location, authorizationUrl: location })
       return c.redirect(location, 302)
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : 'Could not start OAuth' }, 400)

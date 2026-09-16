@@ -26,6 +26,7 @@ const PATTERNS: { kind: SecretKind; re: RegExp }[] = [
   { kind: 'jwt', re: /\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g },
   { kind: 'token', re: /\bxai-[A-Za-z0-9]{20,}\b/g },
   { kind: 'token', re: /\bhf_[A-Za-z0-9]{20,}\b/g },
+  { kind: 'token', re: /\br8_[A-Za-z0-9]{20,}\b/g },
   { kind: 'api-key', re: /\bsk-(?:ant-|proj-|soumtok-)?[A-Za-z0-9_-]{16,}\b/g },
   { kind: 'token', re: /\bBearer\s+[A-Za-z0-9._\-+=/]{16,}\b/gi },
   {
@@ -49,6 +50,7 @@ export const ENV_TEMPLATE = `# Secrets for this project. Paste values here — n
 # OPENAI_API_KEY=
 # ANTHROPIC_API_KEY=
 # GOOGLE_AI_API_KEY=
+# REPLICATE_API_TOKEN=
 # STRIPE_SECRET_KEY=
 `
 
@@ -57,6 +59,7 @@ export const ENV_EXAMPLE = `# Copy to .env and fill in locally. Do not commit re
 # OPENAI_API_KEY=
 # ANTHROPIC_API_KEY=
 # GOOGLE_AI_API_KEY=
+# REPLICATE_API_TOKEN=
 # STRIPE_SECRET_KEY=
 `
 

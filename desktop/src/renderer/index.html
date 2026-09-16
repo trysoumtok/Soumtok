@@ -1,0 +1,596 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self' file: blob: data:; script-src 'self' 'unsafe-eval' 'unsafe-inline' file: blob:; worker-src 'self' blob: file:; style-src 'self' 'unsafe-inline' file:; font-src 'self' data: file:; img-src 'self' data: file: blob: https: http:; connect-src 'self' https: wss: http://127.0.0.1:* http://localhost:*; frame-src 'self' http: https: http://127.0.0.1:* http://localhost:*;"
+    />
+    <title>Soumtok</title>
+    <link rel="stylesheet" href="workbench.css" />
+    <link rel="stylesheet" href="../../node_modules/@xterm/xterm/css/xterm.css" />
+    <script>
+      (function () {
+        try {
+          var pref = localStorage.getItem('soumtok-theme')
+          var resolved =
+            pref === 'light' ? 'light' : pref === 'dark' ? 'dark' : null
+          if (!resolved) {
+            resolved = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+          }
+          document.documentElement.dataset.theme = resolved
+          document.documentElement.style.colorScheme = resolved
+        } catch (_) {}
+      })()
+    </script>
+  </head>
+  <body class="mode-auth">
+    <div id="titlebar">
+      <div class="tb-left">
+        <img class="tb-logo" src="../../resources/icon.png" alt="" />
+        <nav class="tb-menu">
+          <div class="menu">
+            <button type="button" data-menu="file">File</button>
+            <div id="file-menu-list" class="menu-list menu-list-wide" hidden role="menu" aria-label="File"></div>
+          </div>
+          <div class="menu">
+            <button type="button" data-menu="edit">Edit</button>
+            <div id="edit-menu-list" class="menu-list menu-list-wide" hidden role="menu" aria-label="Edit"></div>
+          </div>
+          <div class="menu">
+            <button type="button" data-menu="selection">Selection</button>
+            <div class="menu-list" hidden>
+              <button type="button" data-cmd="select-all">Select All</button>
+            </div>
+          </div>
+          <div class="menu">
+            <button type="button" data-menu="view">View</button>
+            <div class="menu-list" hidden>
+              <button type="button" data-cmd="layout">Toggle Sidebar</button>
+              <button type="button" data-cmd="terminal">Toggle Terminal</button>
+              <button type="button" data-cmd="extensions">Extensions</button>
+              <button type="button" data-cmd="connectors">Connectors</button>
+              <button type="button" data-cmd="test-hub">Test Hub</button>
+              <button type="button" data-cmd="agent">Agent</button>
+            </div>
+          </div>
+          <div class="menu">
+            <button type="button" data-menu="go">Go</button>
+            <div id="go-menu-list" class="menu-list menu-list-wide" hidden role="menu" aria-label="Go"></div>
+          </div>
+          <div class="menu">
+            <button type="button" data-menu="run">Run</button>
+            <div class="menu-list" hidden>
+              <button type="button" data-cmd="agent">Open Agent</button>
+            </div>
+          </div>
+          <div class="menu">
+            <button type="button" data-menu="terminal">Terminal</button>
+            <div class="menu-list menu-list-wide" hidden>
+              <button type="button" data-cmd="open-terminal">Open Terminal <kbd class="menu-kbd">Ctrl+Shift+`</kbd></button>
+              <button type="button" data-cmd="new-terminal">New Terminal</button>
+              <button type="button" data-cmd="run-build-task">Run Build Task… <kbd class="menu-kbd">Ctrl+Shift+B</kbd></button>
+              <button type="button" data-cmd="run-active-file">Run Active File</button>
+              <button type="button" data-cmd="run-selected-text">Run Selected Text</button>
+            </div>
+          </div>
+          <div class="menu">
+            <button type="button" data-menu="help">Help</button>
+            <div class="menu-list" hidden>
+              <button type="button" data-cmd="docs">Documentation</button>
+              <button type="button" data-cmd="account">Account</button>
+              <button type="button" data-cmd="billing">Billing</button>
+              <button type="button" data-cmd="login">Sign in</button>
+            </div>
+          </div>
+        </nav>
+      </div>
+      <div id="tb-center"></div>
+      <div class="tb-right" id="win-btns">
+        <button type="button" class="tb-icon" data-cmd="layout" title="Toggle sidebar">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg>
+        </button>
+        <button type="button" class="tb-icon" data-cmd="back" title="Back">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M14 6l-6 6 6 6"/></svg>
+        </button>
+        <button type="button" class="tb-icon" data-cmd="forward" title="Forward">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M10 6l6 6-6 6"/></svg>
+        </button>
+        <button type="button" class="tb-icon" data-cmd="new-file" title="New file">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 5v14M5 12h14"/></svg>
+        </button>
+        <button type="button" class="tb-icon" data-cmd="terminal" title="Toggle terminal">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="5" height="16" rx="1"/><rect x="9.5" y="4" width="5" height="16" rx="1"/><rect x="16" y="4" width="5" height="16" rx="1"/></svg>
+        </button>
+        <button type="button" class="tb-icon" data-cmd="account" title="Settings">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+          </svg>
+        </button>
+        <div class="win-ctrls">
+          <button type="button" class="win-ctrl" data-win="min" title="Minimize">
+            <svg viewBox="0 0 12 12"><rect x="2" y="5.25" width="8" height="1.5" fill="currentColor"/></svg>
+          </button>
+          <button type="button" class="win-ctrl" data-win="max" title="Maximize">
+            <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2.2" y="2.2" width="7.6" height="7.6"/></svg>
+          </button>
+          <button type="button" class="win-ctrl" data-win="close" title="Close">
+            <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7"/></svg>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div id="auth">
+      <div class="auth-boot" id="auth-boot" aria-live="polite">
+        <div class="auth-boot-avatar" id="auth-avatar-host" aria-hidden="true"></div>
+        <p class="auth-boot-msg" id="auth-boot-msg">Loading your account…</p>
+        <button type="button" class="auth-primary auth-boot-continue" id="auth-boot-continue" hidden>
+          Continue in app
+        </button>
+      </div>
+      <div class="auth-gate" id="auth-gate" hidden>
+        <div class="home-brand">
+          <img class="home-mark" src="../../resources/icon.png" alt="" />
+          <span class="home-wordmark">soumtok</span>
+        </div>
+        <div class="auth-gate-avatar" id="auth-gate-avatar-host" aria-hidden="true"></div>
+        <h2>Sign in to continue</h2>
+        <p class="auth-copy">Sign in or create an account to start.</p>
+        <button type="button" class="auth-primary" id="auth-in">Sign in</button>
+        <button type="button" class="auth-secondary" id="auth-up">Create account</button>
+        <button type="button" class="auth-secondary" id="auth-continue" hidden>Continue in app</button>
+        <p class="auth-note" id="auth-note"></p>
+      </div>
+    </div>
+
+    <div id="home">
+      <div class="home-brand">
+        <img class="home-mark" src="../../resources/icon.png" alt="" />
+        <span class="home-wordmark">soumtok</span>
+      </div>
+      <div class="home-actions">
+        <button type="button" class="home-card" id="home-open">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3.5 7.5h6.2l1.8 2H20.5v9.5H3.5z"/></svg>
+          Open project
+        </button>
+        <button type="button" class="home-card" id="home-clone">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3v12"/><path d="M8 11l4 4 4-4"/><rect x="4" y="17" width="16" height="4" rx="1"/></svg>
+          Clone repo
+        </button>
+        <button type="button" class="home-card" id="home-ssh">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 16h14M8 20h8"/><rect x="3.5" y="4" width="17" height="12" rx="2"/><path d="M8 10l2 2-2 2M12 14h3"/></svg>
+          Connect via SSH
+        </button>
+        <button type="button" class="home-card github" id="home-github">
+          <svg class="ext" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M6 3h7v7M13 3L6 10"/></svg>
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.58 2 12.26c0 4.52 2.87 8.35 6.84 9.71.5.1.68-.22.68-.49 0-.24-.01-.87-.01-1.71-2.78.62-3.37-1.37-3.37-1.37-.45-1.18-1.11-1.5-1.11-1.5-.91-.64.07-.63.07-.63 1 .07 1.53 1.06 1.53 1.06.9 1.57 2.36 1.12 2.94.86.09-.67.35-1.12.63-1.37-2.22-.26-4.56-1.14-4.56-5.07 0-1.12.39-2.03 1.03-2.75-.1-.26-.45-1.3.1-2.7 0 0 .84-.27 2.75 1.05A9.3 9.3 0 0 1 12 6.84c.85 0 1.71.12 2.51.35 1.9-1.32 2.74-1.05 2.74-1.05.55 1.4.2 2.44.1 2.7.64.72 1.03 1.63 1.03 2.75 0 3.94-2.34 4.8-4.57 5.06.36.32.68.94.68 1.9 0 1.37-.01 2.47-.01 2.81 0 .27.18.6.69.49A10.03 10.03 0 0 0 22 12.26C22 6.58 17.52 2 12 2z"/></svg>
+          Connect GitHub
+        </button>
+      </div>
+      <div class="home-recents-head">
+        <span>Recent projects</span>
+        <button type="button" id="home-view-all">View all</button>
+      </div>
+      <div id="home-recents"></div>
+    </div>
+
+    <div id="workbench">
+      <aside id="activity">
+        <button type="button" class="act on" data-side="files" title="Explorer">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 6h6l2 2h8v10H4z"/></svg>
+        </button>
+        <button type="button" class="act" data-side="search" title="Search">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="11" cy="11" r="6"/><path d="M20 20l-3.5-3.5"/></svg>
+        </button>
+        <button type="button" class="act" data-side="git" title="Source Control">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="6" cy="6" r="2.2"/><circle cx="18" cy="6" r="2.2"/><circle cx="12" cy="18" r="2.2"/><path d="M8 7.5c2 3 6 3 8 0M12 16V9"/></svg>
+        </button>
+        <button type="button" class="act" data-side="connectors" title="Connectors (MCP)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M10 13a5 5 0 0 0 7.07 0l1.41-1.41a5 5 0 0 0-7.07-7.07L10 5.9"/><path d="M14 11a5 5 0 0 0-7.07 0L5.5 12.41a5 5 0 0 0 7.07 7.07L14 18.1"/></svg>
+        </button>
+        <button type="button" class="act" data-side="extensions" title="Extensions (Open VSX)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><path d="M13 16.5h7M16.5 13v7"/></svg>
+        </button>
+        <span class="act-spacer"></span>
+        <div class="act-bottom" id="act-bottom">
+          <button type="button" class="act" data-side="test-hub" title="Test Hub">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M4 6h16v12H4z"/><path d="M8 10h8M8 14h5"/><circle cx="17" cy="9" r="2" fill="currentColor" stroke="none"/></svg>
+          </button>
+        </div>
+      </aside>
+      <aside id="sidebar"></aside>
+      <div class="sash sash-v" id="resize-sidebar" title="Drag to resize sidebar"></div>
+      <section id="center">
+        <div id="center-stack">
+          <div id="test-hub-screen" hidden aria-label="Test Hub">
+            <header class="test-hub-head">
+              <div class="test-hub-head-brand">
+                <span class="test-hub-mark" id="test-hub-avatar-host" aria-hidden="true"></span>
+                <div class="test-hub-head-copy">
+                  <h1 class="test-hub-title">Test Hub</h1>
+                  <p class="test-hub-sub">Direct model — no agent harness. Code and preview update as the model replies.</p>
+                </div>
+              </div>
+              <div class="test-hub-head-sep" aria-hidden="true"></div>
+              <div class="test-hub-project-actions" role="group" aria-label="Project">
+                <button type="button" class="test-hub-project-btn" id="test-hub-clear-project" title="Clear this workspace chat and files">Clear project</button>
+                <button type="button" class="test-hub-project-btn primary" id="test-hub-new-project" title="Open a new workspace (keeps the current project)">New project</button>
+              </div>
+              <div class="test-hub-head-sep" aria-hidden="true"></div>
+              <div class="test-hub-output-tabs" role="tablist" aria-label="Output">
+                <button type="button" class="test-hub-out-tab on" data-out="preview" role="tab" aria-selected="true">Preview</button>
+                <button type="button" class="test-hub-out-tab" data-out="code" role="tab" aria-selected="false">Code</button>
+                <button type="button" class="test-hub-out-tab" data-out="compare" role="tab" aria-selected="false" id="test-hub-compare-tab" hidden>Compare</button>
+              </div>
+              <div class="test-hub-head-sep" aria-hidden="true"></div>
+              <div class="test-hub-head-actions">
+                <span id="test-hub-model-current" class="test-hub-model-current" title="Active model">Auto</span>
+                <button type="button" class="test-hub-icon-btn" id="test-hub-close" title="Close Test Hub" aria-label="Close Test Hub">
+                  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+                </button>
+              </div>
+            </header>
+            <div class="test-hub-workspace-bar" aria-label="Project workspaces">
+              <div id="test-hub-workspace-tabs" class="test-hub-workspace-tabs" role="tablist"></div>
+            </div>
+            <div class="test-hub-body">
+              <section class="test-hub-chat" aria-label="Chat">
+                <div id="test-hub-feed" class="test-hub-feed"></div>
+                <div class="test-hub-compose">
+                  <div class="test-hub-compose-config">
+                    <div id="test-hub-pending" class="test-hub-pending" hidden></div>
+                    <div id="test-hub-compare-bar" class="test-hub-compose-section test-hub-compare-bar" hidden>
+                      <div class="test-hub-compose-section-head">
+                        <span class="test-hub-model-bar-label">Compare</span>
+                        <span class="test-hub-compare-hint">Same prompt → parallel builds · pick 2–3</span>
+                      </div>
+                      <div id="test-hub-compare-models" class="test-hub-compare-models" role="group" aria-label="Models to compare"></div>
+                    </div>
+                    <div class="test-hub-compose-section test-hub-model-bar" id="test-hub-single-model-bar">
+                      <span class="test-hub-model-bar-label">Model</span>
+                      <div class="test-hub-model-picker">
+                        <button type="button" id="test-hub-model-btn" class="test-hub-model-btn" aria-haspopup="listbox" aria-expanded="false">Auto ▾</button>
+                        <div id="test-hub-model-pop" class="test-hub-model-pop" hidden>
+                          <div class="test-hub-model-search-wrap">
+                            <input type="search" id="test-hub-model-search" class="test-hub-model-search" placeholder="Search models…" autocomplete="off" aria-label="Search models" />
+                          </div>
+                          <div id="test-hub-model-list" class="test-hub-model-list" role="listbox" aria-label="Choose model"></div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="test-hub-compose-box">
+                    <textarea id="test-hub-input" class="test-hub-input" placeholder="Ask the model to build or explain anything…" rows="2"></textarea>
+                    <div class="test-hub-toolbar">
+                      <div class="test-hub-tools">
+                        <button type="button" class="test-hub-tool" id="test-hub-attach" title="Attach files">
+                          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><path d="M4.5 7.2V10a3 3 0 0 0 6 0V5.5a2 2 0 0 0-4 0v4.8a1 1 0 0 0 2 0V6"/></svg>
+                          Files
+                        </button>
+                        <button type="button" class="test-hub-tool" id="test-hub-folder" title="Attach folder">
+                          <svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M2.5 4.5h4.6l1.4 2h5.5v7H2.5V4.5z"/></svg>
+                          Folder
+                        </button>
+                        <button type="button" class="test-hub-tool" id="test-hub-compare-toggle" title="Compare models on the same prompt" aria-pressed="false">Compare</button>
+                      </div>
+                      <button type="button" class="test-hub-send" id="test-hub-send">Send</button>
+                    </div>
+                  </div>
+                </div>
+              </section>
+              <aside class="test-hub-output" aria-label="Output">
+                <div class="test-hub-pane on" id="test-hub-preview-pane" role="tabpanel">
+                  <div class="test-hub-preview-meta" id="test-hub-preview-meta" hidden>
+                    <span id="test-hub-preview-mode" class="test-hub-preview-mode">Static preview</span>
+                    <button type="button" class="test-hub-preview-vite-btn" id="test-hub-preview-run-vite" hidden>npm build</button>
+                  </div>
+                  <div class="test-hub-preview-empty" id="test-hub-preview-empty">Build something — live preview appears here.</div>
+                  <div class="test-hub-preview-stack" id="test-hub-preview-stack" hidden>
+                    <iframe id="test-hub-preview" class="test-hub-preview-frame" title="Test Hub preview" sandbox="allow-scripts allow-same-origin"></iframe>
+                    <div class="test-hub-preview-console" id="test-hub-preview-console" hidden>
+                      <div class="test-hub-preview-console-head">
+                        <span>Console</span>
+                        <button type="button" class="test-hub-preview-console-clear" id="test-hub-preview-console-clear">Clear</button>
+                        <button type="button" class="test-hub-preview-console-fix" id="test-hub-preview-console-fix" title="Ask the model to fix runtime errors">Fix errors</button>
+                      </div>
+                      <pre id="test-hub-preview-console-log" class="test-hub-preview-console-log"></pre>
+                    </div>
+                  </div>
+                </div>
+                <div class="test-hub-pane" id="test-hub-compare-pane" role="tabpanel" hidden>
+                  <div class="test-hub-compare-empty" id="test-hub-compare-empty">Turn on Compare, pick 2–3 models, then send a prompt.</div>
+                  <div id="test-hub-compare-grid" class="test-hub-compare-grid" hidden></div>
+                </div>
+                <div class="test-hub-pane" id="test-hub-code-pane" role="tabpanel" hidden>
+                  <div class="test-hub-code-empty" id="test-hub-code-empty">Ask the model to build something — files will appear here.</div>
+                  <div id="test-hub-code-workspace" class="test-hub-code-workspace" hidden>
+                    <div class="test-hub-code-toolbar">
+                      <div class="test-hub-code-toolbar-left">
+                        <span class="test-hub-code-toolbar-title">Project files</span>
+                        <span id="test-hub-file-count" class="test-hub-file-count"></span>
+                      </div>
+                      <div class="test-hub-code-toolbar-actions">
+                        <span id="test-hub-project-type" class="test-hub-project-type" hidden></span>
+                        <button type="button" class="test-hub-code-action" id="test-hub-show-scores" title="Model benchmark scores">Scores</button>
+                        <button type="button" class="test-hub-code-action" id="test-hub-show-archives" title="Saved builds">Builds</button>
+                        <button type="button" class="test-hub-code-action" id="test-hub-save-archive" title="Save build to archive">Save</button>
+                        <button type="button" class="test-hub-code-action" id="test-hub-run-vite" title="npm install + build in a local sandbox" hidden>Run Vite</button>
+                        <button type="button" class="test-hub-code-action" id="test-hub-export-folder" title="Save files to folder">Save to folder</button>
+                        <button type="button" class="test-hub-code-action primary" id="test-hub-export-zip" title="Download zip">Download</button>
+                      </div>
+                    </div>
+                    <div class="test-hub-scores" id="test-hub-scores" hidden>
+                      <div class="test-hub-scores-head">
+                        <span>Model scores</span>
+                        <button type="button" class="test-hub-scores-close" id="test-hub-scores-close" aria-label="Close">×</button>
+                      </div>
+                      <div id="test-hub-scores-list" class="test-hub-scores-list"></div>
+                    </div>
+                    <div class="test-hub-sandbox-log" id="test-hub-sandbox-log" hidden>
+                      <div class="test-hub-sandbox-log-head">
+                        <span id="test-hub-sandbox-log-title">Vite sandbox</span>
+                        <button type="button" class="test-hub-sandbox-log-close" id="test-hub-sandbox-log-close" aria-label="Close">×</button>
+                      </div>
+                      <pre id="test-hub-sandbox-log-body" class="test-hub-sandbox-log-body"></pre>
+                    </div>
+                    <div class="test-hub-archives" id="test-hub-archives" hidden>
+                      <div class="test-hub-archives-head">
+                        <span>Saved builds</span>
+                        <button type="button" class="test-hub-archives-close" id="test-hub-archives-close" aria-label="Close">×</button>
+                      </div>
+                      <div id="test-hub-archives-list" class="test-hub-archives-list"></div>
+                    </div>
+                    <div class="test-hub-code-split">
+                      <nav id="test-hub-file-tree" class="test-hub-file-tree" aria-label="Project files"></nav>
+                      <div class="test-hub-file-editor">
+                        <header class="test-hub-file-tab">
+                          <span id="test-hub-file-tab-name">index.html</span>
+                          <button type="button" class="test-hub-file-copy" id="test-hub-file-copy" title="Copy file">Copy</button>
+                        </header>
+                        <div class="test-hub-file-editor-body">
+                          <pre id="test-hub-file-highlight" class="test-hub-file-highlight" aria-hidden="true"><code></code></pre>
+                          <textarea id="test-hub-file-editor" class="test-hub-file-editor-input" spellcheck="false" autocomplete="off" aria-label="File contents"></textarea>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </aside>
+            </div>
+          </div>
+          <div id="center-editor">
+            <div class="tabs-bar" id="tabs-bar">
+              <div class="tabs-scroll-viewport" id="tabs-scroll-viewport">
+                <div id="tabs" role="tablist" aria-label="Open editors"></div>
+              </div>
+              <button type="button" class="tabs-scroll-btn tabs-scroll-prev" id="tabs-scroll-prev" hidden aria-label="Scroll tabs left" title="Scroll tabs left">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M10 4L6 8l4 4"/></svg>
+              </button>
+              <button type="button" class="tabs-scroll-btn tabs-scroll-next" id="tabs-scroll-next" hidden aria-label="Scroll tabs right" title="Scroll tabs right">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 4l4 4-4 4"/></svg>
+              </button>
+            </div>
+            <div id="agent-editor-track" hidden aria-live="polite">
+              <span class="agent-track-beam" aria-hidden="true"></span>
+              <span class="agent-track-icon" aria-hidden="true">
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 2.5h7l3 3V13.5H3V2.5z"/><path d="M10 2.5V5.5h3"/></svg>
+              </span>
+              <span class="agent-track-action" id="agent-track-action">Reading</span>
+              <span class="agent-track-file" id="agent-track-file"></span>
+              <span class="agent-track-line" id="agent-track-line"></span>
+            </div>
+            <div id="editor-diff-bar" class="editor-diff-bar" hidden>
+              <span class="editor-diff-label" id="editor-diff-label">Agent change</span>
+              <span class="grow"></span>
+              <button type="button" class="ghost" id="editor-diff-reject">Reject</button>
+              <button type="button" class="primary" id="editor-diff-accept">Accept</button>
+            </div>
+            <div id="editor"></div>
+            <div id="settings-screen" hidden aria-label="Soumtok Settings"></div>
+          </div>
+          <div class="sash sash-h" id="resize-panel" title="Drag to resize panel"></div>
+          <div id="panel">
+            <div id="panel-bar">
+              <div class="panel-tabs" role="tablist" aria-label="Panel">
+                <button type="button" class="panel-tab" data-panel="problems" role="tab">Problems</button>
+                <button type="button" class="panel-tab" data-panel="output" role="tab">Output</button>
+                <button type="button" class="panel-tab" data-panel="debug" role="tab">Debug Console</button>
+                <button type="button" class="panel-tab on" data-panel="terminal" role="tab">Terminal</button>
+                <button type="button" class="panel-tab" data-panel="ports" role="tab">Ports</button>
+              </div>
+              <div class="panel-bar-right">
+                <div class="panel-view-actions" id="panel-actions-problems" hidden>
+                  <input type="search" class="panel-filter" id="problems-filter" placeholder="Filter (e.g. text, **/*.ts)" aria-label="Filter problems" />
+                  <button type="button" class="panel-icon-btn" id="problems-collapse-all" disabled title="Collapse All (no problems)">
+                    <svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M3 4h10v1H3V4zm0 3h10v1H3V7zm0 3h7v1H3v-1z"/></svg>
+                  </button>
+                </div>
+                <div class="panel-view-actions" id="panel-actions-output" hidden>
+                  <input type="search" class="panel-filter panel-filter-narrow" id="output-filter" placeholder="Filter" aria-label="Filter output" />
+                  <select class="panel-select" id="output-channel" aria-label="Output channel">
+                    <option value="soumtok">Soumtok</option>
+                    <option value="tasks">Tasks</option>
+                    <option value="git">Git</option>
+                  </select>
+                  <button type="button" class="panel-icon-btn" id="output-clear" disabled title="Clear Output">
+                    <svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M3 4h10l-1 9H4L3 4zm2 2v5h1V6H5zm3 0v5h1V6H8z"/></svg>
+                  </button>
+                  <button type="button" class="panel-icon-btn" id="output-scroll-lock" disabled title="Toggle scroll lock (no output yet)">
+                    <svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M11 7V5a3 3 0 0 0-6 0v2H4v6h8V7h-1zm-2 0H7V5a1 1 0 0 1 2 0v2z"/></svg>
+                  </button>
+                </div>
+                <div class="panel-view-actions" id="panel-actions-debug" hidden>
+                  <input type="search" class="panel-filter" id="debug-filter" placeholder="Filter (e.g. text, !exclude, \escape)" aria-label="Filter debug console" />
+                </div>
+                <div class="term-toolbar" id="term-toolbar">
+                  <button type="button" class="term-shell-pick" id="term-shell-label" title="Select default shell" disabled>
+                    <span class="term-conn-warn" id="term-conn-warn" hidden title="Limited shell mode">⚠</span>
+                    <span class="term-shell-name">Terminal</span>
+                    <svg class="term-shell-chevron" viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M4.5 6 8 9.5 11.5 6z"/></svg>
+                  </button>
+                  <div class="term-toolbar-actions" role="group" aria-label="Terminal actions">
+                    <button type="button" class="term-icon-btn" id="term-new" title="New terminal tab">
+                      <svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 2a.75.75 0 0 1 .75.75V7h4.25a.75.75 0 0 1 0 1.5H8.75v4.25a.75.75 0 0 1-1.5 0V8.5H3a.75.75 0 0 1 0-1.5h4.25V2.75A.75.75 0 0 1 8 2z"/></svg>
+                    </button>
+                    <button type="button" class="term-icon-btn" id="term-kill" title="Kill Terminal" disabled>
+                      <svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M5 3.5h6l-.875 7.875H5.875L5 3.5zm1.5 1.5v5h1v-5h-1zm3 0v5h1v-5h-1zM6.5 1.5h3v1h-3v-1z"/></svg>
+                    </button>
+                  </div>
+                </div>
+                <div class="panel-view-actions" id="panel-actions-ports" hidden></div>
+                <div class="panel-win-actions">
+                  <button type="button" class="panel-win-btn" id="panel-max" title="Maximize Panel Size">
+                    <svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M3 10.5 8 6l5 4.5-.7.8L8 7.6l-4.3 3.7-.7-.8z"/></svg>
+                  </button>
+                  <button type="button" class="panel-win-btn" id="panel-close" title="Hide Panel">
+                    <svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="m4.1 4.1 7.8 7.8.8-.7L4.9 3.4l-.8.7zm7.8 0-7.8 7.8.7.8 7.8-7.8-.7-.8z"/></svg>
+                  </button>
+                </div>
+              </div>
+            </div>
+            <div id="panel-body">
+              <div class="panel-view" id="view-problems" hidden><div class="problems-list soumtok-scroll" id="problems-list"></div></div>
+              <div class="panel-view panel-view-output" id="view-output" hidden><pre class="panel-log" id="panel-output-log"></pre></div>
+              <div class="panel-view" id="view-debug" hidden>
+                <div class="debug-console-out soumtok-scroll" id="debug-console-log"></div>
+                <div class="debug-console-in">
+                  <span class="debug-console-prompt" aria-hidden="true">&gt;</span>
+                  <input type="text" class="debug-console-input" id="debug-console-input" disabled placeholder="Please start a debug session to evaluate expressions" aria-label="Debug console input" />
+                </div>
+              </div>
+              <div class="panel-view" id="view-terminal">
+                <div class="term-workspace" id="term-workspace">
+                  <div class="term-panes" id="term-panes">
+                    <div class="term-pane" data-pane="0">
+                      <div class="term-hosts" id="term-hosts"></div>
+                    </div>
+                  </div>
+                </div>
+                <div class="term-shell-menu" id="term-shell-menu" hidden role="menu"></div>
+              </div>
+              <div class="panel-view" id="view-ports" hidden>
+                <div class="ports-empty-wrap">
+                  <p class="panel-placeholder ports-empty-text">No forwarded ports. Forward a port to access your locally running services over the internet.</p>
+                  <button type="button" class="ports-forward-btn" id="ports-forward-btn" disabled title="Start a dev server in Terminal first">Forward a Port</button>
+                </div>
+                <ul class="ports-list" id="ports-list" hidden></ul>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+      <div class="sash sash-v" id="resize-agent" title="Drag to resize agent"></div>
+      <aside id="agent-panel" aria-label="Agent"></aside>
+      <div class="sash sash-v" id="resize-extdock" title="Drag to resize extension panel"></div>
+      <aside id="ext-dock" aria-label="Extension panel">
+        <div id="ext-dock-bar">
+          <span id="ext-dock-title">Extension</span>
+          <button type="button" id="ext-dock-close" title="Close extension panel" aria-label="Close extension panel">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="m4.1 4.1 7.8 7.8.8-.7L4.9 3.4l-.8.7zm7.8 0-7.8 7.8.7.8 7.8-7.8-.7-.8z"/></svg>
+          </button>
+        </div>
+        <div id="ext-dock-stack">
+          <div id="ext-dock-loader" hidden role="status" aria-live="polite">
+            <div class="ext-dock-avatar" id="ext-dock-avatar-host" aria-hidden="true"></div>
+            <p class="ext-dock-loader-msg" id="ext-dock-loader-msg">Loading…</p>
+          </div>
+          <div id="ext-dock-body"></div>
+        </div>
+      </aside>
+    </div>
+    <footer id="status">
+      <button type="button" class="st-item" id="st-git" title="Source control">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="4" cy="4" r="1.7"/><circle cx="12" cy="4" r="1.7"/><circle cx="8" cy="12.2" r="1.7"/><path d="M5.5 5.2c1.4 2 3.6 2 5 0M8 10.4V6.4"/></svg>
+        <span id="st-branch">—</span>
+      </button>
+      <button type="button" class="st-item" id="st-errors" title="Errors">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="8" cy="8" r="5.5"/><path d="M5.8 5.8l4.4 4.4M10.2 5.8l-4.4 4.4"/></svg>
+        <span id="st-err-count">0</span>
+      </button>
+      <button type="button" class="st-item" id="st-warnings" title="Warnings">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 2.8 14.2 13.4H1.8L8 2.8z"/><path d="M8 6.4v3.2M8 11.5v.7"/></svg>
+        <span id="st-warn-count">0</span>
+      </button>
+      <span class="grow"></span>
+      <button type="button" class="st-item st-item-muted" id="st-cursor" title="Go to line" hidden>Ln 1, Col 1</button>
+      <button type="button" class="st-item st-item-muted" id="st-lang" title="Select language mode" hidden>Plain Text</button>
+      <button type="button" class="st-item" id="st-tab-btn" title="Inline tab completions">Tab <span id="st-tab">Off</span></button>
+      <button type="button" class="st-item" id="st-model-btn" title="Agent model"><span id="st-model">Auto</span></button>
+      <button type="button" class="st-item" id="st-agent-btn" title="Agent panel">Agent <span id="st-agent">Idle</span></button>
+      <button type="button" class="st-item" id="st-user" title="Account">Not signed in</button>
+    </footer>
+    <div id="prompt" hidden>
+      <div class="prompt-card">
+        <p id="prompt-title">Clone</p>
+        <input id="prompt-input" />
+        <div class="prompt-row">
+          <button type="button" class="ghost" id="prompt-cancel">Cancel</button>
+          <button type="button" class="primary" id="prompt-ok">Continue</button>
+        </div>
+      </div>
+    </div>
+    <div id="project-switch" hidden role="dialog" aria-modal="true" aria-labelledby="project-switch-title">
+      <div class="prompt-card project-switch-card">
+        <p id="project-switch-title" class="project-switch-title">Save this project session?</p>
+        <p id="project-switch-body" class="project-switch-body"></p>
+        <p id="project-switch-next" class="project-switch-next"></p>
+        <div class="prompt-row">
+          <button type="button" class="ghost" id="project-switch-cancel">Stay here</button>
+          <button type="button" class="primary" id="project-switch-confirm">Save session &amp; open</button>
+        </div>
+      </div>
+    </div>
+    <div id="project-switch-progress" hidden role="status" aria-live="polite" aria-busy="true">
+      <div class="prompt-card project-switch-progress-card">
+        <div class="project-switch-spinner" aria-hidden="true"></div>
+        <p id="project-switch-progress-msg">Saving project session…</p>
+      </div>
+    </div>
+    <div id="trust-publisher" hidden role="dialog" aria-modal="true" aria-labelledby="trust-publisher-title">
+      <div class="trust-publisher-card">
+        <div class="trust-publisher-head">
+          <span class="trust-publisher-warn" aria-hidden="true">
+            <svg viewBox="0 0 16 16" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 2.2 14.5 13H1.5L8 2.2z"/><path d="M8 6.2v3.4M8 11.4v.8"/></svg>
+          </span>
+          <p id="trust-publisher-title" class="trust-publisher-title">Do you trust this publisher?</p>
+        </div>
+        <p id="trust-publisher-body" class="trust-publisher-body"></p>
+        <p id="trust-publisher-verified" class="trust-publisher-verified" hidden></p>
+        <p class="trust-publisher-disclaimer">Soumtok has no control over the behavior of third-party extensions, including how they manage your personal data. Proceed only if you trust the publisher.</p>
+        <div class="prompt-row trust-publisher-actions">
+          <button type="button" class="ghost" id="trust-publisher-cancel">Cancel</button>
+          <button type="button" class="ghost" id="trust-publisher-learn">Learn More</button>
+          <button type="button" class="primary" id="trust-publisher-install">Trust Publisher &amp; Install</button>
+        </div>
+      </div>
+    </div>
+    <div id="palette" hidden>
+      <input id="palette-input" placeholder="Type a command..." />
+      <div id="palette-list"></div>
+    </div>
+    <script src="../shared/modelCatalog.js"></script>
+    <script src="../shared/modelPricing.js"></script>
+    <script src="../shared/modelBrief.js"></script>
+    <script src="../shared/publisherVerified.js"></script>
+    <script src="agentVoice.js"></script>
+    <script src="agentAvatar.js"></script>
+    <script src="../../node_modules/@xterm/xterm/lib/xterm.js"></script>
+    <script src="../../node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
+    <script src="xterm-bridge.js"></script>
+    <script src="terminalPanel.js"></script>
+    <script src="monacoLanguages.js"></script>
+    <script src="lspBridge.js"></script>
+    <script src="editorAi.js"></script>
+    <script src="editorDiff.js"></script>
+    <script src="extMarketMarkdown.js"></script>
+    <script src="envEditor.js"></script>
+    <script src="fileIcons.js"></script>
+    <script src="../shared/testHubArtifacts.js"></script>
+    <script src="modelBriefSheet.js"></script>
+    <script src="testHubPanel.js"></script>
+    <script src="workbench.js"></script>
+  </body>
+</html>

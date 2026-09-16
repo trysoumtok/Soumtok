@@ -36,6 +36,7 @@ export function AgentWorkbench({
   repo,
   onCommit,
   onPullRequest,
+  onPasteFiles,
 }: {
   workspace: AgentWorkspace
   tab: BenchTab
@@ -57,6 +58,7 @@ export function AgentWorkbench({
   repo?: { fullName: string; name?: string } | null
   onCommit?: (message: string) => Promise<string>
   onPullRequest?: (title: string) => Promise<string>
+  onPasteFiles?: (files: File[]) => void
 }) {
   const files = workspace.files
   const title = workspace.previewTitle || workspace.mode || 'Workspace'
@@ -70,7 +72,9 @@ export function AgentWorkbench({
   const onDesktop = tab === 'desktop'
 
   useEffect(() => {
-    if (focusPath) onTab('files')
+    if (!focusPath) return
+    if (tab === 'desktop' && busy) return
+    onTab('files')
   }, [focusPath])
 
   useEffect(() => {
@@ -255,6 +259,7 @@ export function AgentWorkbench({
             onSaveFile={onSaveFile}
             openFile={focusPath}
             onRunCommand={onRunCommand}
+            onPasteFiles={onPasteFiles}
           />
         </div>
       )}

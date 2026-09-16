@@ -763,7 +763,7 @@ function UsageGroup({
 }) {
   return (
     <div className="mt-4 table-scroll">
-      <div className="min-w-[340px]">
+      <div className="min-w-0 w-full max-w-full">
       <div className="grid grid-cols-[1fr_auto_auto] gap-3 px-1 py-2 text-[13px] font-medium">
         <span>{title}</span>
         <span className="text-white/70">{formatTokens(groupTotal)} tokens</span>

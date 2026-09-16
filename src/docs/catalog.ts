@@ -124,7 +124,7 @@ export const DOCS_PAGES: DocsPage[] = [
         id: 'stack',
         title: 'How it is built',
         type: 'p',
-        text: 'The app is Vite, React, and TypeScript. Better Auth writes to public.user, public.account, and public.profiles on Neon (Lakebase) Postgres. Do not turn on Neon console Auth — it would fight Better Auth. Uploads go to Bunny (soumtok-files). Coding calls use platform env keys or your own keys for OpenAI, Anthropic, Google, DeepSeek, and xAI. Still images in Studio are Flux Schnell on Fal only. Video, music, audio, and TTS model ids are rejected.',
+        text: 'The app is Vite, React, and TypeScript. Better Auth writes to public.user, public.account, and public.profiles on Neon (Lakebase) Postgres. Do not turn on Neon console Auth — it would fight Better Auth. Uploads go to Bunny (soumtok-files). Coding calls use platform env keys or your own keys for OpenAI, Anthropic, Google, DeepSeek, and xAI. Still images in Studio are Flux 2 Max on Replicate (REPLICATE_API_TOKEN), with Fal Schnell as a fallback. Video, music, audio, and TTS model ids are rejected.',
       },
       {
         id: 'not',
@@ -580,7 +580,7 @@ export const DOCS_PAGES: DocsPage[] = [
         id: 'image',
         title: 'Images',
         type: 'p',
-        text: 'Studio can ask for a still image through Flux Schnell when the server has FAL_KEY. Stills only. The API rejects ids that look like video, veo, sora, lyria, music, audio, or TTS. The Models catalog does not count an image model and does not advertise one there. If you need a screenshot in the prompt, attach it. If you need a generated still, ask in chat. If you need a film, this is the wrong product.',
+        text: 'Studio can ask for a still image through Flux 2 Max when the server has REPLICATE_API_TOKEN. Stills only. The API rejects ids that look like video, veo, sora, lyria, music, audio, or TTS. The Models catalog does not count an image model and does not advertise one there. If you need a screenshot in the prompt, attach it. If you need a generated still, ask in chat. If you need a film, this is the wrong product.',
       },
       {
         id: 'spend',
@@ -636,7 +636,7 @@ export const DOCS_PAGES: DocsPage[] = [
       },
       {
         type: 'p',
-        text: 'The Models page does not print a vanity count. It does not list the still-image path (Flux Schnell lives in Studio chat when FAL_KEY is set). Ready is a flag, not a promise that every id on earth is live. If a row is visible but not ready, the call fails until a platform key or a BYOK key exists.',
+        text: 'The Models page does not print a vanity count. It does not list the still-image path (Flux 2 Max lives in Studio chat when REPLICATE_API_TOKEN is set). Ready is a flag, not a promise that every id on earth is live. If a row is visible but not ready, the call fails until a platform key or a BYOK key exists.',
       },
       {
         id: 'why',
@@ -710,7 +710,7 @@ export const DOCS_PAGES: DocsPage[] = [
         title: 'What is not a model',
         type: 'ul',
         items: [
-          'Flux Schnell stills — a Studio image path, not a row on Models',
+          'Flux 2 Max stills — a Studio image path, not a row on Models',
           'Video, music, audio, TTS — rejected by the API',
           'A count of “how many models we have” — we do not print one',
         ],
@@ -1345,7 +1345,7 @@ export const DOCS_PAGES: DocsPage[] = [
         type: 'ul',
         items: [
           'OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_AI_API_KEY, DEEPSEEK_API_KEY, XAI_API_KEY',
-          'FAL_KEY — Flux Schnell stills only',
+          'REPLICATE_API_TOKEN — Flux 2 Max stills; FAL_KEY is an optional Schnell fallback',
           'A model is ready if you have that provider, OpenRouter, or a platform key',
         ],
       },
@@ -1365,7 +1365,7 @@ export const DOCS_PAGES: DocsPage[] = [
         id: 'image',
         title: 'Image key',
         type: 'p',
-        text: 'Still images use Fal Flux Schnell. The Models page does not advertise this as a counted model. Video, music, and TTS ids are rejected by the image route.',
+        text: 'Still images use Replicate Flux 2 Max. The Models page does not advertise this as a counted model. Video, music, and TTS ids are rejected by the image route.',
       },
     ],
   },
@@ -1535,7 +1535,7 @@ export const DOCS_PAGES: DocsPage[] = [
         items: [
           'GET /api/models — catalog plus ready flags',
           'POST /api/studio/complete — chat completion (platform or BYOK)',
-          'POST /api/studio/image — still Flux Schnell only; video/audio/tts ids are rejected',
+          'POST /api/studio/image — still Flux 2 Max (Replicate) only; video/audio/tts ids are rejected',
         ],
       },
       {
@@ -1598,7 +1598,7 @@ export const DOCS_PAGES: DocsPage[] = [
           'Better Auth secret and OAuth client ids',
           'Bunny soumtok-files for avatars and logos',
           'SMTP info@soumtok.com for codes and magic links',
-          'Provider keys for coding; FAL_KEY for stills',
+          'Provider keys for coding; REPLICATE_API_TOKEN for stills',
           'PayPal and PayHero for checkout',
         ],
       },

@@ -94,7 +94,19 @@ export function Footer() {
             <Logo href="/" size="sm" />
             <p>© 2026 Soumtok · Nairobi</p>
           </div>
-          <p>support@soumtok.com</p>
+          <div className="flex flex-wrap items-center gap-4">
+            <a
+              href="https://github.com/Soumtok"
+              target="_blank"
+              rel="noreferrer"
+              className="text-white/40 no-underline hover:text-white/70"
+            >
+              GitHub
+            </a>
+            <a href="mailto:support@soumtok.com" className="text-white/40 no-underline hover:text-white/70">
+              support@soumtok.com
+            </a>
+          </div>
         </div>
       </div>
     </footer>

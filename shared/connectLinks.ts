@@ -70,6 +70,18 @@ const ALIASES: Record<string, string[]> = {
   vercel: ['vercel'],
 }
 
+function escapeRe(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/** Whole-token match so "gh" does not fire inside "light" and "linear" does not fire inside "linear-gradient". */
+export function mentionsCatalogName(text: string, name: string) {
+  const token = name.toLowerCase().trim()
+  if (!token) return false
+  const body = escapeRe(token).replace(/\\ /g, '[\\s-]+')
+  return new RegExp(`(^|[^a-z0-9-])${body}([^a-z0-9-]|$)`, 'i').test(text)
+}
+
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
 
 export function isConnectIntent(text: string) {
@@ -81,13 +93,23 @@ export function wantsCatalogConnect(text: string) {
 }
 
 export function matchUnconnectedCatalog(prompt: string, connectedIds: string[]) {
-  const text = prompt.toLowerCase()
   const have = new Set(connectedIds.map((id) => id.toLowerCase()))
   return PLUGIN_CATALOG.filter((item) => {
     if (have.has(item.id) || have.has(item.name.toLowerCase())) return false
     const names = [item.id, item.name, item.id.replaceAll('-', ' '), ...(ALIASES[item.id] || [])]
-    return names.some((name) => text.includes(name.toLowerCase()))
+    return names.some((name) => mentionsCatalogName(prompt, name))
   }).slice(0, 4)
+}
+
+/** Start a connect card only when they asked to connect a catalog plugin — never on a normal edit like "add a light/dark toggle". */
+export function catalogConnectTargets(
+  text: string,
+  connectedIds: string[],
+  opts?: { codingFollowUp?: boolean },
+) {
+  if (opts?.codingFollowUp && !isConnectIntent(text)) return []
+  if (!wantsCatalogConnect(text)) return []
+  return matchUnconnectedCatalog(text, connectedIds)
 }
 
 export function normalizeUserCode(raw: string) {

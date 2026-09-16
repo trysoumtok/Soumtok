@@ -33,7 +33,18 @@ import {
 } from '../../lib/api'
 import { catalogPlugin, PLUGIN_CATALOG, skillTitle } from '../../../shared/plugins'
 import { connectorLoginUrl } from '../../../shared/connectors'
-import { matchUnconnectedCatalog, wantsCatalogConnect } from '../../../shared/connectLinks'
+import { catalogConnectTargets } from '../../../shared/connectLinks'
+import {
+  applyBrandLogo,
+  brandLogoContext,
+  brandLogoFetchUrls,
+  brandFromPrompt,
+  isLogoOnlyAsk,
+  svgFromFetchedPages,
+  wantsBrandAsset,
+} from '../../../shared/brandLogo'
+import { readStoredAgentDriver, soumtokBotStudioContext, writeStoredAgentDriver, type AgentDriver } from '../../../shared/soumtokBot'
+import { analyzeUserRequest, formatAnalyzedRequest, repairUserText } from '../../../shared/requestAnalyze'
 import {
   defaultWorkbenchTab,
   emptyWorkspace,
@@ -44,21 +55,29 @@ import {
   normalizeWorkspace,
   parseAgentRun,
   kickoffEvents,
-  startingStep,
-  runLogs,
   liveWorkspaceFromStream,
   absorbFiles,
   attachChangeDiffs,
+  previewFromFiles,
+  withChangeDiffs,
   codeForRequest,
+  isFollowUpTask,
+  planUsesCodingAgent,
+  eventsForMode,
+  applyNameChangeFromThread,
+  nameChangeIsOnlyAsk,
   workspaceDelivered,
   workspaceNeedsHeal,
   codeWritten,
   historyForModel,
   threadMemory,
   spokenRecap,
+  chatReplyFromRun,
+  finishChatReply,
   runTemperature,
   outputBudget,
   isAskReply,
+  promptWithAttachments,
   formatAskReply,
   formatSkipAsk,
   formatApprovePlan,
@@ -67,6 +86,11 @@ import {
   applyDiffDecision,
   followUpPrompts,
   latestOpenAsk,
+  latestOpenPlan,
+  looksLikeAskHandoff,
+  restoreAskEvent,
+  visibleWorkEvents,
+  visibleWorkPaths,
   type AgentPlan,
   type AgentRunMode,
   type AgentWorkspace,
@@ -83,8 +107,11 @@ import {
   slashMatch,
   PROMPT_COMMANDS,
 } from '../../../shared/capabilities'
+import { liveStepLabel } from '../../../shared/toolFeed'
+import { liveProgressStep, toolResultLine } from '../../../shared/tools'
+import { friendlyStreamError, isTransientStreamError } from '../../../shared/streamDrop'
 import { checkoutPath } from '../../../shared/plans'
-import { CODING_MODELS, modelGuide } from '../../../shared/models'
+import { AUTO_MODEL_ID, CODING_MODELS, isAutoModel, modelGuide, pickAutoModel, sortModelsByPower } from '../../../shared/models'
 import { mediaGap, modelMedia, slimChatFiles, type ChatFile } from '../../../shared/chatMedia'
 import {
   ensureEnvFiles,
@@ -96,7 +123,18 @@ import {
   securityReply,
 } from '../../../shared/secretsGuard'
 import { hydrateSecretFiles, splitSecretFiles, saveLocalSecrets } from '../../lib/studioSecrets'
-import { readChatFiles } from '../../lib/chatFiles'
+import {
+  dropHasFiles,
+  filesFromDrop,
+  forgetChatFile,
+  filesFromClipboard,
+  pasteBelongsToField,
+  readChatFiles,
+  settleChatFile,
+  settleChatFiles,
+  stageChatFile,
+  takeChatFiles,
+} from '../../lib/chatFiles'
 import { ReplyMarkdown } from '../../lib/replyText'
 import { signIn } from '../../lib/auth-client'
 import { navigate, openTab } from '../../lib/nav'
@@ -106,7 +144,8 @@ import { AgentTimeline } from './AgentTimeline'
 import { AgentLiveCard } from './AskCards'
 import { AgentWorkbench, type BenchTab } from './AgentWorkbench'
 import { AccountMenu } from './AccountMenu'
-import { AutomationsEditor } from './AutomationsEditor'
+import { SoumtokBotChatHeader, SoumtokBotComposer, SoumtokBotOnboarding } from './SoumtokBotShell'
+import { TestHubPanel } from './TestHubPanel'
 import {
   AutomationsIcon,
   BookIcon,
@@ -122,9 +161,15 @@ import {
   StackIcon,
 } from './icons'
 
-type StudioMessage = { role: 'user' | 'assistant' | 'log'; content: string; files?: ChatFile[] }
+type StudioMessage = {
+  role: 'user' | 'assistant' | 'log'
+  content: string
+  files?: ChatFile[]
+  elapsed?: number
+  picked?: string
+}
 
-type StudioView = 'chat' | 'automations' | 'codebase'
+type StudioView = 'chat' | 'test-hub' | 'codebase'
 type StudioModel = {
   id: string
   name: string
@@ -140,22 +185,42 @@ function modelCaps(item: Pick<StudioModel, 'id' | 'name' | 'cost'>): string[] {
   const hay = `${item.id} ${item.name}`.toLowerCase()
   const fast = /flash|nano|mini|lite|fast|haiku/.test(hay)
   const high = /pro|opus|fable|astra|o1|o3|codex|reasoning/.test(hay)
+  if (item.cost === 'Highest' || item.cost === 'High') return ['Premium']
   if (item.id === 'grok-4.6' || (high && fast)) return ['High', 'Fast']
-  if (high || item.cost === 'Highest' || item.cost === 'High' || item.cost === 'Higher') return ['High']
+  if (high || item.cost === 'Higher') return ['High']
   if (fast || item.cost === 'Cheap' || item.cost === 'Cheapest' || item.cost === 'Low' || item.cost === 'Free') {
     return ['Fast']
   }
   return ['Medium']
 }
 
+function waitMs(ms: number, signal?: AbortSignal) {
+  return new Promise<void>((resolve) => {
+    if (signal?.aborted) {
+      resolve()
+      return
+    }
+    const timer = window.setTimeout(resolve, ms)
+    signal?.addEventListener(
+      'abort',
+      () => {
+        window.clearTimeout(timer)
+        resolve()
+      },
+      { once: true },
+    )
+  })
+}
+
 function modelTriggerLabel(item: Pick<StudioModel, 'id' | 'name' | 'cost'> | undefined, fallback: string) {
   if (!item) return fallback
+  if (isAutoModel(item.id)) return 'Auto'
   const cap = modelCaps(item)[0]
   return cap ? `${item.name} ${cap}` : item.name
 }
 
 function studioView(path: string): StudioView {
-  if (path.startsWith('/dashboard/studio/automations')) return 'automations'
+  if (path.startsWith('/dashboard/studio/automations') || path.startsWith('/dashboard/studio/test-hub')) return 'test-hub'
   if (path.startsWith('/dashboard/studio/codebase')) return 'codebase'
   return 'chat'
 }
@@ -163,7 +228,7 @@ function studioView(path: string): StudioView {
 function studioChatId(path: string) {
   const rest = path.replace(/^\/dashboard\/studio\/?/, '')
   const id = rest.split(/[/?#]/)[0]
-  if (!id || id === 'automations' || id === 'codebase') return null
+  if (!id || id === 'automations' || id === 'test-hub' || id === 'codebase') return null
   return id
 }
 
@@ -198,6 +263,11 @@ export function StudioDashboard({
   const [mobileOpen, setMobileOpen] = useState(false)
   const [projects, setProjects] = useState<StudioProject[]>([])
   const [projectsReady, setProjectsReady] = useState(false)
+  const [agentDriver, setAgentDriver] = useState<AgentDriver>(() => readStoredAgentDriver())
+  const setStudioAgentDriver = (driver: AgentDriver) => {
+    setAgentDriver(driver)
+    writeStoredAgentDriver(driver)
+  }
 
   function goChat(fresh = false) {
     if (fresh) setChatNonce((n) => n + 1)
@@ -211,6 +281,15 @@ export function StudioDashboard({
       document.body.style.overflow = ''
     }
   }, [mobileOpen])
+
+  useEffect(() => {
+    const onDriver = (event: Event) => {
+      const next = (event as CustomEvent<AgentDriver>).detail
+      if (next === 'ide' || next === 'bot') setAgentDriver(next)
+    }
+    window.addEventListener('soumtok-agent-driver', onDriver)
+    return () => window.removeEventListener('soumtok-agent-driver', onDriver)
+  }, [])
 
   useEffect(() => {
     const giveUp = window.setTimeout(() => setProjectsReady(true), 5000)
@@ -291,12 +370,12 @@ export function StudioDashboard({
             onClick={() => goChat(true)}
           />
           <StudioNavButton
-            icon={<AutomationsIcon />}
-            label="Automations"
-            active={view === 'automations'}
+            icon={<StackIcon />}
+            label="Test Hub"
+            active={view === 'test-hub'}
             collapsed={collapsed}
             onClick={() => {
-              navigate('/dashboard/studio/automations')
+              navigate('/dashboard/studio/test-hub')
               setMobileOpen(false)
             }}
           />
@@ -373,6 +452,8 @@ export function StudioDashboard({
           collapsed={collapsed}
           onDownload={onDownload}
           onProfileSaved={onProfileSaved}
+          agentDriver={agentDriver}
+          onAgentDriverChange={setStudioAgentDriver}
         />
       </aside>
 
@@ -408,11 +489,11 @@ export function StudioDashboard({
                   type="button"
                   className="block w-full rounded-md px-2.5 py-2.5 text-left text-[14px] text-white/80"
                   onClick={() => {
-                    navigate('/dashboard/studio/automations')
+                    navigate('/dashboard/studio/test-hub')
                     setMobileOpen(false)
                   }}
                 >
-                  Automations
+                  Test Hub
                 </button>
                 <button
                   type="button"
@@ -440,6 +521,8 @@ export function StudioDashboard({
                   hasAvatar={profile?.hasAvatar}
                   onDownload={onDownload}
                   onProfileSaved={onProfileSaved}
+                  agentDriver={agentDriver}
+                  onAgentDriverChange={setStudioAgentDriver}
                 />
               </div>
             </div>
@@ -447,9 +530,15 @@ export function StudioDashboard({
         )}
 
         {view === 'chat' && (
-          <StudioChat key={chatId || `new-${chatNonce}`} initialId={chatId} onSaved={upsertProject} plan={profile?.plan} />
+          <StudioChat
+            key={chatId || `new-${chatNonce}`}
+            initialId={chatId}
+            onSaved={upsertProject}
+            plan={profile?.plan}
+            agentDriver={agentDriver}
+          />
         )}
-        {view === 'automations' && <AutomationsEditor authorName={displayName} />}
+        {view === 'test-hub' && <TestHubPanel />}
         {view === 'codebase' && <StudioCodebase />}
       </div>
 
@@ -681,7 +770,7 @@ function StudioSearch({
   const q = query.trim().toLowerCase()
   const actions = [
     { href: '/dashboard/studio', label: 'New Chat', icon: <ComposeIcon /> },
-    { href: '/dashboard/studio/automations', label: 'Automations', icon: <AutomationsIcon /> },
+    { href: '/dashboard/studio/test-hub', label: 'Test Hub', icon: <StackIcon /> },
     { href: '/dashboard/studio/codebase', label: 'Codebase', icon: <CodebaseIcon /> },
     { href: '/dashboard', label: 'Dashboard', icon: <HomeIcon /> },
     ...projects.map((item) => ({
@@ -757,16 +846,43 @@ function StudioSearch({
 }
 
 function buildTurns(messages: StudioMessage[], marks: number[], eventLen: number) {
-  const turns: { user: string; files?: ChatFile[]; logs: string[]; replies: string[]; from: number; to: number }[] = []
-  let current: { user: string; files?: ChatFile[]; logs: string[]; replies: string[] } | null = null
+  const turns: {
+    user: string
+    files?: ChatFile[]
+    logs: string[]
+    replies: string[]
+    elapsed?: number
+    picked?: string
+    from: number
+    to: number
+  }[] = []
+  let current: {
+    user: string
+    files?: ChatFile[]
+    logs: string[]
+    replies: string[]
+    elapsed?: number
+    picked?: string
+  } | null = null
   for (const item of messages) {
     if (item.role === 'user') {
       if (current) turns.push({ ...current, from: 0, to: 0 })
       current = { user: item.content, files: item.files, logs: [], replies: [] }
     } else if (item.role === 'log' && current) {
+      if (
+        /^Auto picked /i.test(item.content) ||
+        /^Worked for /i.test(item.content) ||
+        /^Building with /i.test(item.content) ||
+        /^Looking that up/i.test(item.content)
+      ) {
+        continue
+      }
       current.logs.push(item.content)
-    } else if (item.role === 'assistant' && current && item.content.trim() && !item.content.trim().startsWith('{')) {
-      current.replies.push(item.content)
+    } else if (item.role === 'assistant' && current) {
+      const body = item.content.trim()
+      if (body && !body.startsWith('{')) current.replies.push(item.content)
+      if (item.elapsed != null) current.elapsed = item.elapsed
+      if (item.picked) current.picked = item.picked
     }
   }
   if (current) turns.push({ ...current, from: 0, to: 0 })
@@ -892,25 +1008,6 @@ function FileThumbs({
   )
 }
 
-function dropHasFiles(data: DataTransfer | null) {
-  if (!data) return false
-  if ([...data.types].includes('Files')) return true
-  return Array.from(data.items || []).some((item) => item.kind === 'file')
-}
-
-function filesFromDrop(data: DataTransfer | null) {
-  if (!data) return []
-  const listed = Array.from(data.files || [])
-  if (listed.length) return listed
-  const picked: File[] = []
-  for (const item of Array.from(data.items || [])) {
-    if (item.kind !== 'file') continue
-    const file = item.getAsFile()
-    if (file) picked.push(file)
-  }
-  return picked
-}
-
 function UserBubble({ text, files }: { text: string; files?: ChatFile[] }) {
   const answered = isAskReply(text)
   const body = answered
@@ -934,10 +1031,12 @@ function ReplyCard({
   replies,
   onRegenerate,
   regenerateLabel,
+  onShowQuestions,
 }: {
   replies: string[]
   onRegenerate?: () => void
   regenerateLabel?: string
+  onShowQuestions?: () => void
 }) {
   const [copied, setCopied] = useState(false)
   const text = replies.join('\n\n').trim()
@@ -962,12 +1061,24 @@ function ReplyCard({
           ))}
         </div>
       )}
-      <div className={`flex items-center gap-1 px-2 py-1.5 ${replies.length > 0 ? 'border-t border-white/[0.06]' : ''}`}>
+      <div className={`flex items-center gap-0.5 px-1.5 py-1 ${replies.length > 0 ? 'border-t border-white/[0.06]' : ''}`}>
+        {onShowQuestions && (
+          <button
+            type="button"
+            onClick={onShowQuestions}
+            aria-label="Show questions"
+            className="flex items-center gap-1.5 rounded-md px-2 py-1 text-[12px] text-white/70 hover:bg-white/[0.06] hover:text-white"
+          >
+            <QuestionsIcon />
+            Questions
+          </button>
+        )}
         <button
           type="button"
           disabled={!text}
           onClick={copyReply}
-          className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[12px] text-white/45 hover:bg-white/[0.06] hover:text-white disabled:opacity-30"
+          aria-label={copied ? 'Copied' : 'Copy'}
+          className="flex items-center gap-1.5 rounded-md px-2 py-1 text-[12px] text-white/40 hover:bg-white/[0.06] hover:text-white disabled:opacity-30"
         >
           <CopyReplyIcon />
           {copied ? 'Copied' : 'Copy'}
@@ -976,7 +1087,8 @@ function ReplyCard({
           <button
             type="button"
             onClick={onRegenerate}
-            className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[12px] text-white/45 hover:bg-white/[0.06] hover:text-white"
+            aria-label={regenerateLabel || 'Regenerate'}
+            className="flex items-center gap-1.5 rounded-md px-2 py-1 text-[12px] text-white/40 hover:bg-white/[0.06] hover:text-white"
           >
             <RegenIcon />
             {regenerateLabel || 'Regenerate'}
@@ -984,6 +1096,14 @@ function ReplyCard({
         )}
       </div>
     </div>
+  )
+}
+
+function QuestionsIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 14 14" fill="none" aria-hidden>
+      <path d="M3 4h8M3 7h8M3 10h5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+    </svg>
   )
 }
 
@@ -1008,14 +1128,19 @@ function RegenIcon() {
 function StudioChat({
   initialId,
   onSaved,
-  plan,
+  plan: billingPlan,
+  agentDriver,
+  displayName = 'there',
 }: {
   initialId: string | null
   onSaved: (row: StudioProject) => void
   plan?: string
+  agentDriver: AgentDriver
+  displayName?: string
 }) {
+  const isBot = agentDriver === 'bot'
   const [models, setModels] = useState<StudioModel[]>([])
-  const [model, setModel] = useState('deepseek-v4-flash')
+  const [model, setModel] = useState(AUTO_MODEL_ID)
   const [modelOpen, setModelOpen] = useState(false)
   const [projectOpen, setProjectOpen] = useState(false)
   const [sourceOpen, setSourceOpen] = useState(false)
@@ -1033,9 +1158,12 @@ function StudioChat({
   const [focusPath, setFocusPath] = useState('')
   const [status, setStatus] = useState('')
   const [step, setStep] = useState('')
+  const [liveReply, setLiveReply] = useState('')
+  const [livePicked, setLivePicked] = useState('')
   const [busy, setBusy] = useState(false)
   const [livePlan, setLivePlan] = useState<AgentPlan | null>(null)
   const [liveFiles, setLiveFiles] = useState<string[]>([])
+  const [liveThought, setLiveThought] = useState('')
   const [now, setNow] = useState(0)
   const liveStarted = useRef(0)
   const [listening, setListening] = useState(false)
@@ -1049,6 +1177,7 @@ function StudioChat({
   const [skills, setSkills] = useState<UserSkill[]>([])
   const [attachedSkills, setAttachedSkills] = useState<UserSkill[]>([])
   const [pendingFiles, setPendingFiles] = useState<ChatFile[]>([])
+  const pendingFilesRef = useRef<ChatFile[]>([])
   const [fileError, setFileError] = useState('')
   const [fileDrag, setFileDrag] = useState(false)
   const fileDragDepth = useRef(0)
@@ -1131,9 +1260,8 @@ function StudioChat({
     fetchModels()
       .then((data) => {
         if (cancelled) return
-        setModels(data.models)
-        const firstReady = data.models.find((item) => item.ready)
-        if (firstReady) setModel(firstReady.id)
+        setModels(sortModelsByPower(data.models))
+        if (!initialId) setModel(AUTO_MODEL_ID)
       })
       .catch(() => {
         if (!cancelled) setStatus('Could not load models')
@@ -1279,7 +1407,7 @@ function StudioChat({
     const el = feedRef.current
     if (!el) return
     el.scrollTop = el.scrollHeight
-  }, [shown, busy, step])
+  }, [shown, busy, step, liveReply])
 
   async function persist(nextMessages: StudioMessage[], nextWorkspace = workspaceRef.current) {
     if (nextMessages.length === 0) return
@@ -1313,14 +1441,10 @@ function StudioChat({
   }
 
   function stepLabel(event: AgentWorkspace['events'][number]) {
-    if (event.kind === 'diff') return event.removed > 0 ? `Editing ${event.path}` : `Writing ${event.path}`
-    if (event.kind === 'command') return event.command
     if (event.kind === 'explore') return 'Reading the workspace'
-    if (event.kind === 'thought') return 'Thinking'
     if (event.kind === 'ask') return 'Asking a few questions'
     if (event.kind === 'plan') return 'Drafting a plan'
     if (event.kind === 'todo') return 'Planning steps'
-    if (event.kind === 'fetch') return `Reading ${event.title || event.url}`
     if (event.kind === 'document') return `Saving ${event.title}`
     if (event.kind === 'folder') return `Creating ${event.path}`
     if (event.kind === 'mcp') return `MCP ${event.tool}`
@@ -1328,17 +1452,11 @@ function StudioChat({
     if (event.kind === 'prompt') return 'Prompt help'
     if (event.kind === 'security') return 'Protecting keys'
     if (event.kind === 'connect') return event.connected ? `${event.name} connected` : `Connect ${event.name}`
-    if (event.kind === 'tool') {
-      const path = event.args?.path || event.args?.file
-      if (event.name === 'write' && path) return `Writing ${path}`
-      if (event.name === 'read' && path) return `Reading ${path}`
-      if (event.name === 'terminal') return event.args?.command || event.args?.cmd || 'Running a command'
-      return `Running ${event.name}`
-    }
-    if (event.kind === 'result') return event.ok ? `${event.name} ok` : `${event.name} failed`
     if (event.kind === 'note') return event.title
     if (event.kind === 'action') return event.text
-    return 'Working'
+    const live = liveStepLabel(event)
+    if (live === 'Thinking') return ''
+    return live
   }
 
   function applyWorkspace(next: AgentWorkspace) {
@@ -1348,11 +1466,23 @@ function StudioChat({
 
   async function attachChatFiles(list: File[]) {
     if (!list.length) return
-    const result = await readChatFiles(list)
-    setFileError(result.error || '')
-    if (!result.files.length) return
-    setPendingFiles((current) => [...current, ...result.files].slice(0, 6))
-    for (const file of list) {
+    const picked = takeChatFiles(list)
+    setFileError(picked.error || '')
+    if (!picked.files.length) return
+    const staged = picked.files.map(stageChatFile)
+    pendingFilesRef.current = [...pendingFilesRef.current, ...staged].slice(0, 6)
+    setPendingFiles(pendingFilesRef.current)
+    void Promise.all(
+      staged.map((item) =>
+        settleChatFile(item).then((saved) => {
+          pendingFilesRef.current = pendingFilesRef.current.map((file) =>
+            file.dataUrl && item.dataUrl && file.dataUrl === item.dataUrl ? saved : file,
+          )
+          setPendingFiles(pendingFilesRef.current)
+        }),
+      ),
+    )
+    for (const file of picked.files) {
       if (/\.(md|txt|skill)$/i.test(file.name) && /skill/i.test(file.name)) {
         void uploadSkill(file)
           .then((skill) => {
@@ -1363,6 +1493,15 @@ function StudioChat({
           .catch(() => undefined)
       }
     }
+  }
+
+  function dropPendingFiles(next: ChatFile[]) {
+    for (const file of pendingFilesRef.current) {
+      if (next.some((item) => item.dataUrl === file.dataUrl && item.name === file.name)) continue
+      forgetChatFile(file)
+    }
+    pendingFilesRef.current = next
+    setPendingFiles(next)
   }
 
   function onChatDragEnter(event: DragEvent<HTMLDivElement>) {
@@ -1432,9 +1571,10 @@ function StudioChat({
 
   async function onSend(event?: FormEvent, override?: string, overrideFiles?: ChatFile[], reuseUser = false) {
     event?.preventDefault()
-    const attached = overrideFiles ?? pendingFiles
     const text = applySlash((override ?? prompt).trim())
-    if ((!text && attached.length === 0) || busy) return
+    const queued = overrideFiles ?? pendingFilesRef.current
+    if ((!text && queued.length === 0) || busy) return
+    const attached = await settleChatFiles(queued)
     let next: StudioMessage[]
     if (reuseUser) {
       next = [...messages]
@@ -1460,12 +1600,19 @@ function StudioChat({
       }
     }
     lastSendRef.current = { text: scan.blocked ? safeText : text, files: scan.blocked ? safeFiles || [] : attached }
-    if (!isAskReply(text) && !scan.blocked) lastTaskRef.current = text
+    const priorFiles = Object.keys(workspaceRef.current.files).length
+    const hasImage = attached.some((file) => /image\//.test(file.mime || ''))
+    const ask = promptWithAttachments(repairUserText(text), {
+      hasProject: priorFiles > 0,
+      hasImage,
+      hasAttach: attached.length > 0,
+    })
+    if (!isAskReply(text) && !scan.blocked) lastTaskRef.current = text || ask
     setCanReplay(!scan.blocked)
     setMessages(next)
+    pendingFilesRef.current = []
     setPendingFiles([])
     setFileError('')
-    const priorFiles = Object.keys(workspaceRef.current.files).length
     const marks = [...(workspaceRef.current.marks || [0])]
     const users = next.filter((item) => item.role === 'user').length
     if (marks.length === 0) marks.push(0)
@@ -1498,9 +1645,13 @@ function StudioChat({
     const liveConnected = connectors
       .filter((row) => row.connected)
       .flatMap((row) => [row.plugin_id || '', row.name.toLowerCase()].filter(Boolean))
+    const analysis = analyzeUserRequest(text, {
+      hasFiles: priorFiles > 0,
+      files: workspaceRef.current.files,
+    })
     const wanted =
-      !reuseUser && !isAskReply(text) && wantsCatalogConnect(text)
-        ? matchUnconnectedCatalog(text, liveConnected)
+      !reuseUser && !isAskReply(text) && analysis.kind === 'connect'
+        ? catalogConnectTargets(text, liveConnected)
         : []
     if (wanted.length) {
       setBusy(true)
@@ -1543,7 +1694,8 @@ function StudioChat({
     }
     void persist(next)
     setBusy(true)
-    setStep('Starting the agent')
+    setStep('Analyzing and understanding')
+    setLiveThought('')
     setStatus('')
     setControl(false)
     const ac = new AbortController()
@@ -1553,8 +1705,12 @@ function StudioChat({
       setMessages([...next])
     }
     try {
-      const history = historyForModel(next, workspaceRef.current)
-      const ask = text || (attached.length ? 'Can you see the attached files? Describe what they show.' : '')
+      const historySource = next.map((item, index) => {
+        const lastUser = next.findLastIndex((row) => row.role === 'user')
+        if (index !== lastUser || item.role !== 'user' || !ask || ask === item.content.trim()) return item
+        return { ...item, content: [item.content.trim(), ask].filter(Boolean).join('\n\n') }
+      })
+      const history = historyForModel(historySource, workspaceRef.current)
       const answered = isAskReply(ask)
       if (!skipGateRef.current && !answered) {
         const skillHits = matchSkills(
@@ -1571,7 +1727,7 @@ function StudioChat({
             tools: row.last_check?.mcp?.tools || [],
           })),
         )
-        const gate = buildCapabilityAsk(skillHits, mcpHits)
+        const gate = wantsBrandAsset(ask) ? null : buildCapabilityAsk(skillHits, mcpHits)
         if (gate) {
           const events = [...workspaceRef.current.events, gate]
           applyWorkspace({ ...workspaceRef.current, events })
@@ -1582,24 +1738,53 @@ function StudioChat({
         }
       }
       skipGateRef.current = false
-      const planText = answered ? lastTaskRef.current || ask : ask
+      const planText = answered ? [lastTaskRef.current, ask].filter(Boolean).join('\n\n') : ask
       const hasAttach = attached.length > 0
-      const follow = classifyFollowUp(planText, priorFiles > 0)
+      const follow = classifyFollowUp(planText, priorFiles > 0, { attachments: hasAttach })
+      const turnAnalysis = analyzeUserRequest(planText, {
+        hasFiles: priorFiles > 0,
+        files: workspaceRef.current.files,
+        attachments: hasAttach,
+        hasImage,
+      })
       const plan = inferPlan(planText, priorFiles > 0, {
         hasPreview: Boolean(workspaceRef.current.previewHtml),
         runMode: answered ? 'agent' : runMode,
         answered,
         attachments: hasAttach,
+        analysis: turnAnalysis,
       })
-      const startLogs = runLogs(plan, project?.name)
-      for (const line of startLogs) pushLog(line)
       setLivePlan(plan)
       setLiveFiles([])
-      setStep(startingStep(plan))
+      setLiveThought(turnAnalysis.thought)
+      const sendModel = isAutoModel(model)
+        ? pickAutoModel({
+            models,
+            task: planText,
+            plan: billingPlan,
+            hasFiles: priorFiles > 0,
+            hasImage: attached.some((file) => /image\//.test(file.mime || '')),
+            runMode: answered ? 'agent' : runMode,
+            analysisKind: turnAnalysis.kind,
+          })
+        : model
+      const picked = models.find((item) => item.id === sendModel)
+      setLivePicked(isAutoModel(model) && picked ? `Auto · ${picked.name}` : '')
+      setLiveReply('')
+      setStep('Analyzing and understanding')
+      scrollFeedDown(true)
+      await waitMs(1200, ac.signal)
+      if (ac.signal.aborted) return
+      setStep('Passed to the model')
+      scrollFeedDown(true)
       let fetched: { url: string; title: string; text: string; ok?: boolean }[] = []
-      if (needsWeb(ask) || extractUrls(ask).length) {
-        pushLog('Looking that up')
-        fetched = await studioFetchPages({ query: ask, urls: extractUrls(ask) }).catch(() => [])
+      const logoAsk = wantsBrandAsset(ask)
+      if (logoAsk || (!planUsesCodingAgent(plan) && (needsWeb(ask) || extractUrls(ask).length))) {
+        pushLog(logoAsk ? 'Fetching the brand logo' : 'Looking that up')
+        fetched = await studioFetchPages({
+          query: ask,
+          urls: [...extractUrls(ask), ...(logoAsk ? brandLogoFetchUrls(ask) : [])],
+        }).catch(() => [])
         if (fetched.length) {
           applyWorkspace({
             ...workspaceRef.current,
@@ -1612,6 +1797,9 @@ function StudioChat({
       }
       const extra = [
         threadMemory(workspaceRef.current),
+        soumtokBotStudioContext(agentDriver),
+        logoAsk ? brandLogoContext(ask) : '',
+        formatAnalyzedRequest(turnAnalysis),
         follow === 'task'
           ? fetched.some((page) => page.ok !== false && page.text)
             ? platformBrief({
@@ -1636,10 +1824,15 @@ function StudioChat({
         answered ? 'The latest user message is their decisions. Build now. Do not ask again.' : '',
         priorFiles
           ? follow === 'question'
-            ? 'FOLLOW-UP KIND: question. They already have this project. Answer from the current files and this chat. Do not scaffold a new site. Do not write files unless they asked to change something.'
+            ? [
+                'FOLLOW-UP KIND: question. They already have this project. Answer from the current files and this chat. Put the answer in the summary. Do not scaffold a new site. Do not write files. Do not say Preview is ready or that you wrote files.',
+                codeForRequest(`${turnAnalysis.meaning}\n${turnAnalysis.repaired}`, workspaceRef.current.files, 14_000, { answerOnly: true }),
+              ]
+                .filter(Boolean)
+                .join('\n\n')
             : [
-                'FOLLOW-UP KIND: task. WORKSPACE and this chat already hold the project. Do not ls, read, grep, or re-scan the platform. Edit the files they asked to change and stop. Do not emit process todos.',
-                codeForRequest(planText, workspaceRef.current.files),
+                'FOLLOW-UP KIND: task. First thought, then read each file you will change so the user sees those reads, then write or diff. Never stop after saying you will read. Do not emit process todos.',
+                codeForRequest(`${turnAnalysis.meaning}\n${turnAnalysis.repaired}`, workspaceRef.current.files),
               ].filter(Boolean).join('\n\n')
           : '',
         project
@@ -1656,22 +1849,35 @@ function StudioChat({
               .join('\n')}`
           : '',
         attached.length
-          ? `The user attached files. You can see them. If they asked whether you see an image, say yes and describe it. Do not emit an ask card.\n${attached
-              .map((file) =>
-                file.analysis
-                  ? `- ${file.name}${file.documentId ? ` (document ${file.documentId})` : ''}\n${file.analysis}`
-                  : `- ${file.name}`,
-              )
-              .join('\n')}`
+          ? hasImage && priorFiles
+            ? `The user attached a screenshot of the CURRENT live preview of this workspace. Look at the pixels. Identify the broken UI section (overlapping header/nav, hamburger with desktop links, missing pictures, overflow). Read the matching files and patch them. Do not start a new site. Do not stop at a description.\n${attached
+                .map((file) =>
+                  file.analysis
+                    ? `- ${file.name}${file.documentId ? ` (document ${file.documentId})` : ''}\n${file.analysis}`
+                    : `- ${file.name}`,
+                )
+                .join('\n')}`
+            : `The user attached files. You can see them. If they asked whether you see an image, say yes and describe it. Do not emit an ask card.\n${attached
+                .map((file) =>
+                  file.analysis
+                    ? `- ${file.name}${file.documentId ? ` (document ${file.documentId})` : ''}\n${file.analysis}`
+                    : `- ${file.name}`,
+                )
+                .join('\n')}`
           : '',
       ]
         .filter(Boolean)
         .join('\n')
-      const timeout = AbortSignal.timeout(300_000)
+      const timeout = AbortSignal.timeout(planUsesCodingAgent(plan) ? 900_000 : 300_000)
       const linked = AbortSignal.any([ac.signal, timeout])
       const origin = workspaceRef.current
       const prior = origin.events.length
-      const seed = kickoffEvents(plan)
+      const seed = kickoffEvents(plan, {
+        userText: planText,
+        files: origin.files,
+        thought: turnAnalysis.thought,
+        pipeline: true,
+      })
       let lastParsed: AgentWorkspace = { files: {}, events: [], mode: plan.mode }
       let merged = origin
       let roundBase = origin
@@ -1685,19 +1891,85 @@ function StudioChat({
         setShown(prior + seed.length)
         const folders = seed.filter((item) => item.kind === 'folder').map((item) => (item.kind === 'folder' ? `${item.path}/` : ''))
         if (folders.length) {
-          setLiveFiles(folders)
           openBench('files')
+        }
+      }
+      const userTexts = next.filter((item) => item.role === 'user').map((item) => item.content)
+      const rename =
+        isFollowUpTask(plan) && turnAnalysis.kind === 'rename'
+          ? applyNameChangeFromThread(userTexts, origin.files)
+          : null
+      const logoSvg = logoAsk ? svgFromFetchedPages(fetched) : ''
+      const logoPatch =
+        !rename && priorFiles > 0 && logoAsk && logoSvg
+          ? applyBrandLogo(origin.files, {
+              text: ask,
+              svg: logoSvg,
+              name: brandFromPrompt(ask),
+            })
+          : null
+      const local = rename
+        ? {
+            files: rename.files,
+            thought: `I found “${rename.from.join('”, “')}” in ${rename.changed.join(', ')}. I’ll change the names to ${rename.to}.`,
+            stop: nameChangeIsOnlyAsk(planText),
+          }
+        : logoPatch
+          ? {
+              files: logoPatch.files,
+              thought: `Fetched the ${logoPatch.name} logo and put it in the header on ${logoPatch.changed.filter((path) => /\.html?$/i.test(path)).join(', ') || logoPatch.changed.join(', ')}.`,
+              stop: isLogoOnlyAsk(planText),
+            }
+          : null
+      if (local) {
+        const thought = [
+          {
+            kind: 'thought' as const,
+            seconds: 1,
+            text: local.thought,
+          },
+        ]
+        merged = attachChangeDiffs(
+          origin.files,
+          {
+            ...origin,
+            files: local.files,
+            previewHtml: previewFromFiles(local.files, origin.previewHtml || ''),
+            events: [...origin.events, ...thought],
+          },
+          prior,
+        )
+        applyWorkspace(merged)
+        setShown(merged.events.length)
+        openBench('desktop')
+        roundBase = merged
+        if (local.stop) {
+          const spoken = spokenRecap({ ...merged, events: merged.events.slice(prior) })
+          const done: StudioMessage[] = [...next, { role: 'assistant', content: spoken }]
+          setMessages(done)
+          void persist(done, merged)
+          setBenchTab(defaultWorkbenchTab(merged))
+          return
         }
       }
       let tick = ''
       let announced = ''
 
       const run = await streamStudio(
-        model,
+        sendModel,
         [{ role: 'system', content: executeSystemPrompt(plan, extra) }, ...history],
         (partial) => {
           if (ac.signal.aborted) return
+          if (!partial) return
+          if (!planUsesCodingAgent(plan)) {
+            if (plan.mode === 'chat') {
+              const draft = chatReplyFromRun(partial)
+              if (draft) setLiveReply(draft)
+            }
+            setStep(plan.mode === 'ask' || plan.mode === 'plan' ? 'Drafting' : 'Answering')
+          }
           const live = liveWorkspaceFromStream(roundBase, partial, seed)
+          live.events = eventsForMode(live.events, plan.mode)
           const last = live.events[live.events.length - 1]
           const fileMark = Object.entries(live.files)
             .map(([path, content]) => `${path}:${content.length}`)
@@ -1714,23 +1986,30 @@ function StudioChat({
               marks: current.marks || roundBase.marks,
             })
             setShown(live.events.length)
-            if (last) setStep(stepLabel(last) === 'Working' ? startingStep(plan) : stepLabel(last))
+            if (last) {
+              const label = stepLabel(last)
+              if (label) setStep(label)
+            }
           }
-          if (live.paths.length) setLiveFiles(live.paths)
+          if (live.paths.length) setLiveFiles(visibleWorkPaths(live.paths))
           const path = live.paths.at(-1)
           if (path && path !== announced) {
             announced = path
             setStep(`Writing ${path}`)
-            setFocusPath(path)
-            openBench('files')
+            if (origin.previewHtml || plan.needsPreview) {
+              openBench('desktop')
+            } else {
+              setFocusPath(path)
+              openBench('files')
+            }
           }
         },
         linked,
         {
           temperature: runTemperature(plan),
           maxTokens: outputBudget(plan),
-          agent: true,
-          files: origin.files,
+          agent: planUsesCodingAgent(plan),
+          files: roundBase.files,
           repo: project?.fullName,
           onRound: (text) => {
             lastParsed = parseAgentRun(text || '', plan)
@@ -1745,8 +2024,14 @@ function StudioChat({
             const first = tools[0]
             if (first) {
               const detail = first.args?.path || first.args?.command || first.args?.pattern || ''
-              setStep(detail ? `Running ${first.name} · ${detail}` : `Running ${first.name}`)
+              if (first.name === 'read' && detail) setStep(`Reading ${detail}`)
+              else if (first.name === 'write' && detail) setStep(`Writing ${detail}`)
+              else setStep(detail ? `Running ${first.name} · ${detail}` : `Running ${first.name}`)
             }
+            const paths = tools
+              .map((tool) => tool.args?.path || tool.args?.file)
+              .filter((path): path is string => Boolean(path))
+            if (paths.length) setLiveFiles((current) => visibleWorkPaths([...current, ...paths]))
             const current = workspaceRef.current
             const last = current.events[current.events.length - 1]
             const extra = tools.filter(
@@ -1760,6 +2045,33 @@ function StudioChat({
             ]
             applyWorkspace({ ...current, events })
             setShown(events.length)
+          },
+          onProgress: (calls) => {
+            const label = liveProgressStep(calls)
+            if (label) setStep(label)
+            const paths = calls.map((item) => item.path).filter((path): path is string => Boolean(path))
+            if (paths.length) setLiveFiles((current) => visibleWorkPaths([...current, ...paths]))
+            const nextFiles = { ...workspaceRef.current.files }
+            let changed = false
+            for (const call of calls) {
+              if (!call.path || !call.content) continue
+              if (call.name !== 'write' && call.name !== 'diff' && call.name !== 'edit') continue
+              if (nextFiles[call.path] === call.content) continue
+              nextFiles[call.path] = call.content
+              changed = true
+            }
+            if (!changed) return
+            const current = workspaceRef.current
+            const rest = current.events.slice(0, prior)
+            const turn = withChangeDiffs(current.events.slice(prior), nextFiles, origin.files)
+            applyWorkspace({
+              ...current,
+              files: nextFiles,
+              events: [...rest, ...turn],
+              previewHtml: previewFromFiles(nextFiles, current.previewHtml || ''),
+            })
+            setShown(rest.length + turn.length)
+            if (plan.needsPreview || current.previewHtml) openBench('desktop')
           },
           onResult: (out) => {
             const files = { ...workspaceRef.current.files, ...(out.files || {}) }
@@ -1778,7 +2090,8 @@ function StudioChat({
             merged = {
               ...workspaceRef.current,
               files,
-              events: [...events, { kind: 'result', name: out.name, ok: out.ok, text: out.text.slice(0, 2500) }],
+              previewHtml: out.files ? previewFromFiles(files, workspaceRef.current.previewHtml || '') : workspaceRef.current.previewHtml,
+              events: [...events, { kind: 'result', name: out.name, ok: out.ok, text: toolResultLine(out.name, out.text) }],
             }
             applyWorkspace(merged)
             setShown(merged.events.length)
@@ -1788,22 +2101,54 @@ function StudioChat({
       )
 
       if (ac.signal.aborted) return
-      if (run.files && Object.keys(run.files).length) merged = absorbFiles(merged, run.files, plan)
-      else merged = absorbFiles(merged, merged.files, plan)
-      merged = attachChangeDiffs(origin.files, merged, prior)
+      if (!planUsesCodingAgent(plan) && (run.text || '').trim()) {
+        lastParsed = parseAgentRun(run.text || '', plan)
+        merged = mergeWorkspace(origin, lastParsed)
+      } else if (run.files && Object.keys(run.files).length) {
+        merged = absorbFiles(merged, run.files, plan)
+      } else {
+        merged = absorbFiles(merged, merged.files, plan)
+      }
+      if (plan.mode === 'chat' || plan.mode === 'ask' || plan.mode === 'plan') {
+        merged = { ...merged, files: origin.files, previewHtml: origin.previewHtml }
+      } else {
+        merged = attachChangeDiffs(origin.files, merged, prior)
+      }
       applyWorkspace(merged)
       setShown(merged.events.length)
       setStep('')
       setLivePlan(null)
       setLiveFiles([])
-      const delivered = workspaceDelivered(plan, merged)
-      if (!delivered && (plan.mode === 'build' || plan.mode === 'app' || plan.mode === 'code')) {
-        setStatus('The agent finished without writing the app. Tap Retry.')
+      const delivered = workspaceDelivered(plan, merged, origin.files)
+      if (!delivered && (plan.mode === 'build' || plan.mode === 'app' || plan.mode === 'code' || isFollowUpTask(plan))) {
+        setStatus('The agent finished without changing the code. Tap Retry.')
       }
-      const spoken = delivered
-        ? spokenRecap({ ...merged, events: merged.events.slice(prior) })
-        : 'I finished without writing the files. Tap Retry and I will build the app again.'
-      const done: StudioMessage[] = [...next, { role: 'assistant', content: spoken }]
+      const turnSlice = merged.events.slice(prior)
+      const openAsk = latestOpenAsk(turnSlice)
+      const openPlan = latestOpenPlan(turnSlice)
+      let spoken = delivered
+        ? spokenRecap({ ...merged, events: turnSlice, mode: plan.mode })
+        : isFollowUpTask(plan)
+          ? 'I read the files but did not change the code. Tap Retry and I will write the change.'
+          : 'I finished without writing the files. Tap Retry and I will build the app again.'
+      if (openAsk || openPlan) {
+        spoken = ''
+      } else if (plan.mode === 'chat') {
+        spoken = finishChatReply(run.text || '', turnSlice)
+      } else if (plan.mode === 'ask' || plan.mode === 'plan') {
+        spoken = chatReplyFromRun(run.text || '', turnSlice) || spoken
+      }
+      const elapsedSec = Math.max(1, Math.round((Date.now() - liveStarted.current) / 1000))
+      const done: StudioMessage[] = [
+        ...next,
+        {
+          role: 'assistant',
+          content: spoken,
+          elapsed: elapsedSec,
+          picked: isAutoModel(model) && picked ? `Auto · ${picked.name}` : undefined,
+        },
+      ]
+      setLiveReply('')
       setMessages(done)
       void persist(done, merged)
       const turnEvents = merged.events.slice(prior)
@@ -1832,31 +2177,39 @@ function StudioChat({
         void persist(done, withFolders)
       }
       setBenchTab(defaultWorkbenchTab(merged))
-      if (merged.previewHtml) {
+      if (merged.previewHtml && plan.mode !== 'chat' && plan.mode !== 'ask' && plan.mode !== 'plan') {
         openBench('desktop')
       }
       const artifact = merged.events.slice(prior).find((item) => item.kind === 'artifact')
       if (artifact && artifact.kind === 'artifact') setFocusPath(artifact.path)
     } catch (error) {
+      const aborted = error instanceof DOMException && error.name === 'AbortError'
+      if (aborted && ac.signal.aborted) {
+        setStep('')
+        setLivePlan(null)
+        setLiveFiles([])
+        setLiveThought('')
+        setBusy(false)
+        return
+      }
+      if (aborted || isTransientStreamError(error instanceof Error ? error.message : '')) {
+        setStatus(friendlyStreamError(error instanceof Error ? error.message : 'terminated'))
+        return
+      }
       applyWorkspace({
         ...workspaceRef.current,
         events: workspaceRef.current.events.slice(0, turnStart),
       })
       setShown(turnStart)
-      if (error instanceof DOMException && error.name === 'AbortError') {
-        if (ac.signal.aborted) return
-        pushLog('The model took too long. Try again or pick a faster model.')
-        setStatus('The model took too long. Try again or pick a faster model.')
-        return
-      }
       const message = error instanceof Error ? error.message : 'Request failed'
       pushLog(message)
-      setStatus(message)
+      setStatus(friendlyStreamError(message))
     } finally {
       if (abortRef.current === ac) abortRef.current = null
       setStep('')
       setLivePlan(null)
       setLiveFiles([])
+      setLiveThought('')
       setBusy(false)
     }
   }
@@ -1890,6 +2243,14 @@ function StudioChat({
     } catch (error) {
       setStatus(error instanceof Error ? error.message : 'Could not check that connection')
     }
+  }
+
+  function restoreQuestions(userText: string) {
+    if (busy) return
+    const next = restoreAskEvent(workspaceRef.current, userText)
+    applyWorkspace(next)
+    setShown(next.events.length)
+    void persist(messages, next)
   }
 
   function submitAsk(answers: Record<string, string[]>) {
@@ -2023,12 +2384,27 @@ function StudioChat({
   }
 
   useEffect(() => {
-    function block(event: globalThis.DragEvent) {
+    function onDragOver(event: globalThis.DragEvent) {
       if (!dropHasFiles(event.dataTransfer)) return
       event.preventDefault()
     }
-    window.addEventListener('dragover', block)
-    window.addEventListener('drop', block)
+    function onDrop(event: globalThis.DragEvent) {
+      if (!dropHasFiles(event.dataTransfer)) return
+      const target = event.target as HTMLElement | null
+      if (target?.closest?.('[data-chat-drop-zone]')) return
+      event.preventDefault()
+      void attachChatFiles(filesFromDrop(event.dataTransfer))
+    }
+    window.addEventListener('dragover', onDragOver)
+    window.addEventListener('drop', onDrop)
+    function onPaste(event: ClipboardEvent) {
+      const files = filesFromClipboard(event.clipboardData)
+      if (!files.length) return
+      if (pasteBelongsToField(event.target, inputRef.current)) return
+      event.preventDefault()
+      void attachChatFiles(files)
+    }
+    window.addEventListener('paste', onPaste)
     return () => {
       listeningRef.current = false
       try {
@@ -2036,12 +2412,34 @@ function StudioChat({
       } catch {
         /* ignore */
       }
-      window.removeEventListener('dragover', block)
-      window.removeEventListener('drop', block)
+      window.removeEventListener('dragover', onDragOver)
+      window.removeEventListener('drop', onDrop)
+      window.removeEventListener('paste', onPaste)
     }
   }, [])
 
-  const composer = (
+  const botThreadLabel = savedId ? title.slice(0, 32) || 'Soumtok Bot' : 'New Bot'
+
+  const botComposer = (
+    <SoumtokBotComposer
+      prompt={prompt}
+      setPrompt={setPrompt}
+      busy={busy}
+      listening={listening}
+      onSend={onSend}
+      onVoice={startVoice}
+      inputRef={inputRef}
+      pendingFiles={pendingFiles}
+      onPendingFiles={dropPendingFiles}
+      onAttachFiles={attachChatFiles}
+      fileError={fileError}
+      onFileError={setFileError}
+      onStop={stopRun}
+      threadLabel={botThreadLabel}
+    />
+  )
+
+  const composer = isBot ? botComposer : (
     <StudioComposer
       prompt={prompt}
       setPrompt={setPrompt}
@@ -2074,7 +2472,7 @@ function StudioChat({
       models={models}
       model={model}
       setModel={setModel}
-      selectedName={modelTriggerLabel(selected, 'Choose model')}
+      selectedName={isAutoModel(model) ? 'Auto' : modelTriggerLabel(selected, 'Choose model')}
       inputRef={inputRef}
       compact={messages.length > 0}
       runMode={runMode}
@@ -2083,7 +2481,7 @@ function StudioChat({
       userSkills={skills}
       attachedSkills={attachedSkills}
       pendingFiles={pendingFiles}
-      onPendingFiles={setPendingFiles}
+      onPendingFiles={dropPendingFiles}
       onAttachFiles={attachChatFiles}
       fileError={fileError}
       onFileError={setFileError}
@@ -2112,7 +2510,7 @@ function StudioChat({
       }}
       onArchive={closeBench}
       projectId={savedId}
-      plan={plan}
+      plan={billingPlan}
       busy={busy}
       focusPath={focusPath}
       onOpenEnv={openEnvFile}
@@ -2177,6 +2575,7 @@ function StudioChat({
         void persist(messages, next)
         return pull.prUrl
       }}
+      onPasteFiles={attachChatFiles}
       onSaveFile={(path, content) => {
         const next = {
           ...workspaceRef.current,
@@ -2228,11 +2627,21 @@ function StudioChat({
               return turns
             })().map((turn, index, all) => {
               const latest = index === all.length - 1
-              const turnEvents = workspace.events.slice(turn.from, turn.to).filter((event) => {
-                if (event.kind === 'summary') return false
-                if (busy && latest && (event.kind === 'preview' || event.kind === 'artifact')) return false
-                return true
-              })
+              const turnEvents = visibleWorkEvents(
+                workspace.events.slice(turn.from, turn.to).filter((event) => {
+                  if (event.kind === 'summary') return false
+                  if (busy && latest && (event.kind === 'preview' || event.kind === 'artifact')) return false
+                  return true
+                }),
+                latest && busy,
+              )
+              const waitingOnCard = turnEvents.some(
+                (event) =>
+                  (event.kind === 'ask' && !event.answers) || (event.kind === 'plan' && !event.approved),
+              )
+              const answeredLater = all.slice(index + 1).some((item) => isAskReply(item.user))
+              const hideHandoff =
+                looksLikeAskHandoff(turn.replies.join('\n')) && (waitingOnCard || answeredLater)
               return (
                 <div
                   key={`${turn.from}-${index}`}
@@ -2243,11 +2652,46 @@ function StudioChat({
                     <UserBubble text={turn.user} files={turn.files} />
                   </div>
                   <div className="space-y-3">
-                    {turn.logs.map((line, logIndex) => (
+                    {latest && busy ? (
+                      <AgentLiveCard
+                        mode={livePlan?.mode || runMode}
+                        step={step || 'Analyzing and understanding'}
+                        files={livePlan?.mode === 'chat' || livePlan?.mode === 'ask' || livePlan?.mode === 'plan' ? [] : liveFiles}
+                        preview={
+                          liveFiles.at(-1) && workspace.files[liveFiles.at(-1) || '']
+                            ? { path: liveFiles.at(-1) || '', text: workspace.files[liveFiles.at(-1) || ''] || '' }
+                            : undefined
+                        }
+                        elapsed={Math.max(0, (now - liveStarted.current) / 1000)}
+                        picked={livePicked || undefined}
+                        understanding={liveThought || undefined}
+                      />
+                    ) : turn.elapsed != null ? (
+                      <AgentLiveCard
+                        mode={
+                          turnEvents.some((event) => event.kind === 'diff' || event.kind === 'tool')
+                            ? 'build'
+                            : 'chat'
+                        }
+                        step={
+                          turnEvents.some((event) => event.kind === 'diff' || event.kind === 'tool')
+                            ? 'Writing the change'
+                            : 'Answering'
+                        }
+                        files={[]}
+                        elapsed={turn.elapsed || 1}
+                        done
+                        picked={turn.picked}
+                      />
+                    ) : null}
+                    {turn.logs
+                      .filter((line) => /fail|error|too long|could not/i.test(line))
+                      .map((line, logIndex) => (
                       <p key={`log-${index}-${logIndex}`} className="text-[13px] text-white/40">
                         {line}
                       </p>
                     ))}
+                    {turnEvents.length > 0 && (
                     <AgentTimeline
                       events={turnEvents}
                       files={workspace.files}
@@ -2282,20 +2726,20 @@ function StudioChat({
                       onConnectDone={(event) => void finishConnect(event)}
                       messages={messages}
                     />
-                    {(turn.replies.length > 0 || (latest && !busy && canReplay)) && (
+                    )}
+                    {(turn.replies.length > 0 ||
+                      (latest && busy && liveReply && !waitingOnCard) ||
+                      (latest && !busy && canReplay && !waitingOnCard)) &&
+                      !hideHandoff && (
                       <ReplyCard
-                        replies={turn.replies}
+                        replies={latest && busy && liveReply ? [liveReply] : turn.replies}
                         onRegenerate={latest && !busy && canReplay ? replayLast : undefined}
                         regenerateLabel={status ? 'Retry' : 'Regenerate'}
-                      />
-                    )}
-                    {latest && busy && (
-                      <AgentLiveCard
-                        mode={livePlan?.mode || runMode}
-                        step={step || 'Working'}
-                        files={liveFiles}
-                        elapsed={Math.max(0, (now - liveStarted.current) / 1000)}
-                        steps={turnEvents.some((event) => event.kind === 'todo') ? [] : livePlan?.steps || []}
+                        onShowQuestions={
+                          !busy && looksLikeAskHandoff(turn.replies.join('\n'))
+                            ? () => restoreQuestions(turn.user)
+                            : undefined
+                        }
                       />
                     )}
                   </div>
@@ -2309,7 +2753,13 @@ function StudioChat({
       {messages.length > 0 && (
         <div className="px-3 pb-4 sm:px-5 sm:pb-6">
           <div className="mx-auto max-w-[720px]">
-            {Object.keys(workspace.files).filter((path) => !isSecretPath(path) && path !== '.gitignore').length > 0 && (
+            {(() => {
+              const realFiles = Object.entries(workspace.files).filter(
+                ([path, body]) =>
+                  !isSecretPath(path) && path !== '.gitignore' && !path.endsWith('/.keep') && Boolean(body?.trim()),
+              )
+              return !busy && realFiles.length > 0
+            })() && (
               <button
                 type="button"
                 onClick={() => window.open('https://github.com/new', '_blank', 'noopener,noreferrer')}
@@ -2354,11 +2804,88 @@ function StudioChat({
 
   const fillDesk = hasBench && (control || deskFull)
 
+  if (isBot) {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col bg-[#050505]">
+        <SoumtokBotChatHeader title={botThreadLabel} />
+        <div
+          className="relative flex min-h-0 flex-1 flex-col"
+          data-chat-drop-zone
+          onDragEnter={onChatDragEnter}
+          onDragOver={onChatDragOver}
+          onDragLeave={onChatDragLeave}
+          onDrop={onChatDrop}
+        >
+          {fileDrag && (
+            <div className="pointer-events-none absolute inset-3 z-30 grid place-items-center rounded-2xl border border-dashed border-[#f54e00]/70 bg-[#0c0c0b]/80">
+              <p className="rounded-full border border-white/12 bg-[#161615] px-4 py-2 text-[14px] text-white">Drop files to attach</p>
+            </div>
+          )}
+          {!chatReady ? (
+            <div className="grid flex-1 place-items-center" role="status">
+              <span className="h-7 w-7 animate-spin rounded-full border-2 border-white/15 border-t-white/70" />
+            </div>
+          ) : (
+            <>
+              <div ref={feedRef} className="thin-scroll min-h-0 flex-1 overflow-y-auto">
+                {messages.length === 0 ? (
+                  <SoumtokBotOnboarding displayName={displayName} busy={busy} onPick={(text) => void onSend(undefined, text)} />
+                ) : (
+                  <div className="mx-auto max-w-[720px] space-y-8 px-4 py-8 sm:px-6">
+                    {messages.map((item, index) =>
+                      item.role === 'user' ? (
+                        <div key={`u-${index}`} className="flex justify-end">
+                          <div className="max-w-[85%] rounded-2xl bg-[#1f1f1f] px-4 py-2.5 text-[15px] text-white">{item.content}</div>
+                        </div>
+                      ) : item.role === 'assistant' ? (
+                        <div key={`a-${index}`} className="text-[15px] leading-7 text-white/90">
+                          <ReplyMarkdown text={item.content} />
+                        </div>
+                      ) : null,
+                    )}
+                    {busy && (
+                      <AgentLiveCard
+                        mode={livePlan?.mode || runMode}
+                        step={step || 'Working on it'}
+                        files={[]}
+                        elapsed={Math.max(0, (now - liveStarted.current) / 1000)}
+                        picked={livePicked || undefined}
+                        understanding={liveThought || undefined}
+                      />
+                    )}
+                    {liveReply && busy && (
+                      <div className="text-[15px] leading-7 text-white/90">
+                        <ReplyMarkdown text={liveReply} />
+                      </div>
+                    )}
+                    <div data-feed-end />
+                  </div>
+                )}
+              </div>
+              {botComposer}
+              {status && (
+                <p className="pb-2 text-center text-[12px] text-[#f54e00]">
+                  {status}
+                  {canReplay && !busy && (
+                    <button type="button" onClick={replayLast} className="ml-2 text-white/55 hover:text-white">
+                      Retry
+                    </button>
+                  )}
+                </p>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div ref={layoutRef} className="flex min-h-0 flex-1">
       <div
         className={`relative flex min-h-0 min-w-0 flex-col ${fillDesk ? 'hidden lg:hidden' : ''}`}
         style={hasBench && !fillDesk ? { width: `${100 - benchPct}%`, maxWidth: 'none' } : { width: fillDesk ? 0 : '100%' }}
+        data-chat-drop-zone
         onDragEnter={onChatDragEnter}
         onDragOver={onChatDragOver}
         onDragLeave={onChatDragLeave}
@@ -2495,7 +3022,7 @@ function SourcePicker({
       </button>
       {open && box && (
         <div
-          className="fixed z-50 w-[340px] overflow-hidden rounded-xl border border-white/15 bg-[#1a1a18] shadow-[0_16px_48px_rgba(0,0,0,0.45)]"
+          className="fixed z-50 w-[min(340px,calc(100vw-24px))] max-w-[calc(100vw-16px)] overflow-hidden rounded-xl border border-white/15 bg-[#1a1a18] shadow-[0_16px_48px_rgba(0,0,0,0.45)]"
           style={{ left: box.left, top: box.top, bottom: box.bottom }}
         >
           <button
@@ -2679,7 +3206,23 @@ function StudioComposer({
   onStop: () => void
 }) {
   const fileRef = useRef<HTMLInputElement>(null)
-  const media = models.find((item) => item.id === model)?.media || modelMedia(model)
+  const dragDepth = useRef(0)
+  const [composerDrag, setComposerDrag] = useState(false)
+  const media = isAutoModel(model)
+    ? models
+        .filter((item) => item.ready)
+        .reduce(
+          (acc, item) => {
+            const can = item.media || modelMedia(item.id)
+            return {
+              image: acc.image || can.image,
+              video: acc.video || can.video,
+              pdf: acc.pdf || can.pdf,
+            }
+          },
+          { image: false, video: false, pdf: false },
+        )
+    : models.find((item) => item.id === model)?.media || modelMedia(model)
   const canSend = Boolean(prompt.trim() || pendingFiles.length)
   const [mediaHint, setMediaHint] = useState<'image' | 'video' | 'pdf' | null>(null)
   const slashes = slashMatch(prompt)
@@ -2750,7 +3293,40 @@ function StudioComposer({
           event.target.value = ''
         }}
       />
-      <div className="rounded-2xl border border-white/10 bg-[#141413] px-3 py-2.5 sm:px-4 sm:py-3">
+      <div
+        data-chat-drop-zone
+        className={`relative rounded-2xl border border-white/10 bg-[#141413] px-3 py-2.5 sm:px-4 sm:py-3 ${composerDrag ? 'ring-2 ring-[#f54e00]/55' : ''}`}
+        onDragEnter={(event) => {
+          if (!dropHasFiles(event.dataTransfer)) return
+          event.preventDefault()
+          dragDepth.current += 1
+          setComposerDrag(true)
+        }}
+        onDragOver={(event) => {
+          if (!dropHasFiles(event.dataTransfer)) return
+          event.preventDefault()
+          event.dataTransfer.dropEffect = 'copy'
+        }}
+        onDragLeave={(event) => {
+          if (!dropHasFiles(event.dataTransfer)) return
+          dragDepth.current -= 1
+          if (dragDepth.current <= 0) {
+            dragDepth.current = 0
+            setComposerDrag(false)
+          }
+        }}
+        onDrop={(event) => {
+          event.preventDefault()
+          dragDepth.current = 0
+          setComposerDrag(false)
+          void addFiles(filesFromDrop(event.dataTransfer))
+        }}
+      >
+        {composerDrag && (
+          <div className="pointer-events-none absolute inset-2 z-10 grid place-items-center rounded-xl border border-dashed border-[#f54e00]/60 bg-[#0c0c0b]/85">
+            <p className="text-[13px] text-white">Drop images, video, or documents</p>
+          </div>
+        )}
         {pendingFiles.length > 0 && (
           <FileThumbs
             files={pendingFiles}
@@ -2762,7 +3338,7 @@ function StudioComposer({
           value={prompt}
           onChange={(event) => setPrompt(event.target.value)}
           onPaste={(event) => {
-            const files = [...(event.clipboardData?.files || [])]
+            const files = filesFromClipboard(event.clipboardData)
             if (files.length) {
               event.preventDefault()
               void addFiles(files)
@@ -2775,7 +3351,11 @@ function StudioComposer({
             }
           }}
           rows={compact ? 1 : 4}
-          placeholder={compact ? 'Add a follow up' : 'Ask anything — code, research, docs. Type / for commands'}
+          placeholder={
+            compact
+              ? 'Paste a screenshot or add a follow up'
+              : 'Ask anything — paste a screenshot to show what to fix. Type / for commands'
+          }
           className={`w-full resize-none overflow-y-auto bg-transparent text-[15px] leading-6 outline-none placeholder:text-white/32 ${
             compact ? 'min-h-[28px] max-h-40 py-0.5' : 'min-h-[96px] max-h-60'
           }`}
@@ -2831,7 +3411,7 @@ function StudioComposer({
               setModel={setModel}
               selectedName={selectedName}
             />
-            <div className="hidden shrink-0 items-center rounded-full border border-white/10 p-0.5 sm:flex">
+            <div className="hidden shrink-0 items-center rounded-full border border-white/10 p-0.5 md:flex">
               {(['agent', 'ask', 'plan'] as const).map((mode) => (
                 <button
                   key={mode}
@@ -3122,6 +3702,11 @@ const SKILLS = [
   { id: 'review', label: 'Review code', insert: 'Review this code and list bugs, risks, and fixes.\n\n' },
   { id: 'tests', label: 'Write tests', insert: 'Write tests for this.\n\n' },
   { id: 'explain', label: 'Explain a file', insert: 'Explain this file like I am joining the repo.\n\n' },
+  {
+    id: 'brand-logo',
+    label: 'Brand logo SVG',
+    insert: `${brandLogoContext('add the real svg logo')}\n\n`,
+  },
 ]
 
 const RECENT_SKILLS_KEY = 'soumtok-recent-skills'
@@ -3826,6 +4411,7 @@ function ModelPicker({
   const hoverTimer = useRef(0)
   const selected = models.find((item) => item.id === model)
   const search = query.trim().toLowerCase()
+  const showAuto = !search || 'auto'.startsWith(search)
   const visible = models.filter((item) => {
     if (!search) return true
     const hay = `${item.name} ${item.id} ${modelCaps(item).join(' ')}`.toLowerCase()
@@ -3925,7 +4511,22 @@ function ModelPicker({
             </div>
           </div>
           <div className="thin-scroll max-h-[240px] overflow-y-auto overscroll-contain border-t border-white/[0.06] py-1">
-            {visible.length === 0 && (
+            {showAuto && (
+              <button
+                type="button"
+                onClick={() => {
+                  setModel(AUTO_MODEL_ID)
+                  if (!multi) onClose()
+                }}
+                className={`flex w-full items-baseline gap-2 px-3 py-[7px] text-left hover:bg-white/[0.05] ${
+                  isAutoModel(model) ? 'bg-white/[0.06]' : ''
+                }`}
+              >
+                <span className="truncate text-[13px] text-white">Auto</span>
+                <span className="shrink-0 text-[12px] text-white/35">Picks for the task</span>
+              </button>
+            )}
+            {visible.length === 0 && !showAuto && (
               <p className="px-3 py-3 text-[13px] text-white/40">No models match “{query.trim()}”.</p>
             )}
             {visible.map((item) => {
@@ -3962,14 +4563,20 @@ function ModelPicker({
               )
             })}
           </div>
-          {selected && (
+          {(isAutoModel(model) || selected) && (
             <div className="border-t border-white/[0.08]">
               <button
                 type="button"
                 onClick={onClose}
                 className="flex w-full items-center justify-between px-3 py-2.5 text-left hover:bg-white/[0.04]"
               >
-                <span className="text-[13px] text-white">{modelTriggerLabel(selected, selected.name)}</span>
+                <span className="text-[13px] text-white">
+                  {isAutoModel(model)
+                    ? 'Auto'
+                    : selected
+                      ? modelTriggerLabel(selected, selected.name)
+                      : selectedName}
+                </span>
                 <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden>
                   <path d="M3 7.2 5.7 10 11 3.8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
                 </svg>

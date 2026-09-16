@@ -17,6 +17,7 @@ import { NotFoundPage } from './components/NotFoundPage'
 import { HelpPage } from './components/HelpPage'
 import { ContactPage } from './components/ContactPage'
 import { ConnectDevicePage } from './components/ConnectDevicePage'
+import { DesktopLinkPage } from './components/DesktopLinkPage'
 
 const RESERVED_PATHS = new Set([
   '',
@@ -37,6 +38,7 @@ const RESERVED_PATHS = new Set([
   'contact',
   'agents',
   'connect',
+  'desktop-link',
 ])
 
 function publicProfileHandle(path: string) {
@@ -106,6 +108,7 @@ export default function App() {
   const onAuth = path === '/login' || path === '/signup'
   const onOnboarding = path === '/onboarding'
   const onConnect = path.startsWith('/connect/')
+  const onDesktopLink = path.startsWith('/desktop-link/')
 
   useEffect(() => {
     if (ready) setBooted(true)
@@ -126,14 +129,27 @@ export default function App() {
   useEffect(() => {
     if (isPending) return
     if (!ready && !booted) return
-    if (!session && (onOnboarding || onDashboard || onCheckout || onTeamNew || onConnect)) {
-      if (onCheckout || onTeamNew || onConnect) {
+    if (!session && (onOnboarding || onDashboard || onCheckout || onTeamNew || onConnect || onDesktopLink)) {
+      if (onCheckout || onTeamNew || onConnect || onDesktopLink) {
         sessionStorage.setItem('soumtok-next', `${window.location.pathname}${window.location.search}`)
+      }
+      if (onDesktopLink) {
+        const id = path.slice('/desktop-link/'.length).split('/')[0]
+        if (id) sessionStorage.setItem('soumtok-desktop', decodeURIComponent(id))
       }
       navigate('/login')
       return
     }
-    if (needsOnboarding && !onOnboarding) {
+    if (needsOnboarding && !onOnboarding && !onDesktopLink) {
+      const desktop =
+        sessionStorage.getItem('soumtok-desktop') ||
+        new URLSearchParams(window.location.search).get('desktop') ||
+        ''
+      if (desktop) {
+        sessionStorage.setItem('soumtok-desktop', desktop)
+        navigate(`/desktop-link/${desktop}`)
+        return
+      }
       navigate('/onboarding')
       return
     }
@@ -141,7 +157,14 @@ export default function App() {
       navigate('/login')
       return
     }
-    if (session && !need2fa && isOnboardingComplete(profile) && (onAuth || onOnboarding)) {
+    if (session && !need2fa && (onAuth || onOnboarding)) {
+      const desktop = sessionStorage.getItem('soumtok-desktop') || new URLSearchParams(window.location.search).get('desktop') || ''
+      if (desktop) {
+        sessionStorage.removeItem('soumtok-desktop')
+        navigate(`/desktop-link/${desktop}`)
+        return
+      }
+      if (!isOnboardingComplete(profile)) return
       const next = sessionStorage.getItem('soumtok-next')
       if (next && (next.startsWith('/checkout') || next.startsWith('/dashboard') || next.startsWith('/team') || next.startsWith('/connect'))) {
         sessionStorage.removeItem('soumtok-next')
@@ -166,9 +189,16 @@ export default function App() {
     onAuth,
     onOnboarding,
     onConnect,
+    onDesktopLink,
   ])
 
   if (!ready && !booted) return <PageSkeleton />
+
+  if (onDesktopLink) {
+    const id = path.slice('/desktop-link/'.length).split('/')[0] || ''
+    if (!session) return <PageSkeleton />
+    return <DesktopLinkPage id={decodeURIComponent(id)} />
+  }
 
   if (need2fa) {
     return <LoginPage mode="in" force2fa />
@@ -182,7 +212,7 @@ export default function App() {
     return <OnboardingPage onComplete={onOnboardingComplete} />
   }
 
-  if (path === '/docs' || path.startsWith('/docs/')) {
+  if ((path === '/docs' || path.startsWith('/docs/')) && path !== '/docs/sitemap.xml') {
     return <DocsPage path={path} />
   }
 

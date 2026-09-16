@@ -60,6 +60,8 @@ test('executeSystemPrompt does not mention Cursor', () => {
   assert.match(prompt, /Soumtok Studio/)
   assert.match(prompt, /40 most interesting lines/)
   assert.match(prompt, /Never accept API keys/)
+  assert.doesNotMatch(prompt, /Emit an updated todo/)
+  assert.doesNotMatch(prompt, /After the first thought and todo/)
 })
 
 test('spokenRecap names the project when the summary is missing', () => {
@@ -82,6 +84,6 @@ test('chat and site plans do not fake an install environment', () => {
   assert.equal(site.mode, 'build')
   assert.equal(site.needsEnv, false)
   assert.ok(runLogs(site).length <= 1)
-  assert.equal(outputBudget(site), 16384)
+  assert.equal(outputBudget(site), 32768)
   assert.equal(outputBudget(chat), 2048)
 })

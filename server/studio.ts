@@ -5,11 +5,19 @@ import {
   IMAGE_MODELS,
   KEY_PROVIDERS,
   NATIVE_FALLBACK,
-  imageModelById,
-  isImageModel,
+  anthropicOmitsSamplingParams,
+  desktopCodingModels,
+  openaiOmitsTemperature,
+  soumtokCodingModels,
+  SOUMTOK_CODING_PROVIDERS,
+  PROVIDER_LABEL,
+  isAutoModel,
   isTrialModel,
   modelById,
-  TRIAL_MODEL_NAMES,
+  pickAutoModel,
+  sortModelsByPower,
+  upstreamModelId,
+  usesMaxCompletionTokens,
   usesResponsesApi,
   type ModelProvider,
 } from '../shared/models.ts'
@@ -18,7 +26,8 @@ import {
   guessMime,
   isProviderMediaUrl,
   isTextAttachment,
-  messageHasBody,
+  messagesForProvider,
+  storageSafeModelMessages,
   modelMedia,
   promptChars,
   toChatCompletionsMessages,
@@ -27,8 +36,29 @@ import {
   type ChatTurn,
 } from '../shared/chatMedia.ts'
 import { redactChatFiles, redactSecrets, scanSecrets } from '../shared/secretsGuard.ts'
-import { parseAgentRun, packWorkspaceFiles } from '../shared/agent.ts'
-import { pendingToolsForRun, skipKnownReads, toolsNeedAnotherRound } from '../shared/tools.ts'
+import {
+  looksLikePlanTalk,
+  parseAgentRun,
+  packWorkspaceFiles,
+  promptManifestSpec,
+  missingManifestFiles,
+  type AgentRunMode,
+} from '../shared/agent.ts'
+import { type DesktopAgentMode } from '../shared/desktopHarness.ts'
+import { prepareDesktopAgentTurn } from '../shared/desktopAgent.ts'
+import { compactConversation, mergeDesktopSystem } from '../shared/agentControlLayer.ts'
+import { shouldForceToolChoice, isHarnessUserText } from '../shared/modelHarness.ts'
+import { analyzeUserRequest } from '../shared/requestAnalyze.ts'
+import { applyRunModeToPrefs, mergeDesktopAgentPrefs, openFilesForAgent } from '../shared/desktopAgentPrefs.ts'
+import {
+  needsVisionWrap,
+  stampAttachmentMeta,
+  visionReplyLooksBlind,
+  visionWrapCandidates,
+  visionWrapPrompt,
+} from '../shared/modelWrap.ts'
+import { isTransientStreamError, friendlyStreamError } from '../shared/streamDrop.ts'
+import { pendingToolsForRun, skipKnownReads, skipDisplayDiffs, toolsShouldContinue, filesStamp, shouldNudgeWrite, writeNudgeMessage, liveToolProgress } from '../shared/tools.ts'
 import {
   anthropicStudioTools,
   openaiStudioTools,
@@ -38,11 +68,19 @@ import {
   type NativeToolCall,
 } from '../shared/nativeTools.ts'
 import { createSandboxDir, removeSandboxDir } from './sandbox.ts'
-import { TRIAL_TOKEN_QUOTA } from '../shared/plans.ts'
+import {
+  PLAN_CREDIT,
+  TOKENS_PER_CREDIT,
+  TRIAL_TOKEN_QUOTA,
+  paidPlan,
+  planLabel,
+  planPriceLine,
+} from '../shared/plans.ts'
 import { normalizeUsername, usernameError } from '../shared/username.ts'
 import { auth } from './auth.ts'
 import { pool } from './db.ts'
-import { env, hasBunny, hasFal, platformKey } from './env.ts'
+import { env, hasBunny, hasFal, hasImageGen, hasReplicate, openAccessForBuilding, platformKey } from './env.ts'
+import { examineMediaBytes, generateStillImage } from './studioMedia.ts'
 import { decryptSecret, encryptSecret, last4 } from './secrets.ts'
 import { securityChangeEmail, sendMail } from './mail.ts'
 import { deleteFromBunny, downloadFromBunny, safeFileName, uploadToBunny } from './storage.ts'
@@ -78,14 +116,14 @@ const RESPONSES_ENDPOINTS: Partial<Record<ModelProvider, string>> = {
 
 type StudioMessage = ChatTurn
 
-function completionUrl(provider: ModelProvider, modelId: string) {
+export function completionUrl(provider: ModelProvider, modelId: string) {
   if (usesResponsesApi(provider, modelId)) {
     return RESPONSES_ENDPOINTS[provider] || ENDPOINTS[provider]
   }
   return ENDPOINTS[provider]
 }
 
-function extractError(data: {
+export function extractError(data: {
   error?: { message?: string } | string
   message?: string
 }) {
@@ -93,7 +131,7 @@ function extractError(data: {
   return data.error?.message || data.message || 'The model request failed'
 }
 
-function extractText(data: {
+export function extractText(data: {
   output_text?: string
   output?: { content?: { text?: string; type?: string }[] }[]
   choices?: { message?: { content?: string; reasoning_content?: string } }[]
@@ -149,6 +187,20 @@ function streamDelta(frame: StreamFrame) {
   if (typeof frame.delta === 'string' && frame.type === 'response.output_text.delta') return frame.delta
   const block = frame.delta as { text?: string; type?: string } | undefined
   if (block?.text && frame.type === 'content_block_delta') return block.text
+  return ''
+}
+
+function frameError(frame: StreamFrame) {
+  const err = frame.error
+  if (typeof err === 'string' && err.trim()) return err.trim()
+  if (err && typeof err === 'object') {
+    const row = err as { message?: string; type?: string }
+    if (row.message?.trim()) return row.message.trim()
+  }
+  if (frame.type === 'error' || frame.type === 'response.failed') {
+    const message = String((frame as { message?: string }).message || '').trim()
+    if (message) return message
+  }
   return ''
 }
 
@@ -225,6 +277,13 @@ async function hydrateChatFiles(userId: string, messages: StudioMessage[]): Prom
   return next
 }
 
+const TOOL_ROUND_MARKER = '<<<SOUMTOK TOOL ROUND>>>'
+
+function stripToolRoundBlock(content?: string) {
+  const at = String(content || '').indexOf(TOOL_ROUND_MARKER)
+  return at < 0 ? String(content || '') : String(content).slice(0, at).trimEnd()
+}
+
 function clampTokens(n?: number) {
   if (!n || !Number.isFinite(n)) return 16384
   return Math.min(32768, Math.max(256, Math.round(n)))
@@ -235,30 +294,47 @@ function clampTemp(n?: number) {
   return Math.min(1, Math.max(0, n))
 }
 
-function requestBody(
+function providerToolChoice(provider: ModelProvider, required: boolean) {
+  if (provider === 'anthropic') return { type: required ? 'any' : 'auto' }
+  return required ? 'required' : 'auto'
+}
+
+export function requestBody(
   provider: ModelProvider,
   modelId: string,
   messages: StudioMessage[],
-  opts?: { temperature?: number; maxTokens?: number; tools?: boolean },
+  opts?: {
+    temperature?: number
+    maxTokens?: number
+    tools?: boolean
+    toolNames?: string[]
+    forceTools?: boolean
+    packModel?: string
+  },
 ) {
+  const packId = opts?.packModel || modelId
   const maxTokens = Math.min(provider === 'anthropic' ? 16384 : 32768, clampTokens(opts?.maxTokens))
   const temperature = clampTemp(opts?.temperature)
   const toolsOn = Boolean(opts?.tools)
+  const toolNames = toolsOn ? opts?.toolNames : undefined
+  const toolChoice = toolsOn ? providerToolChoice(provider, Boolean(opts?.forceTools)) : undefined
   if (provider === 'anthropic') {
-    return {
+    const anthropic: Record<string, unknown> = {
       model: modelId.split('/').pop(),
       max_tokens: maxTokens,
-      temperature,
-      messages: toAnthropicMessages(messages, modelId),
-      system: messages.find((item) => item.role === 'system')?.content,
-      ...(toolsOn ? { tools: anthropicStudioTools() } : {}),
+      messages: toAnthropicMessages(messagesForProvider(messages), packId),
+      system: anthropicSystemWithCache(messages.find((item) => item.role === 'system')?.content) ||
+        messages.find((item) => item.role === 'system')?.content,
+      ...(toolsOn ? { tools: anthropicStudioTools(toolNames), tool_choice: toolChoice } : {}),
     }
+    if (!anthropicOmitsSamplingParams(modelId)) anthropic.temperature = temperature
+    return anthropic
   }
   if (usesResponsesApi(provider, modelId)) {
     const system = messages.find((item) => item.role === 'system')?.content
     return {
       model: modelId,
-      input: toResponsesInput(messages, modelId),
+      input: toResponsesInput(messagesForProvider(messages), packId),
       store: false,
       max_output_tokens: maxTokens,
       ...(system ? { instructions: system } : {}),
@@ -266,16 +342,58 @@ function requestBody(
         ? { reasoning: { effort: 'medium' } }
         : {}),
       ...(provider === 'xai' ? { temperature } : {}),
-      ...(toolsOn ? { tools: responsesStudioTools() } : {}),
+      ...(toolsOn ? { tools: responsesStudioTools(toolNames), tool_choice: toolChoice } : {}),
     }
   }
-  return {
+  const chat: Record<string, unknown> = {
     model: modelId,
-    messages: toChatCompletionsMessages(messages, modelId, provider),
-    temperature,
-    max_tokens: maxTokens,
-    ...(toolsOn ? { tools: openaiStudioTools(), tool_choice: 'auto' } : {}),
+    messages: toChatCompletionsMessages(messagesForProvider(messages), packId, provider),
+    ...(toolsOn ? { tools: openaiStudioTools(toolNames), tool_choice: toolChoice } : {}),
   }
+  if (provider === 'openai' && !openaiOmitsTemperature(modelId)) chat.temperature = temperature
+  else if (provider !== 'openai') chat.temperature = temperature
+  if (usesMaxCompletionTokens(provider, modelId)) {
+    chat.max_completion_tokens = maxTokens
+  } else {
+    chat.max_tokens = maxTokens
+  }
+  return chat
+}
+
+function anthropicRequestHeaders(apiKey: string) {
+  return {
+    'x-api-key': apiKey,
+    'anthropic-version': '2023-06-01',
+    'anthropic-beta': 'prompt-caching-2024-07-31',
+  }
+}
+
+function anthropicSystemWithCache(system?: string) {
+  const raw = String(system || '').trim()
+  if (!raw) return undefined
+  const liveIdx = raw.indexOf('\n\nLIVE USER REQUEST')
+  const live = liveIdx >= 0 ? raw.slice(liveIdx).trim() : ''
+  const rest = liveIdx >= 0 ? raw.slice(0, liveIdx).trim() : raw
+  const markers = [
+    'PROJECT BRIEF',
+    'PROJECT RULES (from this repo',
+    'SOUMTOK PLATFORM CONTEXT',
+    'SCAFFOLD ON DISK',
+    'KNOWN FILES (harness already searched',
+    'TASK LEDGER',
+  ]
+  let split = rest.length
+  for (const marker of markers) {
+    const i = rest.indexOf(marker)
+    if (i >= 0 && i < split) split = i
+  }
+  const stable = rest.slice(0, split).trim()
+  const volatile = [rest.slice(split).trim(), live].filter(Boolean).join('\n\n')
+  const blocks: { type: 'text'; text: string; cache_control?: { type: 'ephemeral' } }[] = []
+  if (stable) blocks.push({ type: 'text', text: stable, cache_control: { type: 'ephemeral' } })
+  if (volatile) blocks.push({ type: 'text', text: volatile })
+  if (!blocks.length) return undefined
+  return blocks
 }
 
 function toAnthropicMessages(messages: StudioMessage[], modelId: string) {
@@ -358,6 +476,47 @@ function nativeFromAcc(acc: Map<string, AccCall>): NativeToolCall[] {
     .map((item) => ({ id: item.id || crypto.randomUUID(), name: item.name, arguments: item.args || '{}' }))
 }
 
+/** Vision model describes images so text-only coding models can still act on screenshots. */
+async function visionWrapDesktopFiles(files: ChatFile[], userText: string, requestModel: string) {
+  if (!files.length || !needsVisionWrap(requestModel, files)) return { files, note: '' }
+  const images = files.filter((f) => f.mime?.startsWith('image/') && isProviderMediaUrl(f.dataUrl))
+  if (!images.length) return { files, note: '' }
+  const candidates = visionWrapCandidates((provider) => Boolean(platformKey(provider)))
+  for (const pick of candidates) {
+    const apiKey = platformKey(pick.provider)
+    if (!apiKey) continue
+    try {
+      const ran = await streamModel({
+        provider: pick.provider,
+        requestModel: upstreamModelId(pick.id),
+        mediaModel: pick.id,
+        apiKey,
+        messages: [{ role: 'user', content: visionWrapPrompt(userText), files: images }],
+        tools: false,
+        temperature: 0.2,
+        maxTokens: 2048,
+        timeoutMs: 120_000,
+      })
+      const desc = (ran.text || '').trim()
+      if (!desc || visionReplyLooksBlind(desc)) continue
+      const stamp = `SOUMTOK VISION:\n${desc}`
+      const next = files.map((file) =>
+        file.mime?.startsWith('image/')
+          ? { ...file, analysis: [file.analysis, stamp].filter(Boolean).join('\n\n') }
+          : file,
+      )
+      return { files: next, note: 'Soumtok analyzed your image with a vision model so this model can use it.' }
+    } catch {
+      /* try the next vision model */
+    }
+  }
+  return { files, note: '' }
+}
+
+function isToolChainProviderError(message: string) {
+  return /role ['"]tool['"]|tool_calls/i.test(String(message || ''))
+}
+
 async function streamModel(input: {
   provider: ModelProvider
   requestModel: string
@@ -367,7 +526,13 @@ async function streamModel(input: {
   maxTokens?: number
   signal?: AbortSignal
   onDelta?: (delta: string) => void
+  onToolProgress?: (calls: ReturnType<typeof liveToolProgress>) => void
   tools?: boolean
+  toolNames?: string[]
+  timeoutMs?: number
+  forceTools?: boolean
+  mediaModel?: string
+  foldedToolChain?: boolean
 }) {
   const upstream = await fetch(completionUrl(input.provider, input.requestModel), {
     method: 'POST',
@@ -377,48 +542,90 @@ async function streamModel(input: {
       ...(input.provider === 'openrouter'
         ? { 'HTTP-Referer': env.betterAuthUrl, 'X-Title': 'Soumtok' }
         : {}),
-      ...(input.provider === 'anthropic' ? { 'x-api-key': input.apiKey, 'anthropic-version': '2023-06-01' } : {}),
+      ...(input.provider === 'anthropic' ? anthropicRequestHeaders(input.apiKey) : {}),
     },
     body: JSON.stringify({
       ...requestBody(input.provider, input.requestModel, input.messages, {
         temperature: input.temperature,
         maxTokens: input.maxTokens,
         tools: input.tools,
+        toolNames: input.toolNames,
+        forceTools: input.forceTools,
+        packModel: input.mediaModel || input.requestModel,
       }),
       stream: true,
       ...(usesResponsesApi(input.provider, input.requestModel) || input.provider === 'anthropic'
         ? {}
         : { stream_options: { include_usage: true } }),
     }),
-    signal: input.signal || AbortSignal.timeout(180_000),
+    signal: input.signal || AbortSignal.timeout(input.timeoutMs || (input.tools ? 480_000 : 180_000)),
   })
   if (!upstream.ok || !upstream.body) {
     const failed = await upstream.json().catch(() => ({}))
-    if (input.tools) {
-      return streamModel({ ...input, tools: false })
+    const message = extractError(failed as { error?: string | { message?: string }; message?: string })
+    if (isToolChainProviderError(message) && !input.foldedToolChain) {
+      return streamModel({
+        ...input,
+        messages: storageSafeModelMessages(input.messages),
+        foldedToolChain: true,
+      })
     }
-    throw new Error(extractError(failed as { error?: string | { message?: string }; message?: string }))
+    if (input.forceTools) {
+      return streamModel({ ...input, forceTools: false })
+    }
+    throw new Error(message)
   }
   let text = ''
   let promptTokens = 0
   let completionTokens = 0
   const acc = new Map<string, AccCall>()
-  for await (const frame of sseFrames(upstream.body)) {
-    applyToolFrame(frame, acc)
-    const nested = (frame.response as { usage?: Record<string, number> } | undefined)?.usage
-    const usage = (frame.usage as Record<string, number> | undefined) || nested
-    if (usage) {
-      promptTokens = usage.prompt_tokens || usage.input_tokens || promptTokens
-      completionTokens = usage.completion_tokens || usage.output_tokens || completionTokens
-    }
-    const delta = streamDelta(frame)
-    if (!delta) continue
-    text += delta
-    input.onDelta?.(delta)
+  let lastProg = ''
+  let lastProgAt = 0
+  const emitProgress = (force = false) => {
+    if (!input.onToolProgress || !acc.size) return
+    const now = Date.now()
+    const calls = liveToolProgress([...acc.values()])
+    const mark = JSON.stringify(calls.map((item) => [item.name, item.path || '', item.chars]))
+    if (!force && mark === lastProg && now - lastProgAt < 280) return
+    lastProg = mark
+    lastProgAt = now
+    input.onToolProgress(calls)
   }
-  if (!completionTokens) completionTokens = Math.ceil(text.length / 4)
-  if (!promptTokens) promptTokens = Math.ceil(input.messages.reduce((sum, item) => sum + promptChars(item), 0) / 4)
-  return { text, promptTokens, completionTokens, toolCalls: nativeFromAcc(acc) }
+  const finish = () => {
+    emitProgress(true)
+    if (!completionTokens) completionTokens = Math.ceil(text.length / 4)
+    if (!promptTokens) promptTokens = Math.ceil(input.messages.reduce((sum, item) => sum + promptChars(item), 0) / 4)
+    return { text, promptTokens, completionTokens, toolCalls: nativeFromAcc(acc) }
+  }
+  try {
+    for await (const frame of sseFrames(upstream.body)) {
+      const fail = frameError(frame)
+      if (fail) {
+        if (text || acc.size) break
+        throw new Error(fail)
+      }
+      applyToolFrame(frame, acc)
+      emitProgress()
+      const nested = (frame.response as { usage?: Record<string, number> } | undefined)?.usage
+      const usage = (frame.usage as Record<string, number> | undefined) || nested
+      if (usage) {
+        promptTokens = usage.prompt_tokens || usage.input_tokens || promptTokens
+        completionTokens = usage.completion_tokens || usage.output_tokens || completionTokens
+      }
+      const delta = streamDelta(frame)
+      if (!delta) continue
+      text += delta
+      input.onDelta?.(delta)
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    const name = error instanceof Error ? error.name : ''
+    if ((name === 'AbortError' || name === 'TimeoutError' || isTransientStreamError(message)) && (text || acc.size)) {
+      return finish()
+    }
+    throw error
+  }
+  return finish()
 }
 
 async function userKey(userId: string, provider: ModelProvider) {
@@ -638,10 +845,13 @@ export function registerStudio(
     const have = new Set(keys.rows.map((row: { provider: string }) => row.provider))
     const profile = await pool.query(`SELECT plan FROM profiles WHERE user_id = $1`, [session.user.id])
     const planId = String(profile.rows[0]?.plan || 'hobby')
+    const base = soumtokCodingModels()
     const catalog =
-      planId === 'hobby' || planId === 'trial' ? CODING_MODELS.filter((model) => isTrialModel(model.id)) : CODING_MODELS
+      !openAccessForBuilding() && (planId === 'hobby' || planId === 'trial')
+        ? base.filter((model) => isTrialModel(model.id))
+        : base
     return c.json({
-      models: catalog.map((model) => {
+      models: sortModelsByPower(catalog).map((model) => {
         const fallback = NATIVE_FALLBACK[model.id]
         const ready =
           have.has(model.provider) ||
@@ -652,12 +862,387 @@ export function registerStudio(
       }),
       images: IMAGE_MODELS.map((model) => ({
         ...model,
-        ready: model.provider === 'fal' ? hasFal() : Boolean(env.xaiKey),
+        ready: model.provider === 'replicate' ? hasReplicate() : model.provider === 'fal' ? hasFal() : false,
       })),
-      image: { ...IMAGE_MODEL, ready: hasFal() },
-      providers: KEY_PROVIDERS.map((item) => ({ ...item, connected: have.has(item.id) })),
+      image: { ...IMAGE_MODEL, ready: hasImageGen() },
+      providers: KEY_PROVIDERS.filter((item) => SOUMTOK_CODING_PROVIDERS.includes(item.id)).map((item) => ({
+        ...item,
+        connected:
+          have.has(item.id) ||
+          have.has('openrouter') ||
+          Boolean(platformKey(item.id)),
+      })),
     })
   })
+
+  /** Desktop IDE: DeepSeek, OpenAI, Anthropic, Grok — full catalog with key readiness. */
+  app.get('/api/desktop/models', async (c) => {
+    const { session, ready: accountReady } = await requireReadyUser(c)
+    if (!session || !pool) return c.json({ error: 'Unauthorized' }, 401)
+
+    const keys = await pool.query(`SELECT provider FROM provider_keys WHERE user_id = $1`, [session.user.id])
+    const have = new Set(keys.rows.map((row: { provider: string }) => row.provider))
+    const catalog = desktopCodingModels()
+    return c.json({
+      accountReady,
+      models: sortModelsByPower(catalog).map((model) => {
+        const fallback = NATIVE_FALLBACK[model.id]
+        const modelReady =
+          have.has(model.provider) ||
+          have.has('openrouter') ||
+          Boolean(platformKey(model.provider)) ||
+          Boolean(fallback && platformKey(fallback.provider))
+        return { ...model, ready: modelReady, media: modelMedia(model.id) }
+      }),
+    })
+  })
+
+  /** Billing, usage, and provider keys for Soumtok Desktop settings. */
+  app.get('/api/desktop/summary', async (c) => {
+    const { session, ready } = await requireReadyUser(c)
+    if (!session || !pool) return c.json({ error: 'Unauthorized' }, 401)
+    if (!ready) return c.json({ error: 'Finish account setup first' }, 403)
+
+    const profile = await pool.query(
+      `SELECT plan, plan_status, plan_cycle, plan_started_at, plan_renews_at
+       FROM profiles WHERE user_id = $1`,
+      [session.user.id],
+    )
+    const row = profile.rows[0] || {}
+    const planRaw = String(row.plan || 'hobby')
+    const planId = planRaw === 'teams' ? 'team' : planRaw
+    const isTrial = planId === 'hobby' || planId === 'trial'
+    const credit = PLAN_CREDIT[planId] || PLAN_CREDIT.hobby
+    const quota = isTrial ? TRIAL_TOKEN_QUOTA : credit * TOKENS_PER_CREDIT
+    const currentPaid = paidPlan(planId)
+
+    const usage = await pool.query(
+      `SELECT billed_to,
+              coalesce(sum(prompt_tokens + completion_tokens), 0)::int AS tokens,
+              count(*)::int AS calls
+       FROM usage_events
+       WHERE user_id = $1 AND created_at >= date_trunc('month', now())
+       GROUP BY billed_to`,
+      [session.user.id],
+    )
+    let includedTokens = 0
+    let byokTokens = 0
+    for (const u of usage.rows as { billed_to: string; tokens: number }[]) {
+      if (u.billed_to === 'user') byokTokens += u.tokens || 0
+      else includedTokens += u.tokens || 0
+    }
+
+    const topModels = await pool.query(
+      `SELECT model, provider, coalesce(sum(prompt_tokens + completion_tokens), 0)::int AS tokens
+       FROM usage_events
+       WHERE user_id = $1 AND created_at >= date_trunc('month', now())
+       GROUP BY model, provider
+       ORDER BY tokens DESC
+       LIMIT 10`,
+      [session.user.id],
+    )
+
+    const keys = await pool.query(`SELECT provider FROM provider_keys WHERE user_id = $1`, [session.user.id])
+    const have = new Set(keys.rows.map((r: { provider: string }) => r.provider))
+    const desktopProviders = ['deepseek', 'openai', 'anthropic', 'xai'] as const
+    const providers = desktopProviders.map((id) => ({
+      id,
+      name: PROVIDER_LABEL[id],
+      connected:
+        have.has(id) ||
+        have.has('openrouter') ||
+        Boolean(platformKey(id)),
+    }))
+
+    const upgradeOrder = ['hobby', 'trial', 'pro', 'pro_plus', 'ultra'] as const
+    let upgrade: { id: string; name: string; price: string; tagline: string } | null = null
+    const idx = upgradeOrder.indexOf(planRaw as (typeof upgradeOrder)[number])
+    const nextId =
+      idx >= 0 && idx < upgradeOrder.length - 1
+        ? upgradeOrder[idx + 1]
+        : planId === 'hobby' || planId === 'trial'
+          ? 'pro'
+          : null
+    if (nextId && nextId !== 'trial') {
+      const next = paidPlan(nextId)
+      if (next) {
+        upgrade = {
+          id: next.id,
+          name: next.name,
+          price: planPriceLine(next),
+          tagline: next.tagline,
+        }
+      }
+    }
+
+    const renewsAt = row.plan_renews_at ? new Date(row.plan_renews_at) : null
+    let renewsInDays: number | null = null
+    if (renewsAt && !Number.isNaN(renewsAt.getTime())) {
+      renewsInDays = Math.max(0, Math.ceil((renewsAt.getTime() - Date.now()) / 86400000))
+    }
+
+    return c.json({
+      plan: planRaw,
+      planStatus: row.plan_status || 'active',
+      planCycle: row.plan_cycle === 'annual' ? 'annual' : 'monthly',
+      planRenewsAt: row.plan_renews_at || null,
+      planLabel: planLabel(planRaw),
+      planPrice: currentPaid ? planPriceLine(currentPaid) : 'Free',
+      quota,
+      includedTokens,
+      byokTokens,
+      includedPct: Math.min(100, Math.round((includedTokens / Math.max(quota, 1)) * 100)),
+      byokPct: byokTokens > 0 ? Math.min(100, Math.round((byokTokens / Math.max(quota, 1)) * 100)) : 0,
+      topModels: topModels.rows,
+      providers,
+      upgrade,
+      renewsInDays,
+    })
+  })
+
+  /** Soumtok Desktop voice input — OpenAI Whisper (Web Speech fails in Electron). */
+  app.post('/api/desktop/speech/transcribe', async (c) => {
+    const { session, ready } = await requireReadyUser(c)
+    if (!session || !pool) return c.json({ error: 'Unauthorized' }, 401)
+    if (!ready) return c.json({ error: 'Finish account setup first' }, 403)
+
+    const body = await c.req.json<{ audio?: string; mime?: string; language?: string; prompt?: string }>()
+    const b64 = body.audio?.trim() ?? ''
+    if (!b64) return c.json({ error: 'Missing audio' }, 400)
+
+    let apiKey = await userKey(session.user.id, 'openai')
+    let billedTo: 'user' | 'platform' = 'user'
+    if (!apiKey) {
+      const native = platformKey('openai')
+      if (native) {
+        apiKey = native
+        billedTo = 'platform'
+      }
+    }
+    if (!apiKey) {
+      return c.json(
+        {
+          error:
+            'Voice transcription needs an OpenAI key. Add one in Desktop Settings → Keys, or upgrade for platform access.',
+        },
+        402,
+      )
+    }
+
+    if (billedTo === 'platform' && !openAccessForBuilding()) {
+      const profile = await pool.query(`SELECT plan FROM profiles WHERE user_id = $1`, [session.user.id])
+      const planId = String(profile.rows[0]?.plan || 'hobby')
+      if (planId === 'hobby' || planId === 'trial') {
+        const used = await pool.query(
+          `SELECT coalesce(sum(prompt_tokens + completion_tokens), 0)::int AS tokens
+           FROM usage_events
+           WHERE user_id = $1 AND billed_to = 'platform' AND created_at >= date_trunc('month', now())`,
+          [session.user.id],
+        )
+        if ((used.rows[0]?.tokens || 0) >= TRIAL_TOKEN_QUOTA) {
+          return c.json({ error: 'Your free trial ended. Upgrade to Pro to keep using voice.' }, 402)
+        }
+      }
+    }
+
+    let buf: Buffer
+    try {
+      buf = Buffer.from(b64, 'base64')
+    } catch {
+      return c.json({ error: 'Invalid audio payload' }, 400)
+    }
+    if (buf.length < 400) return c.json({ text: '' })
+    if (buf.length > 12 * 1024 * 1024) return c.json({ error: 'Audio chunk too large' }, 400)
+
+    const mime = body.mime?.trim() || 'audio/webm'
+    const ext = mime.includes('webm') ? 'webm' : mime.includes('ogg') ? 'ogg' : 'wav'
+    const form = new FormData()
+    form.append('file', new Blob([buf], { type: mime }), `speech.${ext}`)
+    form.append('model', 'whisper-1')
+    const lang = body.language?.trim().split('-')[0]
+    if (lang && /^[a-z]{2}$/i.test(lang)) form.append('language', lang.toLowerCase())
+    const prompt = body.prompt?.trim().slice(-400)
+    if (prompt) form.append('prompt', prompt)
+
+    const started = Date.now()
+    try {
+      const res = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${apiKey}` },
+        body: form,
+        signal: AbortSignal.timeout(22_000),
+      })
+      const payload = (await res.json().catch(() => ({}))) as { text?: string; error?: { message?: string } }
+      if (!res.ok) {
+        const msg = payload.error?.message || `Transcription failed (${res.status})`
+        return c.json({ error: friendlyStreamError(msg) }, 400)
+      }
+      const text = String(payload.text || '').trim()
+      if (text && billedTo === 'platform') {
+        const estPrompt = Math.max(1, Math.round(buf.length / 80))
+        await recordRun(
+          session.user.id,
+          { provider: 'openai', requestModel: 'whisper-1', billedTo },
+          { promptTokens: estPrompt, completionTokens: Math.max(1, text.length) },
+          started,
+        ).catch(() => {})
+      }
+      return c.json({ text })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Transcription failed'
+      return c.json({ error: friendlyStreamError(message) }, 400)
+    }
+  })
+
+  /** One agent round for Soumtok Desktop — model + tools; tools execute on the client. */
+  const desktopAgentRound = async (c) => {
+    const { session, ready } = await requireReadyUser(c)
+    if (!session || !pool) return c.json({ error: 'Unauthorized' }, 401)
+    if (!ready) return c.json({ error: 'Finish account setup first' }, 403)
+
+    const body = await c.req.json<{
+      model?: string
+      mode?: DesktopAgentMode
+      driver?: 'ide' | 'bot'
+      messages?: StudioMessage[]
+      workspaceRoot?: string
+      openFiles?: string[]
+      branch?: string
+      files?: ChatFile[]
+      agentPrefs?: Record<string, unknown>
+      analysisKind?: string
+    }>()
+
+    const agentPrefs = applyRunModeToPrefs(mergeDesktopAgentPrefs(body.agentPrefs))
+    const openFiles = openFilesForAgent(body.openFiles, agentPrefs)
+
+    const stamped = stampAttachmentMeta(Array.isArray(body.files) ? body.files.filter(Boolean) : [])
+    const prepDraft = prepareDesktopAgentTurn({
+      messages: body.messages,
+      workspaceRoot: body.workspaceRoot,
+      openFiles,
+      branch: body.branch,
+      mode: body.mode || 'agent',
+      driver: body.driver,
+      files: stamped,
+      agentPrefs,
+      model: body.model,
+      analysisKind: body.analysisKind,
+    })
+
+    const runBody = { ...body, files: stamped }
+    if (stamped.length && body.messages?.length) {
+      const msgs = body.messages.map((item) => ({ ...item }))
+      const lastIdx = msgs.length - 1
+      if (msgs[lastIdx]?.role === 'user') {
+        msgs[lastIdx] = { ...msgs[lastIdx], files: stamped }
+        runBody.messages = msgs
+      }
+    }
+
+    const access = await resolveRun(session.user.id, runBody)
+    if (!access.ok) return c.json({ error: access.error, keys: access.keys }, access.status)
+    const { provider, requestModel, apiKey, billedTo, messages, catalogModel } = access
+    const wrapped = await visionWrapDesktopFiles(stamped, prepDraft.userText, catalogModel || requestModel)
+    const prep = prepareDesktopAgentTurn({
+      messages: body.messages,
+      workspaceRoot: body.workspaceRoot,
+      openFiles,
+      branch: body.branch,
+      mode: body.mode || 'agent',
+      driver: body.driver,
+      files: wrapped.files,
+      agentPrefs,
+      model: requestModel,
+      analysisKind: body.analysisKind,
+    })
+
+    const work = messages.map((item) => ({ ...item }))
+    const lastIdx = work.length - 1
+    if (wrapped.files.length && work[lastIdx]?.role === 'user') {
+      work[lastIdx] = {
+        ...work[lastIdx],
+        content: prep.userText,
+        files: wrapped.files,
+      }
+    } else {
+      for (let i = work.length - 1; i >= 0; i--) {
+        if (work[i].role === 'user') {
+          work[i] = {
+            ...work[i],
+            content: prep.userText,
+          }
+          break
+        }
+      }
+    }
+    const sysIdx = work.findIndex((item) => item.role === 'system')
+    const prevSys = sysIdx >= 0 ? String(work[sysIdx].content || '') : ''
+    const mergedSystem = mergeDesktopSystem(prevSys, prep.systemPrompt, prep.userText)
+    if (sysIdx >= 0) work[sysIdx].content = mergedSystem
+    else work.unshift({ role: 'system', content: mergedSystem })
+    const last = work[work.length - 1]
+    const lastUser = [...work].reverse().find((item) => item.role === 'user')
+    const openToolCalls = Boolean(last?.role === 'assistant' && last.tool_calls?.length)
+    if (lastUser && last !== lastUser && last?.role !== 'tool' && !openToolCalls) {
+      work.push({
+        role: 'user',
+        content: prep.userText,
+        files: wrapped.files.length ? wrapped.files : lastUser.files,
+      })
+    }
+
+    const started = Date.now()
+    try {
+      const ran = await streamModel({
+        provider,
+        requestModel,
+        mediaModel: catalogModel || requestModel,
+        apiKey,
+        messages: compactConversation(work),
+        tools: prep.toolsEnabled,
+        toolNames: prep.toolNames,
+        temperature: prep.temperature,
+        maxTokens: prep.maxTokens,
+        timeoutMs: 480_000,
+        forceTools: shouldForceToolChoice({
+          toolsEnabled: prep.toolsEnabled,
+          intent: prep.analysis.kind,
+          model: requestModel,
+          hasWrites: work.some((item) => {
+            const name = String(item.name || '').toLowerCase()
+            if (item.role === 'tool' && /^(write|diff|edit|str_replace|apply_patch)$/.test(name)) return true
+            const c = String(item.content || '')
+            return /\[Soumtok harness — (write|diff|edit)/i.test(c) || /SCAFFOLD ON DISK/i.test(c)
+          }),
+        }),
+      })
+      await recordRun(
+        session.user.id,
+        { provider, requestModel, billedTo },
+        { promptTokens: ran.promptTokens, completionTokens: ran.completionTokens },
+        started,
+      )
+      return c.json({
+        text: ran.text,
+        toolCalls: ran.toolCalls,
+        model: requestModel,
+        provider,
+        billedTo,
+        promptTokens: ran.promptTokens,
+        completionTokens: ran.completionTokens,
+        thought: prep.analysis.thought,
+        planMode: prep.plan.mode,
+        intent: prep.analysis.kind,
+        wrapNote: wrapped.note || undefined,
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Agent round failed'
+      return c.json({ error: friendlyStreamError(message) }, 400)
+    }
+  }
+  app.post('/api/desktop/agent/round', desktopAgentRound)
+  app.post('/api/studio/desktop/agent/round', desktopAgentRound)
 
   app.get('/api/keys', async (c) => {
     const { session, ready } = await requireReadyUser(c)
@@ -801,6 +1386,7 @@ export function registerStudio(
         requestModel: string
         apiKey: string
         billedTo: 'user' | 'platform'
+        catalogModel?: string
         messages: StudioMessage[]
         temperature?: number
         maxTokens?: number
@@ -810,12 +1396,39 @@ export function registerStudio(
     userId: string,
     body: { model?: string; messages?: StudioMessage[]; temperature?: number; maxTokens?: number },
   ): Promise<RunAccess> {
-    const model = modelById(body.model ?? '')
-    const raw = body.messages?.filter((item) => messageHasBody(item)) ?? []
+    const raw = messagesForProvider(body.messages ?? [])
     const messages = await hydrateChatFiles(userId, raw)
     if (messages.length === 0) return { ok: false, error: 'Write a prompt', status: 400 }
-    const lastUser = [...messages].reverse().find((item) => item.role === 'user')
+    const lastUser = [...messages].reverse().find(
+      (item) => item.role === 'user' && !isHarnessUserText(typeof item.content === 'string' ? item.content : ''),
+    )
     const lastText = typeof lastUser?.content === 'string' ? lastUser.content : ''
+    const profile = await pool!.query(`SELECT plan FROM profiles WHERE user_id = $1`, [userId])
+    const planId = String(profile.rows[0]?.plan || 'hobby')
+    const desktopRun = (body as { mode?: AgentRunMode; workspaceRoot?: string }).mode
+    const autoCatalog =
+      !openAccessForBuilding() && (planId === 'hobby' || planId === 'trial')
+        ? soumtokCodingModels().filter((item) => isTrialModel(item.id))
+        : soumtokCodingModels()
+    const hasFiles = Boolean((body as { workspaceRoot?: string }).workspaceRoot)
+    const hasImage =
+      (lastUser?.files || []).some((file) => /image\//.test(file.mime || '')) ||
+      ((body as { files?: ChatFile[] }).files || []).some((file) => /image\//.test(file.mime || ''))
+    const analysis = analyzeUserRequest(lastText, { hasFiles, hasImage, attachments: Boolean(lastUser?.files?.length) })
+    const intelligence = String((body as { agentPrefs?: { intelligence?: string } }).agentPrefs?.intelligence || '')
+    const requested = isAutoModel(body.model)
+      ? pickAutoModel({
+          models: autoCatalog.map((item) => ({ ...item, ready: true })),
+          task: lastText,
+          plan: planId,
+          runMode: desktopRun || 'agent',
+          hasFiles,
+          hasImage,
+          analysisKind: analysis.kind,
+          intelligence: intelligence === 'fast' || intelligence === 'balanced' || intelligence === 'max' ? intelligence : undefined,
+        })
+      : body.model ?? ''
+    const model = modelById(requested)
     const attached = (lastUser?.files || []).flatMap((file) => [file.text || '', file.analysis || ''])
     const leaked = scanSecrets(lastText, attached)
     if (leaked.hits.length > 0 || leaked.offering) {
@@ -831,7 +1444,7 @@ export function registerStudio(
     }
 
     let provider = model.provider
-    let requestModel = model.id
+    let requestModel = upstreamModelId(model.id)
     let billedTo: 'user' | 'platform' = 'user'
     let apiKey = await userKey(userId, provider)
     if (!apiKey && provider !== 'openrouter') {
@@ -867,16 +1480,7 @@ export function registerStudio(
       }
     }
 
-    const profile = await pool!.query(`SELECT plan FROM profiles WHERE user_id = $1`, [userId])
-    const planId = String(profile.rows[0]?.plan || 'hobby')
-    if (planId === 'hobby' || planId === 'trial') {
-      if (!isTrialModel(model.id) && !isTrialModel(requestModel)) {
-        return {
-          ok: false,
-          status: 402,
-          error: `Trial includes ${TRIAL_MODEL_NAMES} only. Upgrade to Pro for other models.`,
-        }
-      }
+    if (!openAccessForBuilding() && (planId === 'hobby' || planId === 'trial')) {
       const used = await pool!.query(
         `SELECT coalesce(sum(prompt_tokens + completion_tokens), 0)::int AS tokens
          FROM usage_events
@@ -890,7 +1494,7 @@ export function registerStudio(
       }
     }
 
-    return { ok: true, provider, requestModel, apiKey, billedTo, messages, temperature: body.temperature, maxTokens: body.maxTokens }
+    return { ok: true, provider, requestModel, apiKey, billedTo, catalogModel: model.id, messages, temperature: body.temperature, maxTokens: body.maxTokens }
   }
 
   async function recordRun(
@@ -925,9 +1529,10 @@ export function registerStudio(
     if (!session || !pool) return c.json({ error: 'Unauthorized' }, 401)
     if (!ready) return c.json({ error: 'Finish account setup first' }, 403)
 
-    const access = await resolveRun(session.user.id, await c.req.json())
+    const payload = await c.req.json()
+    const access = await resolveRun(session.user.id, payload)
     if (!access.ok) return c.json({ error: access.error, keys: access.keys }, access.status)
-    const { provider, requestModel, apiKey, billedTo, messages, temperature, maxTokens } = access
+    const { provider, requestModel, apiKey, billedTo, messages, temperature, maxTokens, catalogModel } = access
 
     const started = Date.now()
     const res = await fetch(completionUrl(provider, requestModel), {
@@ -938,9 +1543,9 @@ export function registerStudio(
         ...(provider === 'openrouter'
           ? { 'HTTP-Referer': env.betterAuthUrl, 'X-Title': 'Soumtok' }
           : {}),
-        ...(provider === 'anthropic' ? { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' } : {}),
+        ...(provider === 'anthropic' ? anthropicRequestHeaders(apiKey) : {}),
       },
-      body: JSON.stringify(requestBody(provider, requestModel, messages, { temperature, maxTokens })),
+        body: JSON.stringify(requestBody(provider, requestModel, messages, { temperature, maxTokens, packModel: catalogModel || requestModel })),
       signal: AbortSignal.timeout(180_000),
     })
 
@@ -977,7 +1582,16 @@ export function registerStudio(
 
     await recordRun(session.user.id, { provider, requestModel, billedTo }, { promptTokens, completionTokens }, started)
 
-    return c.json({ text, model: requestModel, provider, billedTo, promptTokens, completionTokens })
+    const shownModel = isAutoModel(payload.model) ? 'auto' : modelById(payload.model ?? '').id
+    return c.json({
+      text,
+      model: shownModel,
+      requestModel,
+      provider,
+      billedTo,
+      promptTokens,
+      completionTokens,
+    })
   })
 
   app.post('/api/studio/complete/stream', async (c) => {
@@ -996,7 +1610,7 @@ export function registerStudio(
     }>()
     const access = await resolveRun(session.user.id, payload)
     if (!access.ok) return c.json({ error: access.error, keys: access.keys }, access.status)
-    const { provider, requestModel, apiKey, billedTo, messages, temperature, maxTokens } = access
+    const { provider, requestModel, apiKey, billedTo, messages, temperature, maxTokens, catalogModel } = access
 
     const started = Date.now()
     const body = payload
@@ -1012,30 +1626,82 @@ export function registerStudio(
         let completionTokens = 0
         let lastText = ''
         let files = sanitizeToolFiles(body.files)
+        const startStamp = filesStamp(files)
         const work = messages.map((item) => ({ ...item }))
         const sandboxDir = body.agent ? await createSandboxDir() : undefined
+        const maxRounds = body.agent ? 8 : 1
+        let failed = ''
         try {
-          for (let round = 0; round < (body.agent ? 6 : 1); round++) {
-            const ran = await streamModel({
-              provider,
-              requestModel,
-              apiKey,
-              messages: work,
-              temperature,
-              maxTokens,
-              tools: Boolean(body.agent),
-              onDelta: (delta) => send({ delta }),
-            })
+          for (let round = 0; round < maxRounds; round++) {
+            let ran: Awaited<ReturnType<typeof streamModel>>
+            try {
+              ran = await streamModel({
+                provider,
+                requestModel,
+                mediaModel: catalogModel || requestModel,
+                apiKey,
+                messages: work,
+                temperature,
+                maxTokens,
+                tools: Boolean(body.agent),
+                timeoutMs: body.agent ? 480_000 : 180_000,
+                onDelta: (delta) => send({ delta }),
+                onToolProgress: (calls) => send({ progress: calls }),
+              })
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error)
+              const written = Object.keys(files).filter((path) => files[path]?.trim() && !path.endsWith('/.keep'))
+              if (body.agent && isTransientStreamError(message) && round < maxRounds - 1) {
+                work.push({
+                  role: 'user',
+                  content: written.length
+                    ? `The last stream was cut off. Continue from the files already in the workspace (${written.join(', ')}). Call write for the next missing file with the full body. Do not start over.`
+                    : 'The last stream was cut off. Continue. Call write for the next file with the full body.',
+                })
+                send({ reset: true })
+                continue
+              }
+              throw error
+            }
             lastText = ran.text
             promptTokens += ran.promptTokens
             completionTokens += ran.completionTokens
             if (!body.agent) break
             const parsed = parseAgentRun(ran.text)
+            for (const [path, content] of Object.entries(parsed.files || {})) {
+              if (typeof content === 'string' && content.trim() && !path.endsWith('/.keep')) files[path] = content
+            }
             const native = studioToolsFromNative(ran.toolCalls)
             const jsonTools = pendingToolsForRun(parsed.events)
-            const tools = skipKnownReads(native.length ? native : jsonTools, files)
+            const tools = skipDisplayDiffs(skipKnownReads(native.length ? native : jsonTools, files))
             send({ round, text: ran.text })
-            if (tools.length === 0) break
+            const systemPrompt = work.find((item) => item.role === 'system')?.content || ''
+            const missing = missingManifestFiles(files, promptManifestSpec(systemPrompt))
+            const written = Object.keys(files).filter((path) => files[path]?.trim() && !path.endsWith('/.keep'))
+            if (tools.length === 0) {
+              const stillIdle = filesStamp(files) === startStamp
+              if (
+                shouldNudgeWrite({
+                  agent: Boolean(body.agent),
+                  round,
+                  maxRounds,
+                  stillIdle,
+                  toolCount: tools.length,
+                  systemPrompt,
+                  modelText: ran.text || '',
+                  missing,
+                }) ||
+                (body.agent && round < 2 && stillIdle && looksLikePlanTalk(ran.text || ''))
+              ) {
+                work.push({
+                  role: 'user',
+                  content: writeNudgeMessage(missing, written),
+                })
+                send({ reset: true })
+                continue
+              }
+              break
+            }
             send({ tools: tools.map((item) => ({ name: item.name, args: item.args })) })
             const executed = await runStudioTools(userId, tools, files, { repo: body.repo, sandboxDir })
             files = executed.files
@@ -1050,7 +1716,8 @@ export function registerStudio(
                 },
               })
             }
-            if (!toolsNeedAnotherRound(tools)) break
+            const stillMissing = missingManifestFiles(files, promptManifestSpec(systemPrompt))
+            if (!toolsShouldContinue(tools, executed.outcomes, { missing: stillMissing })) break
             if (native.length) {
               work.push({
                 role: 'assistant',
@@ -1066,15 +1733,33 @@ export function registerStudio(
                 })
               })
             } else {
-              const extra = `${executed.followUp}\n\nWORKSPACE FILES AFTER TOOLS:\n${packWorkspaceFiles(files, 60_000)}`
+              const extra = `${TOOL_ROUND_MARKER}\n${executed.followUp}\n\nWORKSPACE FILES AFTER TOOLS:\n${packWorkspaceFiles(files, 60_000)}`
               const system = work.find((item) => item.role === 'system')
-              if (system) system.content = `${system.content}\n\n${extra}`
+              // Replace last round's block. Appending stacked a stale copy of the whole
+              // workspace every round until the real instructions were buried.
+              if (system) system.content = `${stripToolRoundBlock(system.content)}\n\n${extra}`
               else work.unshift({ role: 'system', content: extra })
+            }
+            if (stillMissing.length) {
+              work.push({
+                role: 'user',
+                content: writeNudgeMessage(
+                  stillMissing,
+                  Object.keys(files).filter((path) => files[path]?.trim() && !path.endsWith('/.keep')),
+                ),
+              })
             }
             send({ reset: true })
           }
         } catch (error) {
-          send({ error: error instanceof Error ? error.message : 'Stream failed' })
+          const message = error instanceof Error ? error.message : 'Stream failed'
+          const written = Object.keys(files).filter((path) => files[path]?.trim() && !path.endsWith('/.keep'))
+          if (body.agent && written.length && isTransientStreamError(message)) {
+            failed = ''
+          } else {
+            failed = friendlyStreamError(message)
+            send({ error: failed })
+          }
         } finally {
           await removeSandboxDir(sandboxDir)
         }
@@ -1082,7 +1767,9 @@ export function registerStudio(
         await recordRun(userId, { provider, requestModel, billedTo }, { promptTokens, completionTokens }, started).catch(
           () => undefined,
         )
-        send({ done: true, text: lastText, model: requestModel, provider, billedTo, promptTokens, completionTokens, files })
+        if (!failed) {
+          send({ done: true, text: lastText, model: requestModel, provider, billedTo, promptTokens, completionTokens, files })
+        }
         controller.close()
       },
     })
@@ -1101,81 +1788,71 @@ export function registerStudio(
     const { session, ready } = await requireReadyUser(c)
     if (!session || !pool) return c.json({ error: 'Unauthorized' }, 401)
     if (!ready) return c.json({ error: 'Finish account setup first' }, 403)
-    if (!hasBunny()) return c.json({ error: 'Storage is not connected' }, 503)
 
-    const body = await c.req.json<{ prompt?: string; model?: string }>()
+    const body = await c.req.json<{ prompt?: string; model?: string; aspect?: string }>()
     const prompt = body.prompt?.trim() ?? ''
-    const requested = body.model?.trim() || IMAGE_MODEL.id
-    if (/video|veo|sora|lyria|music|audio|tts/i.test(requested)) {
-      return c.json({ error: 'Soumtok only generates still images. Video and music models are off.' }, 400)
-    }
-    if (!isImageModel(requested)) return c.json({ error: 'Unknown image model' }, 400)
-    const imageModel = imageModelById(requested)
-    if (!prompt) return c.json({ error: 'Write a prompt' }, 400)
-    if (prompt.length > 2000) return c.json({ error: 'Prompt is too long' }, 400)
-
-    if (!hasFal()) return c.json({ error: 'Image model is not configured' }, 503)
-
     const started = Date.now()
-    const res = await fetch('https://fal.run/fal-ai/flux/schnell', {
-      method: 'POST',
-      headers: {
-        Authorization: `Key ${env.falKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        prompt,
-        image_size: 'landscape_4_3',
-        num_inference_steps: 4,
-        enable_safety_checker: true,
-      }),
-    })
-    const data = (await res.json()) as {
-      detail?: string | { msg?: string }[]
-      error?: { message?: string } | string
-      images?: { url?: string; content_type?: string }[]
-    }
-    if (!res.ok) {
-      const detail = Array.isArray(data.detail)
-        ? data.detail.map((item) => item.msg).filter(Boolean).join(' ')
-        : data.detail
-      const message =
-        detail ||
-        (typeof data.error === 'string' ? data.error : data.error?.message) ||
-        'Image generation failed'
-      return c.json({ error: message }, 400)
+    let generated
+    try {
+      generated = await generateStillImage(prompt, body.model, body.aspect)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Image generation failed'
+      const status = /not configured/i.test(message) ? 503 : 400
+      return c.json({ error: message }, status)
     }
 
-    const remoteUrl = data.images?.[0]?.url || ''
-    let contentType = data.images?.[0]?.content_type || 'image/jpeg'
-
-    if (!remoteUrl) return c.json({ error: 'No image returned' }, 400)
-
-    const imageRes = await fetch(remoteUrl)
-    if (!imageRes.ok) return c.json({ error: 'Could not download the generated image' }, 502)
-
-    const bytes = new Uint8Array(await imageRes.arrayBuffer())
-    contentType = imageRes.headers.get('content-type') || contentType
-    const ext = contentType.includes('png') ? 'png' : contentType.includes('webp') ? 'webp' : 'jpg'
     const id = crypto.randomUUID()
-    await uploadToBunny(`users/${session.user.id}/studio/${id}.${ext}`, bytes, contentType)
+    let url: string | null = null
+    if (hasBunny()) {
+      await uploadToBunny(
+        `users/${session.user.id}/studio/${id}.${generated.ext}`,
+        generated.bytes,
+        generated.contentType,
+      )
+      url = `/api/studio/images/${id}.${generated.ext}`
+    }
 
     await pool.query(
       `INSERT INTO usage_events (id, user_id, provider, model, prompt_tokens, completion_tokens, billed_to)
        VALUES ($1, $2, $3, $4, 0, 1, 'platform')`,
-      [crypto.randomUUID(), session.user.id, imageModel.provider, imageModel.id],
+      [crypto.randomUUID(), session.user.id, generated.model.provider, generated.model.id],
     )
     await track(session.user.id, 'studio_image', '/dashboard/studio', {
-      model: imageModel.id,
+      model: generated.model.id,
       ms: Date.now() - started,
     })
 
-    return c.json({
+    const payload: Record<string, unknown> = {
       id,
-      url: `/api/studio/images/${id}.${ext}`,
-      model: imageModel.id,
+      url,
+      ext: generated.ext,
+      contentType: generated.contentType,
+      model: generated.model.id,
+      aspect: generated.aspect,
       billedTo: 'platform',
-    })
+    }
+    // Do not stuff a full JPEG as base64 into JSON when a URL exists — Cloudflare
+    // truncates that payload and Desktop then reports "No image bytes returned".
+    if (!url) payload.base64 = Buffer.from(generated.bytes).toString('base64')
+    return c.json(payload)
+  })
+
+  app.post('/api/studio/examine-media', async (c) => {
+    const { session, ready } = await requireReadyUser(c)
+    if (!session) return c.json({ error: 'Unauthorized' }, 401)
+    if (!ready) return c.json({ error: 'Finish account setup first' }, 403)
+    const body = await c.req.json<{ mime?: string; base64?: string; prompt?: string }>()
+    const mime = String(body.mime || '').trim()
+    const base64 = String(body.base64 || '').replace(/^data:[^;]+;base64,/, '')
+    if (!base64) return c.json({ error: 'Attach image or video bytes' }, 400)
+    try {
+      const out = await examineMediaBytes({ mime, base64, prompt: body.prompt })
+      return c.json({ ok: true, ...out })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not examine media'
+      const status = /needs .*API_KEY/i.test(message) ? 503 : 400
+      return c.json({ error: message }, status)
+    }
   })
 
   app.get('/api/studio/images/:file', async (c) => {

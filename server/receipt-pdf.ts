@@ -33,7 +33,7 @@ export function receiptPdf(input: {
 }) {
   const billed = input.cycle === 'annual' ? 'Annual' : 'Monthly'
   const lines = [
-    'SOUMTOK',
+    'SOWN',
     'Payment receipt',
     '',
     input.receiptNumber,

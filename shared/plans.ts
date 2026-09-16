@@ -26,7 +26,7 @@ export const BILLING_PLANS: BillingPlan[] = [
     detail: 'Free while you try Studio',
     points: [
       'A short Studio try on two cheap models',
-      'DeepSeek V4 Flash and Gemma 4 only',
+      'DeepSeek V4 Flash only',
       'When the free trial ends, coding stops until you upgrade',
       'One GitHub project',
     ],

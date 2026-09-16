@@ -1,4 +1,4 @@
-import { catalogPlugin, PLUGIN_CATALOG } from './plugins'
+import { catalogPlugin, PLUGIN_CATALOG } from './plugins.ts'
 
 export type ConnectorAuthMode = 'always' | 'when_asked' | 'none'
 export type ConnectorOAuthClient = 'hosted' | 'dcr' | 'own'
@@ -31,6 +31,15 @@ const LOGIN_URL: Record<string, string> = {
   supabase: 'https://supabase.com/dashboard/sign-in',
   cloudflare: 'https://dash.cloudflare.com/login',
   vercel: 'https://vercel.com/login',
+  huggingface: 'https://huggingface.co/login',
+  higgsfield: 'https://higgsfield.ai/mcp',
+  canva: 'https://www.canva.com/login',
+  atlassian: 'https://id.atlassian.com/login',
+  gitlab: 'https://gitlab.com/users/sign_in',
+  hubspot: 'https://app.hubspot.com/login',
+  asana: 'https://app.asana.com/-/login',
+  context7: 'https://context7.com',
+  salesforce: 'https://login.salesforce.com',
 }
 
 export function connectorLoginUrl(pluginId: string) {

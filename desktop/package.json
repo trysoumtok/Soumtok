@@ -1,0 +1,87 @@
+{
+  "name": "soumtok-ide",
+  "productName": "Soumtok",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Soumtok desktop IDE — Cursor-style editor signed into your Soumtok account",
+  "main": "src/main/index.js",
+  "scripts": {
+    "dev": "electron .",
+    "start": "electron .",
+    "rebuild-native": "node scripts/rebuild-native.mjs",
+    "postinstall": "node scripts/rebuild-native.mjs",
+    "soumtok-code:install": "node scripts/install-soumtok-code-host.mjs",
+    "vscode:fork-bootstrap": "node vscode-fork/bootstrap.mjs",
+    "pack:win": "electron-builder --win nsis",
+    "pack:mac": "electron-builder --mac dmg",
+    "pack:linux": "electron-builder --linux AppImage",
+    "pack:all": "electron-builder --win nsis --mac dmg --linux AppImage",
+    "release:verify": "node scripts/publish-release.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "build": {
+    "appId": "com.soumtok.ide",
+    "productName": "Soumtok",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "src/**/*",
+      "resources/**/*",
+      "package.json",
+      "node_modules/monaco-editor/min/**/*",
+      "node_modules/@xterm/**/*",
+      "node_modules/@homebridge/node-pty-prebuilt-multiarch/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "node_modules/monaco-editor/min",
+        "to": "monaco"
+      }
+    ],
+    "win": {
+      "icon": "resources/icon.png",
+      "target": ["nsis"],
+      "signAndEditExecutable": true,
+      "signDlls": true,
+      "publisherName": "Soumtok"
+    },
+    "mac": {
+      "icon": "resources/icon.png",
+      "target": ["dmg"],
+      "category": "public.app-category.developer-tools",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist"
+    },
+    "linux": {
+      "icon": "resources/icon.png",
+      "target": [
+        "AppImage"
+      ],
+      "category": "Development"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "publish": {
+      "provider": "generic",
+      "url": "https://releases.soumtok.com/desktop/"
+    }
+  },
+  "dependencies": {
+    "@homebridge/node-pty-prebuilt-multiarch": "^0.14.1",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "electron": "^37.2.5",
+    "monaco-editor": "^0.52.2"
+  },
+  "devDependencies": {
+    "electron-builder": "^26.0.12",
+    "electron-updater": "^6.8.9"
+  }
+}

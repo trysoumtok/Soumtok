@@ -7,13 +7,17 @@
     "node": ">=22"
   },
   "scripts": {
-    "dev": "vite",
+    "dev": "node scripts/dev-server.mjs",
+    "dev:clean": "node scripts/dev-server.mjs --clean",
     "build": "vite build",
     "build:check": "tsc -b",
     "start": "tsx server/index.ts",
     "db:migrate": "tsx server/migrate.ts",
     "lint": "oxlint",
-    "test": "tsx --test shared/chatMedia.test.ts shared/chatMemory.test.ts shared/agentAsk.test.ts shared/capabilities.test.ts shared/secretsGuard.test.ts shared/tools.test.ts shared/connectLinks.test.ts shared/chatFiles.test.ts shared/replyFormat.test.ts",
+    "test": "tsx --test shared/chatMedia.test.ts shared/chatMemory.test.ts shared/agentAsk.test.ts shared/capabilities.test.ts shared/secretsGuard.test.ts shared/tools.test.ts shared/connectLinks.test.ts shared/mcpOauth.test.ts shared/chatFiles.test.ts shared/replyFormat.test.ts shared/requestAnalyze.test.ts shared/typoIntent.test.ts shared/stillAspect.test.ts shared/seo.test.ts shared/models.test.ts shared/navLayout.test.ts shared/brandLogo.test.ts shared/soumtokBot.test.ts shared/desktopAgent.test.ts shared/modelHarness.test.ts shared/agentControlLayer.test.ts shared/testHub.test.ts shared/testHubBenchmark.test.ts server/studioMedia.test.ts",
+    "test:desktop": "node desktop/scripts/test-desktop-features.mjs && node desktop/scripts/test-manual-checklist.mjs && node desktop/scripts/test-integration.mjs && node desktop/scripts/test-agent-harness.mjs && node desktop/scripts/test-dsml-tools.mjs && node desktop/scripts/test-extensions-market.mjs && node desktop/scripts/test-marketplace-gallery.mjs && node desktop/scripts/test-build-director.mjs && node desktop/scripts/test-agent-intelligence.mjs && tsx desktop/scripts/test-agent-eval.mjs && node desktop/scripts/test-agent-live.mjs && node desktop/scripts/test-test-hub-compare.mjs",
+    "vscode:fork-bootstrap": "node desktop/vscode-fork/bootstrap.mjs",
+    "soumtok-code:install": "node desktop/scripts/install-soumtok-code-host.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

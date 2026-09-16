@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Spinner } from '../Loaders'
 import { CODING_MODELS, PROVIDER_LABEL, modelGuide, type CodingModel, type ModelProvider } from '../../../shared/models'
+import { ModelBriefSheet } from './ModelBriefSheet'
 import {
   fetchAnalytics,
   fetchGithubRepos,
@@ -406,17 +407,6 @@ function ModelsSection() {
       }),
     }))
     .filter((group) => group.models.length > 0)
-  const guide = open ? modelGuide(open) : null
-
-  useEffect(() => {
-    if (!open) return
-    function onKey(event: KeyboardEvent) {
-      if (event.key === 'Escape') setOpen(null)
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [open])
-
   return (
     <div>
       <label className="relative block">
@@ -477,63 +467,7 @@ function ModelsSection() {
         ))}
       </div>
 
-      {open && guide && (
-        <div className="fixed inset-0 z-50 grid place-items-center bg-black/70 p-4" onClick={() => setOpen(null)}>
-          <div
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="model-dialog-title"
-            className="max-h-[85vh] w-full max-w-[520px] overflow-auto rounded-2xl border border-white/10 bg-[#141413] p-6"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <p className="text-[12px] uppercase tracking-[0.08em] text-white/35">{PROVIDER_LABEL[open.provider]}</p>
-            <h3 id="model-dialog-title" className="mt-1 flex flex-wrap items-center gap-2 text-[24px] font-medium tracking-[-0.03em]">
-              {open.name}
-              {(open.tags ?? []).map((tag) => (
-                <span
-                  key={tag}
-                  className="rounded-full bg-[#f54e00]/18 px-2 py-0.5 text-[11px] font-medium uppercase tracking-[0.06em] text-[#f54e00]"
-                >
-                  {tag}
-                </span>
-              ))}
-            </h3>
-            <p className="mt-2 text-[14px] leading-6 text-white/55">{guide.summary}</p>
-
-            <div className="mt-5 grid grid-cols-2 gap-3">
-              <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] px-3 py-3">
-                <p className="text-[11px] text-white/35">Context window</p>
-                <p className="mt-1 text-[15px] text-white">{guide.context}</p>
-              </div>
-              <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] px-3 py-3">
-                <p className="text-[11px] text-white/35">Max output</p>
-                <p className="mt-1 text-[15px] text-white">{guide.output}</p>
-              </div>
-            </div>
-
-            <p className="mt-6 text-[12px] uppercase tracking-[0.08em] text-white/35">What it is good at</p>
-            <ul className="mt-2 space-y-2">
-              {guide.good.map((item) => (
-                <li key={item} className="flex gap-2 text-[13px] leading-6 text-white/70">
-                  <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-[#f54e00]" />
-                  {item}
-                </li>
-              ))}
-            </ul>
-
-            <p className="mt-6 text-[12px] uppercase tracking-[0.08em] text-white/35">Best for</p>
-            <p className="mt-2 text-[14px] leading-6 text-white/70">{guide.bestFor}</p>
-
-            <button
-              type="button"
-              onClick={() => setOpen(null)}
-              className="mt-6 rounded-md bg-white px-3 py-1.5 text-[13px] font-medium text-black hover:bg-[#f2f2f0]"
-            >
-              Close
-            </button>
-          </div>
-        </div>
-      )}
+      {open && <ModelBriefSheet model={open} onClose={() => setOpen(null)} />}
     </div>
   )
 }

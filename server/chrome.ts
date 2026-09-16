@@ -1,5 +1,5 @@
 import type { Hono } from 'hono'
-import { resolveSiteFile } from '../shared/preview.ts'
+import { acceptSiteSeq, resolveSiteFile } from '../shared/preview.ts'
 
 type ReadyFn = (c: { req: { raw: Request } }) => Promise<{
   session: { user: { id: string } } | null
@@ -10,6 +10,7 @@ type Site = {
   userId: string
   files: Record<string, string>
   html: string
+  seq?: number
   last: number
 }
 
@@ -43,7 +44,8 @@ function serveSite(
   if (!file) return c.text('Not found', 404)
   return c.body(file, 200, {
     'Content-Type': mimeFor(rest || 'index.html'),
-    'Cache-Control': 'no-store',
+    'Cache-Control': 'no-store, no-cache, must-revalidate',
+    Pragma: 'no-cache',
     'X-Frame-Options': 'SAMEORIGIN',
   })
 }
@@ -62,7 +64,7 @@ export function registerChrome(app: Hono, requireReadyUser: ReadyFn) {
     const { session, ready } = await requireReadyUser(c)
     if (!session) return c.json({ error: 'Unauthorized' }, 401)
     if (!ready) return c.json({ error: 'Finish account setup first' }, 403)
-    const body = await c.req.json<{ files?: Record<string, string>; html?: string }>().catch(() => ({}))
+    const body = await c.req.json<{ files?: Record<string, string>; html?: string; seq?: number }>().catch(() => ({}))
     const html = body.html || ''
     const files = body.files || {}
     let token = tokenByUser.get(session.user.id)
@@ -70,7 +72,12 @@ export function registerChrome(app: Hono, requireReadyUser: ReadyFn) {
       token = crypto.randomUUID()
       tokenByUser.set(session.user.id, token)
     }
-    sites.set(token, { userId: session.user.id, files, html, last: Date.now() })
+    const prev = sites.get(token)
+    if (prev && !acceptSiteSeq(prev.seq, body.seq)) {
+      return c.json({ token, path: `/api/studio/site/${token}/` })
+    }
+    const seq = typeof body.seq === 'number' && Number.isFinite(body.seq) ? body.seq : (prev?.seq || 0)
+    sites.set(token, { userId: session.user.id, files, html, seq, last: Date.now() })
     return c.json({ token, path: `/api/studio/site/${token}/` })
   })
 

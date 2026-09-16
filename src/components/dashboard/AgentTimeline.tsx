@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { decodeSource, type AgentEvent } from '../../../shared/agent'
 import { highlight } from '../../lib/highlight'
-import { AskCard, PlanCard, TodoList, PromptChips, CapabilityLine, SecurityCard, ConnectCard } from './AskCards'
+import { AskCard, PlanCard, PromptChips, CapabilityLine, SecurityCard, ConnectCard } from './AskCards'
 import { toolFeedLabel, toolFeedLine } from '../../../shared/toolFeed'
 
 export function AgentTimeline({
@@ -47,6 +47,7 @@ export function AgentTimeline({
   const lastThought = live
     ? events.reduce((found, event, index) => (event.kind === 'thought' ? index : found), -1)
     : -1
+  const firstThought = events.findIndex((event) => event.kind === 'thought')
   return (
     <div className="space-y-3">
       {events.map((event, index) => {
@@ -57,7 +58,8 @@ export function AgentTimeline({
             event={event}
             files={files}
             collapsed={collapsed}
-            live={live && index === lastThought}
+            live={live && (event.kind === 'thought' ? index === lastThought : true)}
+            lead={event.kind === 'thought' && index === firstThought}
             open={event.kind === 'diff' ? openMap[key] : undefined}
             onToggle={() =>
               setOpenMap((current) => {
@@ -92,6 +94,7 @@ function AgentEventRow({
   files,
   collapsed,
   live,
+  lead,
   open,
   onToggle,
   onPreview,
@@ -112,6 +115,7 @@ function AgentEventRow({
   files: Record<string, string>
   collapsed?: boolean
   live?: boolean
+  lead?: boolean
   open?: boolean
   onToggle?: () => void
   onPreview?: () => void
@@ -128,7 +132,7 @@ function AgentEventRow({
   onConnectDone?: (event: Extract<AgentEvent, { kind: 'connect' }>) => void
   messages?: { content?: string }[]
 }) {
-  if (event.kind === 'thought') return <ThoughtBlock seconds={event.seconds} text={event.text} live={live} />
+  if (event.kind === 'thought') return <ThoughtBlock seconds={event.seconds} text={event.text} live={live} lead={lead} />
   if (event.kind === 'explore') return <ExploreBlock items={event.items} startOpen={!collapsed} />
   if (event.kind === 'note') return <NoteBlock title={event.title} text={event.text} startOpen={!collapsed} />
   if (event.kind === 'ask') {
@@ -148,21 +152,37 @@ function AgentEventRow({
       />
     )
   }
-  if (event.kind === 'todo') return <TodoList event={event} />
+  if (event.kind === 'todo') return null
   if (event.kind === 'fetch') {
     return <CapabilityLine label={event.ok === false ? 'Fetch failed' : 'Fetched'} text={event.title || event.url} />
   }
   if (event.kind === 'document') {
     return <CapabilityLine label="Document" text={event.folder ? `${event.folder} / ${event.title}` : event.title} />
   }
-  if (event.kind === 'folder') return <CapabilityLine label="Folder" text={event.path} />
+  if (event.kind === 'folder') return null
   if (event.kind === 'mcp') {
     return <CapabilityLine label="MCP" text={`${event.server} · ${event.tool}${event.detail ? ` — ${event.detail}` : ''}`} />
   }
   if (event.kind === 'tool') {
     const path = event.args?.path || event.args?.file
     const text = toolFeedLine(event.name, event.args)
-    const line = <CapabilityLine label={toolFeedLabel(event.name)} text={text} />
+    const verb =
+      event.name === 'read'
+        ? 'Reading'
+        : event.name === 'write'
+          ? 'Writing'
+          : event.name === 'diff' || event.name === 'edit'
+            ? 'Editing'
+            : event.name === 'grep'
+              ? 'Searching'
+              : event.name === 'terminal'
+                ? 'Running'
+                : toolFeedLabel(event.name)
+    const line = (
+      <p className="max-w-[560px] truncate text-[13px] text-white/70">
+        {verb} <span className="font-mono text-white/50">{text}</span>
+      </p>
+    )
     if (path && onOpenFile) {
       return (
         <button type="button" onClick={() => onOpenFile(path)} className="block max-w-full text-left hover:text-white">
@@ -173,7 +193,21 @@ function AgentEventRow({
     return line
   }
   if (event.kind === 'result') {
-    return <CapabilityLine label={event.ok ? 'Result' : 'Failed'} text={`${event.name} — ${event.text.slice(0, 180)}`} />
+    const verb =
+      event.name === 'read'
+        ? 'Read'
+        : event.name === 'write'
+          ? 'Wrote'
+          : event.name === 'diff'
+            ? 'Edited'
+            : event.ok
+              ? 'Done'
+              : 'Failed'
+    return (
+      <p className="max-w-[560px] truncate text-[13px] text-white/40">
+        {event.ok ? verb : 'Failed'} <span className="font-mono">{event.text}</span>
+      </p>
+    )
   }
   if (event.kind === 'skill') return <CapabilityLine label="Skill" text={event.name} />
   if (event.kind === 'prompt') return <PromptChips items={event.items} onPick={onPrompt} />
@@ -213,6 +247,7 @@ function AgentEventRow({
         event={event}
         source={files[event.path] || ''}
         collapsed={collapsed}
+        live={live}
         open={open}
         onToggle={onToggle}
         interactive={interactive}
@@ -268,9 +303,12 @@ function CommandBlock({ command, output, ok }: { command: string; output?: strin
   )
 }
 
-function ThoughtBlock({ seconds, text, live }: { seconds: number; text: string; live?: boolean }) {
+function ThoughtBlock({ seconds, text, live, lead }: { seconds: number; text: string; live?: boolean; lead?: boolean }) {
   const [touched, setTouched] = useState(false)
   const [open, setOpen] = useState(false)
+  if (lead) {
+    return <p className="whitespace-pre-wrap text-[14px] leading-6 text-white/80">{text}</p>
+  }
   const shown = touched ? open : Boolean(live)
   const label = live ? 'Thinking' : seconds === 1 ? 'Thought for 1 second' : `Thought for ${seconds} seconds`
   return (
@@ -326,6 +364,7 @@ function DiffBlock({
   event,
   source,
   collapsed,
+  live,
   open: openProp,
   onToggle,
   interactive,
@@ -335,6 +374,7 @@ function DiffBlock({
   event: Extract<AgentEvent, { kind: 'diff' }>
   source: string
   collapsed?: boolean
+  live?: boolean
   open?: boolean
   onToggle?: () => void
   interactive?: boolean
@@ -344,7 +384,7 @@ function DiffBlock({
   const [full, setFull] = useState(false)
   const hidden = event.hidden || 0
   const size = event.added || event.lines.length
-  const open = openProp ?? (collapsed ? false : event.removed > 0 || size <= 40)
+  const open = openProp ?? (collapsed ? false : live || event.removed > 0 || Boolean(event.previous) || size <= 40)
   const raw = full && source ? source.split('\n').map((text) => ({ kind: 'add' as const, text })) : event.lines
   const lines = raw.flatMap((line) =>
     decodeSource(line.text)

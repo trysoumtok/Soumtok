@@ -1,12 +1,34 @@
-const LIGHT = new Set(['notion', 'github', 'google-drive', 'google-calendar', 'gmail', 'slack', 'supabase', 'vercel'])
+const LIGHT = new Set([
+  'notion',
+  'github',
+  'google-drive',
+  'google-calendar',
+  'gmail',
+  'slack',
+  'supabase',
+  'vercel',
+  'atlassian',
+  'gitlab',
+  'hubspot',
+  'asana',
+  'salesforce',
+])
 const TINT: Record<string, string> = {
   datadog: 'bg-[#632CA6] invert',
   linear: 'bg-[#5E6AD2] invert',
   sentry: 'bg-[#362D59]',
 }
+const OFFICIAL_SRC: Record<string, string> = {
+  canva: 'https://static.canva.com/static/images/android-192x192-2.png',
+  huggingface: 'https://huggingface.co/front/assets/huggingface_logo-noborder.svg',
+  context7: 'https://context7.com/brand/context7-icon-dark.svg',
+  salesforce: 'https://a.sfdcstatic.com/shared/images/c360-nav/salesforce-no-type-logo.svg',
+  neon: 'https://neon.com/brand/neon-logomark-dark-color.svg',
+  hubspot: 'https://www.hubspot.com/hubfs/HubSpot_Logos/HubSpot-Inversed-Favicon.png',
+}
 
 export function PluginLogo({ id, className = 'h-9 w-9' }: { id: string; className?: string }) {
-  const src = `/logos/plugins/${id}.svg`
+  const src = OFFICIAL_SRC[id] || `/logos/plugins/${id}.svg`
   const box = `${className} shrink-0 overflow-hidden rounded-lg grid place-items-center`
   if (LIGHT.has(id)) {
     return (
@@ -60,6 +82,13 @@ export function PluginLogo({ id, className = 'h-9 w-9' }: { id: string; classNam
   if (id === 'neon') {
     return (
       <span className={`${box} bg-[#0b0b0a]`}>
+        <img src={src} alt="" className="h-full w-full object-contain" />
+      </span>
+    )
+  }
+  if (id === 'context7' || id === 'canva' || id === 'huggingface') {
+    return (
+      <span className={`${box} bg-[#111110]`}>
         <img src={src} alt="" className="h-full w-full object-contain" />
       </span>
     )

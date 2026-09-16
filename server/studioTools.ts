@@ -1,11 +1,14 @@
 import type { Hono } from 'hono'
+import { brandLogoFetchUrls, isRawFetchBody, wantsBrandAsset } from '../shared/brandLogo.ts'
 import { extractUrls, lookupQuery } from '../shared/capabilities.ts'
-import { formatToolResults, runLocalTool, type StudioTool, type ToolOutcome } from '../shared/tools.ts'
+import { formatToolResults, isEditTool, runLocalTool, type StudioTool, type ToolOutcome } from '../shared/tools.ts'
 import { pool } from './db.ts'
 import { callMcpTool, connectorBearer } from './connectors.ts'
+import { generateStillImage, examineMediaBytes } from './studioMedia.ts'
 import { commitRepoFiles, fetchRepoSnapshot } from './github.ts'
 import { createSandboxDir, isGitPushCommand, removeSandboxDir, runSandboxed } from './sandbox.ts'
 import { redactSecrets } from '../shared/secretsGuard.ts'
+import { resolveToolName } from '../shared/typoIntent.ts'
 
 type ReadyFn = (c: { req: { raw: Request } }) => Promise<{
   session: { user: { id: string } } | null
@@ -45,12 +48,15 @@ async function fetchPage(url: string) {
   if (!parsed) throw new Error('Only public https URLs can be fetched')
   const res = await fetch(parsed, {
     redirect: 'follow',
-    headers: { 'User-Agent': 'SoumtokStudio/1.0 (research fetch)', Accept: 'text/html,application/json,text/plain;q=0.9' },
+    headers: {
+      'User-Agent': 'SownStudio/1.0 (research fetch)',
+      Accept: 'text/html,application/json,image/svg+xml,text/plain;q=0.9,*/*;q=0.8',
+    },
     signal: AbortSignal.timeout(12_000),
   })
   const raw = (await res.text()).slice(0, 400_000)
   const type = res.headers.get('content-type') || ''
-  const text = type.includes('json') || type.includes('text/plain') ? raw : htmlToText(raw)
+  const text = isRawFetchBody(type, parsed.toString(), raw) ? raw : htmlToText(raw)
   const title = raw.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1]?.trim() || parsed.hostname
   return { url: parsed.toString(), title, text: text.slice(0, 24_000), status: res.status, ok: res.ok }
 }
@@ -101,7 +107,13 @@ export function sanitizeToolFiles(files: Record<string, string> | undefined) {
 }
 
 export async function fetchStudioPages(input: { url?: string; query?: string; urls?: string[] }) {
-  const urls = [...(input.urls || []), ...(input.url ? [input.url] : []), ...extractUrls(input.query || '')]
+  const query = input.query || ''
+  const urls = [
+    ...(input.urls || []),
+    ...(input.url ? [input.url] : []),
+    ...extractUrls(query),
+    ...(wantsBrandAsset(query) ? brandLogoFetchUrls(query) : []),
+  ]
     .map((item) => item.trim())
     .filter(Boolean)
   const pages = []
@@ -118,9 +130,13 @@ export async function fetchStudioPages(input: { url?: string; query?: string; ur
       })
     }
   }
-  if (pages.length === 0 && input.query && !extractUrls(input.query).length) {
+  const hasSvg = pages.some((page) => page.ok !== false && /<svg[\s>]/i.test(page.text || ''))
+  const shouldWiki = wantsBrandAsset(query)
+    ? !hasSvg
+    : pages.length === 0 && query && !extractUrls(query).length
+  if (shouldWiki) {
     try {
-      pages.push(...(await wikiLookup(input.query)))
+      pages.push(...(await wikiLookup(query)))
     } catch {
       /* no encyclopedia hit is fine */
     }
@@ -134,15 +150,28 @@ export async function executeStudioTool(
   files: Record<string, string>,
   ctx: { repo?: string; sandboxDir?: string } = {},
 ): Promise<ToolOutcome> {
-  const name = tool.name
+  const name = resolveToolName(tool.name)
   const args = tool.args || {}
-  if (name === 'read' || name === 'grep' || name === 'write') return runLocalTool(tool, files)
+  const toolResolved = name === tool.name ? tool : { ...tool, name }
+  if (
+    (name === 'read' || name === 'grep' || name === 'write' || isEditTool(name)) &&
+    name !== 'generate_image'
+  ) {
+    return runLocalTool(toolResolved, files)
+  }
   if (name === 'fetch') {
     const pages = await fetchStudioPages({ url: args.url, query: args.query || args.q, urls: extractUrls(`${args.url || ''} ${args.query || ''}`) })
     return {
       name,
       ok: pages.some((page) => page.ok !== false),
-      text: pages.map((page) => `${page.title}\n${page.url}\n${redactSecrets(page.text).slice(0, 4000)}`).join('\n\n') || 'No pages',
+      text:
+        pages
+          .map((page) => {
+            const body = redactSecrets(page.text)
+            const limit = /<svg[\s>]/i.test(body) ? 12_000 : 4_000
+            return `${page.title}\n${page.url}\n${body.slice(0, limit)}`
+          })
+          .join('\n\n') || 'No pages',
     }
   }
   if (name === 'github') {
@@ -186,6 +215,40 @@ export async function executeStudioTool(
       auth,
     )
     return { name, ok: true, text: JSON.stringify(data ?? {}).slice(0, 8000) }
+  }
+  if (name === 'generate_image') {
+    const prompt = String(args.prompt || args.text || '').trim()
+    try {
+      const generated = await generateStillImage(prompt, args.model)
+      const rel = String(args.path || `assets/generated/${Date.now().toString(36)}.${generated.ext}`).replace(/^\/+/, '')
+      return {
+        name,
+        ok: true,
+        text: `Generated still image (${generated.model.id}, ${generated.bytes.length} bytes). Save as ${rel} on Desktop. Web Studio cannot write binary into the sandbox — open Desktop or download from the image tool result.`,
+      }
+    } catch (error) {
+      return { name, ok: false, text: error instanceof Error ? error.message : 'Image generation failed' }
+    }
+  }
+  if (name === 'examine_media') {
+    const raw = String(args.base64 || args.data || '').replace(/^data:[^;]+;base64,/, '')
+    if (!raw) {
+      return {
+        name,
+        ok: false,
+        text: 'examine_media on web Studio needs base64 bytes. On Desktop, pass a workspace path.',
+      }
+    }
+    try {
+      const out = await examineMediaBytes({
+        mime: args.mime || 'image/jpeg',
+        base64: raw,
+        prompt: args.prompt,
+      })
+      return { name, ok: true, text: `${out.model}\n\n${out.analysis}` }
+    } catch (error) {
+      return { name, ok: false, text: error instanceof Error ? error.message : 'Examine failed' }
+    }
   }
   return { name, ok: false, text: `Unknown tool ${name}` }
 }
@@ -297,7 +360,7 @@ export function registerStudioTools(app: Hono, requireReadyUser: ReadyFn) {
         session.user.id,
       ]),
       pool.query(`SELECT name, skills, mcps FROM user_plugins WHERE user_id = $1 AND enabled IS DISTINCT FROM false`, [session.user.id]),
-      pool.query(`SELECT id, name, connected, last_check FROM user_connectors WHERE user_id = $1`, [session.user.id]),
+      pool.query(`SELECT id, name, connected, mcp_url, last_check FROM user_connectors WHERE user_id = $1`, [session.user.id]),
       pool.query(`SELECT id, title, folder, left(content, 280) AS snippet FROM documents WHERE user_id = $1 ORDER BY updated_at DESC LIMIT 20`, [
         session.user.id,
       ]),
@@ -311,6 +374,7 @@ export function registerStudioTools(app: Hono, requireReadyUser: ReadyFn) {
           id: row.id,
           name: row.name,
           connected: row.connected,
+          mcpUrl: row.mcp_url,
           tools: check.mcp?.tools || [],
         }
       }),
