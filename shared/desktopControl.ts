@@ -1,6 +1,7 @@
 import {
   buildDesktopReleaseManifest,
   DEFAULT_RELEASES_BASE_URL,
+  desktopDownloadUrl,
   type DesktopRelease,
   type DesktopReleaseManifest,
 } from './desktopReleases.ts'
@@ -91,15 +92,15 @@ export function buildManifestFromControl(control: DesktopControlFile): DesktopRe
       releaseNotesUrl: spec.releaseNotesUrl || '/docs/changelog',
       windows: (spec.windows || []).map((item) => ({
         ...item,
-        url: fileUrl(normalizedBase, item.filename),
+        url: item.available ? desktopDownloadUrl(item.filename) : fileUrl(normalizedBase, item.filename),
       })),
       macos: (spec.macos || []).map((item) => ({
         ...item,
-        url: fileUrl(normalizedBase, item.filename),
+        url: item.available ? desktopDownloadUrl(item.filename) : fileUrl(normalizedBase, item.filename),
       })),
       linux: (spec.linux || []).map((item) => ({
         ...item,
-        url: fileUrl(normalizedBase, item.filename),
+        url: item.available ? desktopDownloadUrl(item.filename) : fileUrl(normalizedBase, item.filename),
       })),
     }))
     if (!releases.some((item) => item.latest) && releases[0]) releases[0].latest = true

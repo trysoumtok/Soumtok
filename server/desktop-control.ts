@@ -110,11 +110,10 @@ export function registerDesktopControl(app: Hono) {
           },
         })
       } catch {
-        /* CDN fallback */
+        /* not on Bunny */
       }
     }
 
-    const control = readControlFile()
-    return c.redirect(`${control.releasesBaseUrl.replace(/\/?$/, '/')}${filename}`, 302)
+    return c.json({ error: 'Installer not found. Try again in a minute or contact support@soumtok.com.' }, 404)
   })
 }

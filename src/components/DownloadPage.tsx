@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
   detectDesktopPlatform,
+  desktopDownloadUrl,
   primaryDownloadForPlatform,
   primaryDownloadLabel,
   type DesktopDownloadItem,
@@ -91,7 +92,8 @@ function DownloadButton({
   }
   return (
     <a
-      href={item.url}
+      href={desktopDownloadUrl(item.filename)}
+      download={item.filename}
       className={`inline-flex items-center justify-center gap-2 rounded-full bg-white font-medium text-black no-underline transition hover:bg-[#f2f2f0] ${
         compact ? 'px-5 py-2 text-[14px]' : 'px-6 py-3 text-[15px]'
       }`}
@@ -132,7 +134,8 @@ function BuildRow({ item, disabled }: { item: DesktopDownloadItem; disabled?: bo
       <span className="text-[13px] text-white/75">{item.label}</span>
       {item.available && !disabled ? (
         <a
-          href={item.url}
+          href={desktopDownloadUrl(item.filename)}
+          download={item.filename}
           className="inline-flex items-center gap-1.5 text-[13px] text-white/55 no-underline transition hover:text-white"
         >
           Download
@@ -286,7 +289,7 @@ export function DownloadPage() {
 
           <div className="mt-10 flex flex-wrap items-center justify-center gap-4">
             {primary?.available && !disabled ? (
-              <PillButton href={primary.url} size="lg">
+              <PillButton href={desktopDownloadUrl(primary.filename)} size="lg">
                 <PlatformIcon platform={platform === 'unknown' ? 'windows' : platform} />
                 {primaryLabel}
               </PillButton>
@@ -300,7 +303,7 @@ export function DownloadPage() {
               </PillButton>
             )}
             {platform === 'windows' && winAlt && winAlt.available && !disabled && (
-              <PillButton href={winAlt.url} variant="outline" size="lg">
+              <PillButton href={desktopDownloadUrl(winAlt.filename)} variant="outline" size="lg">
                 <PlatformIcon platform="windows" />
                 {winAlt.label.includes('ARM') ? 'Windows (ARM64)' : winAlt.label}
               </PillButton>
@@ -373,6 +376,22 @@ export function DownloadPage() {
           <p className="mt-3 text-[16px] text-white/45 sm:text-[17px]">
             Every platform and architecture for each release.
           </p>
+
+          <div className="mt-6 rounded-2xl border border-white/[0.08] bg-[#111110] px-5 py-5 text-[14px] leading-7 text-white/55 sm:px-6 sm:text-[15px]">
+            <p className="font-medium text-white/80">Which Windows installer?</p>
+            <p className="mt-2">
+              <strong className="font-medium text-white/70">User</strong> — installs for you only (no admin password).
+              Best for most people on a work or personal PC.
+            </p>
+            <p className="mt-2">
+              <strong className="font-medium text-white/70">System</strong> — installs for all users on the machine
+              (needs administrator approval). Use on a shared or IT-managed computer.
+            </p>
+            <p className="mt-2">
+              <strong className="font-medium text-white/70">Portable (.zip)</strong> — unzip and run; nothing is
+              installed. Good for testing or a USB stick.
+            </p>
+          </div>
 
           <div className="mt-8 space-y-4">
             {(manifest?.releases || []).map((release) => (

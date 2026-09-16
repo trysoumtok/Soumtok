@@ -97,12 +97,16 @@ export function PillButton({
   onClick,
   href,
   type = 'button',
+  size = 'md',
+  className = '',
 }: {
   children: ReactNode
   variant?: 'solid' | 'ghost' | 'outline'
   onClick?: () => void
   href?: string
   type?: 'button' | 'submit'
+  size?: 'md' | 'lg'
+  className?: string
 }) {
   const cls =
     variant === 'solid'
@@ -111,12 +115,15 @@ export function PillButton({
         ? 'border border-white/20 text-white hover:bg-white/5'
         : 'text-white/80 hover:text-white'
 
+  const sizeCls = size === 'lg' ? 'px-8 py-3.5 text-[16px]' : 'px-5 py-[11px] text-[14px]'
+
   const shared =
-    `inline-flex items-center justify-center gap-2 rounded-full px-5 py-[11px] text-[14px] font-medium no-underline transition ${cls}`
+    `inline-flex items-center justify-center gap-2 rounded-full font-medium no-underline transition ${sizeCls} ${cls} ${className}`.trim()
 
   if (href) {
+    const downloadName = href.includes('/api/desktop/download/') ? decodeURIComponent(href.split('/').pop() || '') : undefined
     return (
-      <a className={shared} href={href}>
+      <a className={shared} href={href} {...(downloadName ? { download: downloadName } : {})}>
         {children}
       </a>
     )

@@ -27,6 +27,11 @@ export type DesktopReleaseManifest = {
 
 export const DEFAULT_RELEASES_BASE_URL = 'https://releases.soumtok.com/desktop/'
 
+/** Same-origin download — never send users to releases.soumtok.com. */
+export function desktopDownloadUrl(filename: string) {
+  return `/api/desktop/download/${encodeURIComponent(filename)}`
+}
+
 function fileUrl(baseUrl: string, filename: string) {
   const base = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`
   return `${base}${filename}`
@@ -40,13 +45,16 @@ export function buildDesktopReleaseManifest(
   const catalog = desktopReleaseCatalog(version)
   const normalizedBase = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`
   const mapItems = (items: ReturnType<typeof desktopReleaseCatalog>['windows']) =>
-    items.map((item) => ({
-      id: item.id,
-      label: item.label,
-      filename: item.filename,
-      url: fileUrl(normalizedBase, item.filename),
-      available: availableIds.has(item.id),
-    }))
+    items.map((item) => {
+      const available = availableIds.has(item.id)
+      return {
+        id: item.id,
+        label: item.label,
+        filename: item.filename,
+        url: available ? desktopDownloadUrl(item.filename) : fileUrl(normalizedBase, item.filename),
+        available,
+      }
+    })
 
   return {
     version,
