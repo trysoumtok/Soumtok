@@ -22,6 +22,8 @@ for (const line of text.split(/\r?\n/)) {
 }
 
 vars.BETTER_AUTH_URL = 'https://soumtok.com'
+// Production billing: enforce trial caps and model limits.
+vars.SOUMTOK_OPEN_ACCESS = '0'
 
 const skip = new Set([
   'RAILWAY_TOKEN',

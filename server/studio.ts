@@ -88,6 +88,8 @@ import { consumeCode, issueCode } from './verify.ts'
 import { registerChrome } from './chrome.ts'
 import { registerStudioTools, runStudioTools, sanitizeToolFiles } from './studioTools.ts'
 import { flagDeletedEmail, normalizeEmail } from './blocked-emails.ts'
+import { imageChargeTokens, imageChargeUsd } from '../shared/imageBilling.ts'
+import { assertPlatformTokenBudget, recordImageUsage } from './imageUsage.ts'
 
 type ReadyFn = (c: { req: { raw: Request } }) => Promise<{
   session: { user: { id: string; email?: string | null; name?: string | null } } | null
@@ -863,6 +865,8 @@ export function registerStudio(
       images: IMAGE_MODELS.map((model) => ({
         ...model,
         ready: model.provider === 'replicate' ? hasReplicate() : model.provider === 'fal' ? hasFal() : false,
+        chargeTokens: imageChargeTokens(model.id),
+        chargeUsd: imageChargeUsd(model.id),
       })),
       image: { ...IMAGE_MODEL, ready: hasImageGen() },
       providers: KEY_PROVIDERS.filter((item) => SOUMTOK_CODING_PROVIDERS.includes(item.id)).map((item) => ({
@@ -1607,13 +1611,42 @@ export function registerStudio(
       agent?: boolean
       files?: Record<string, string>
       repo?: string
+      mode?: DesktopAgentMode
+      agentPrefs?: Record<string, unknown>
+      workspaceRoot?: string
+      openFiles?: string[]
     }>()
     const access = await resolveRun(session.user.id, payload)
     if (!access.ok) return c.json({ error: access.error, keys: access.keys }, access.status)
-    const { provider, requestModel, apiKey, billedTo, messages, temperature, maxTokens, catalogModel } = access
+    let { provider, requestModel, apiKey, billedTo, messages, temperature, maxTokens, catalogModel } = access
 
     const started = Date.now()
     const body = payload
+
+    if (body.agent) {
+      const agentPrefs = applyRunModeToPrefs(mergeDesktopAgentPrefs(body.agentPrefs))
+      const prep = prepareDesktopAgentTurn({
+        messages: body.messages,
+        workspaceRoot: body.workspaceRoot || body.repo || 'studio-sandbox',
+        openFiles: openFilesForAgent(body.openFiles, agentPrefs),
+        mode: body.mode || 'agent',
+        agentPrefs,
+        model: catalogModel || requestModel,
+      })
+      const work = messages.map((item) => ({ ...item }))
+      const sysIdx = work.findIndex((item) => item.role === 'system')
+      if (sysIdx >= 0) work[sysIdx] = { ...work[sysIdx], content: prep.systemPrompt }
+      else work.unshift({ role: 'system', content: prep.systemPrompt })
+      for (let i = work.length - 1; i >= 0; i--) {
+        if (work[i].role === 'user') {
+          work[i] = { ...work[i], content: prep.userText }
+          break
+        }
+      }
+      messages = compactConversation(work)
+      temperature = prep.temperature
+      maxTokens = prep.maxTokens
+    }
 
     const userId = session.user.id
     const stream = new ReadableStream<Uint8Array>({
@@ -1629,7 +1662,7 @@ export function registerStudio(
         const startStamp = filesStamp(files)
         const work = messages.map((item) => ({ ...item }))
         const sandboxDir = body.agent ? await createSandboxDir() : undefined
-        const maxRounds = body.agent ? 8 : 1
+        const maxRounds = body.agent ? 12 : 1
         let failed = ''
         try {
           for (let round = 0; round < maxRounds; round++) {
@@ -1792,6 +1825,13 @@ export function registerStudio(
     const body = await c.req.json<{ prompt?: string; model?: string; aspect?: string }>()
     const prompt = body.prompt?.trim() ?? ''
     const started = Date.now()
+    const modelId = body.model?.trim() || IMAGE_MODEL.id
+    const chargeTokens = imageChargeTokens(modelId)
+    const profile = await pool.query(`SELECT plan FROM profiles WHERE user_id = $1`, [session.user.id])
+    const planId = String(profile.rows[0]?.plan || 'hobby')
+    const budget = await assertPlatformTokenBudget(pool, session.user.id, planId, chargeTokens)
+    if (!budget.ok) return c.json({ error: budget.error }, budget.status)
+
     let generated
     try {
       generated = await generateStillImage(prompt, body.model, body.aspect)
@@ -1812,14 +1852,13 @@ export function registerStudio(
       url = `/api/studio/images/${id}.${generated.ext}`
     }
 
-    await pool.query(
-      `INSERT INTO usage_events (id, user_id, provider, model, prompt_tokens, completion_tokens, billed_to)
-       VALUES ($1, $2, $3, $4, 0, 1, 'platform')`,
-      [crypto.randomUUID(), session.user.id, generated.model.provider, generated.model.id],
-    )
+    const billed = await recordImageUsage(pool, session.user.id, generated.model.id, generated.model.provider)
     await track(session.user.id, 'studio_image', '/dashboard/studio', {
       model: generated.model.id,
       ms: Date.now() - started,
+      tokens: billed.tokens,
+      chargeUsd: billed.chargeUsd,
+      vendorUsd: billed.vendorUsd,
     })
 
     const payload: Record<string, unknown> = {
@@ -1830,6 +1869,9 @@ export function registerStudio(
       model: generated.model.id,
       aspect: generated.aspect,
       billedTo: 'platform',
+      tokens: billed.tokens,
+      chargeUsd: billed.chargeUsd,
+      vendorUsd: billed.vendorUsd,
     }
     // Do not stuff a full JPEG as base64 into JSON when a URL exists — Cloudflare
     // truncates that payload and Desktop then reports "No image bytes returned".

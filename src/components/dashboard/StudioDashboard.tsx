@@ -44,6 +44,7 @@ import {
   wantsBrandAsset,
 } from '../../../shared/brandLogo'
 import { readStoredAgentDriver, soumtokBotStudioContext, writeStoredAgentDriver, type AgentDriver } from '../../../shared/soumtokBot'
+import { DEFAULT_DESKTOP_AGENT_PREFS } from '../../../shared/desktopAgentPrefs'
 import { analyzeUserRequest, formatAnalyzedRequest, repairUserText } from '../../../shared/requestAnalyze'
 import {
   defaultWorkbenchTab,
@@ -2011,6 +2012,10 @@ function StudioChat({
           agent: planUsesCodingAgent(plan),
           files: roundBase.files,
           repo: project?.fullName,
+          mode: plan.mode === 'ask' ? 'ask' : plan.mode === 'plan' ? 'plan' : 'agent',
+          agentPrefs: DEFAULT_DESKTOP_AGENT_PREFS,
+          workspaceRoot: project?.fullName || project?.name || 'studio-sandbox',
+          openFiles: visibleWorkPaths(liveFiles.length ? liveFiles : Object.keys(roundBase.files)),
           onRound: (text) => {
             lastParsed = parseAgentRun(text || '', plan)
             merged = mergeWorkspace(roundBase, lastParsed)

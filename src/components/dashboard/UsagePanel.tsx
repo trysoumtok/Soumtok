@@ -3,6 +3,7 @@ import { fetchAnalytics } from '../../lib/api'
 import { useSession } from '../../lib/auth-client'
 import { navigate, openTab } from '../../lib/nav'
 import { buildUsageCsv, usageCsvFilename, type UsageCsvRow, type UsageCsvUsage } from '../../lib/usage-csv'
+import { usageRowCostUsd, usageRowKind } from '../../../shared/imageBilling.ts'
 
 type Preset = '1d' | '7d' | '30d' | 'mtd' | 'last' | 'custom'
 type SeriesPoint = { day: string; model: string; tokens: number }
@@ -525,6 +526,14 @@ export function UsagePanel() {
               )}
               {rows.map((row) => {
                 const includedRow = row.billed_to !== 'user'
+                const kind = usageRowKind(row.model, row.prompt_tokens || 0, row.completion_tokens || 0)
+                const costUsd = usageRowCostUsd(
+                  row.model,
+                  row.tokens || 0,
+                  row.billed_to || 'platform',
+                  row.prompt_tokens || 0,
+                  row.completion_tokens || 0,
+                )
                 return (
                   <tr key={row.id} className="border-b border-white/[0.06]">
                     <td className="py-3 text-white/80">
@@ -536,11 +545,17 @@ export function UsagePanel() {
                         timeZone: 'UTC',
                       })}
                     </td>
-                    <td className="py-3 text-white/70">{includedRow ? 'Included' : 'On-Demand'}</td>
+                    <td className="py-3 text-white/70">
+                      {kind === 'image' ? 'Image' : includedRow ? 'Included' : 'On-Demand'}
+                    </td>
                     <td className="py-3 text-white/80">{row.model}</td>
                     <td className="py-3 text-right text-white/70">{formatTokens(row.tokens || 0)}</td>
                     <td className="py-3 text-right text-white/70">
-                      {includedRow ? 'Included' : `$${((row.tokens || 0) / 1_000_000 * ON_DEMAND_PER_M).toFixed(2)}`}
+                      {includedRow
+                        ? kind === 'image'
+                          ? `$${costUsd.toFixed(2)}`
+                          : 'Included'
+                        : `$${costUsd.toFixed(2)}`}
                     </td>
                   </tr>
                 )

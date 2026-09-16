@@ -14,7 +14,9 @@ import {
   hasPaypal,
   hasSmtp,
   hasTwilio,
+  canonicalAuthHost,
   isAllowedOrigin,
+  isProductionHost,
   oauthRedirectUris,
   openAccessForBuilding,
 } from './env.ts'
@@ -40,6 +42,18 @@ import { hashSecret } from './secrets.ts'
 import { BLOCKED_EMAIL_MESSAGE, isBlockedEmail } from './blocked-emails.ts'
 
 export const app = new Hono()
+
+/** Keep OAuth state cookies on one host (apex, not www). */
+app.use('*', async (c, next) => {
+  const host = (c.req.header('x-forwarded-host') || c.req.header('host') || '').split(',')[0]?.trim().toLowerCase()
+  if (host.startsWith('www.') && isProductionHost(host.slice(4))) {
+    const url = new URL(c.req.url)
+    url.hostname = canonicalAuthHost()
+    return c.redirect(url.toString(), 301)
+  }
+  await next()
+})
+
 registerSeo(app)
 registerDesktopControl(app)
 registerGithubSetup(app)
@@ -505,7 +519,12 @@ app.post('/api/me/verify/email/send', async (c) => {
 
   const code = await issueCode(session.user.id, 'email', session.user.email)
   const mail = verificationEmail(code)
-  await sendMail(session.user.email, mail.subject, mail.text, mail.html)
+  try {
+    await sendMail(session.user.email, mail.subject, mail.text, mail.html)
+  } catch (error) {
+    console.error('[verify/email/send]', error)
+    return c.json({ error: 'Could not send the email code right now. Try again in a minute.' }, 502)
+  }
   return c.json({ ok: true, via: hasSmtp() ? 'email' : 'log' })
 })
 

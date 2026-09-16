@@ -62,6 +62,30 @@ export default function App() {
   const openDownload = () => navigate('/download')
 
   useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const authError = params.get('error')
+    if (
+      authError === 'state_mismatch' ||
+      authError === 'state_security_mismatch' ||
+      authError === 'state_invalid' ||
+      authError === 'invalid_callback' ||
+      authError === 'access_denied'
+    ) {
+      sessionStorage.setItem(
+        'soumtok-auth-error',
+        authError === 'access_denied'
+          ? 'Sign-in was cancelled. Try again when you are ready.'
+          : 'Sign-in expired or opened in a different tab. Please try again on soumtok.com (not www).',
+      )
+      params.delete('error')
+      const rest = params.toString()
+      const nextPath = window.location.pathname === '/' ? '/login' : window.location.pathname
+      window.history.replaceState(null, '', rest ? `${nextPath}?${rest}` : nextPath)
+      if (window.location.pathname === '/') navigate('/login')
+    }
+  }, [])
+
+  useEffect(() => {
     if (isPending) return
     if (!session) {
       setProfile(null)

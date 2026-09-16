@@ -5,7 +5,15 @@ import { organization } from 'better-auth/plugins/organization'
 import { twoFactor } from 'better-auth/plugins/two-factor'
 import { inviteEmail, magicLinkEmail, sendMail, verifyLinkEmail, welcomeEmail } from './mail.ts'
 import { SESSION_MAX_SECONDS } from '../shared/session.ts'
-import { env, hasDatabase, hasGithub, hasGoogle, trustedOrigins } from './env.ts'
+import {
+  authBaseURLConfig,
+  authCrossSubDomainCookies,
+  env,
+  hasDatabase,
+  hasGithub,
+  hasGoogle,
+  trustedOrigins,
+} from './env.ts'
 import { BLOCKED_EMAIL_MESSAGE, isBlockedEmail } from './blocked-emails.ts'
 import { pool } from './db.ts'
 
@@ -25,12 +33,19 @@ function createAuth() {
     throw new Error('BETTER_AUTH_SECRET must be at least 32 characters')
   }
 
+  const crossSubDomainCookies = authCrossSubDomainCookies()
+
   return betterAuth({
     appName: 'Soumtok',
-    baseURL: env.betterAuthUrl,
+    baseURL: authBaseURLConfig(),
     secret: env.betterAuthSecret,
     database: pool,
     trustedOrigins,
+    advanced: {
+      trustedProxyHeaders: true,
+      cookiePrefix: 'soumtok',
+      ...(crossSubDomainCookies ? { crossSubDomainCookies } : {}),
+    },
     account: {
       accountLinking: {
         enabled: true,

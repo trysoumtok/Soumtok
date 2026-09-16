@@ -79,6 +79,11 @@ export function LoginPage({ mode, force2fa }: { mode: 'in' | 'up'; force2fa?: bo
     try {
       const desktop = new URLSearchParams(window.location.search).get('desktop')
       if (desktop) sessionStorage.setItem('soumtok-desktop', desktop)
+      const stored = sessionStorage.getItem('soumtok-auth-error')
+      if (stored) {
+        setError(stored)
+        sessionStorage.removeItem('soumtok-auth-error')
+      }
     } catch {
       /* private mode */
     }
@@ -131,19 +136,10 @@ export function LoginPage({ mode, force2fa }: { mode: 'in' | 'up'; force2fa?: bo
     setError('')
     setBusy('google')
     try {
-      const result = await Promise.race([
-        signIn.social({
-          provider: 'google',
-          callbackURL: postLoginPath(),
-        }),
-        new Promise<{ error: { message: string } }>((resolve) =>
-          setTimeout(() => resolve({ error: { message: 'Google took too long. Try email or a magic link.' } }), 10000),
-        ),
-      ])
-      if (result.error) {
-        setError(result.error.message || 'Google sign-in failed')
-        setBusy('idle')
-      }
+      await signIn.social({
+        provider: 'google',
+        callbackURL: postLoginPath(),
+      })
     } catch {
       setError('Google sign-in failed. Try email or a magic link.')
       setBusy('idle')
@@ -198,7 +194,7 @@ export function LoginPage({ mode, force2fa }: { mode: 'in' | 'up'; force2fa?: bo
       return
     }
 
-    navigate('/dashboard')
+    navigate(postLoginPath())
   }
 
   async function onPasskey() {
@@ -210,7 +206,7 @@ export function LoginPage({ mode, force2fa }: { mode: 'in' | 'up'; force2fa?: bo
       setError(result.error.message || 'Passkey sign-in failed')
       return
     }
-    navigate('/dashboard')
+    navigate(postLoginPath())
   }
 
   async function onTwoFactor(event: FormEvent) {
@@ -224,7 +220,7 @@ export function LoginPage({ mode, force2fa }: { mode: 'in' | 'up'; force2fa?: bo
     setBusy('2fa')
     try {
       await confirmTwoFactor(code)
-      window.location.assign('/dashboard')
+      window.location.assign(postLoginPath())
     } catch (err) {
       setError(err instanceof Error ? err.message : 'That code is not valid')
     }

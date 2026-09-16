@@ -3,6 +3,8 @@ import { join } from 'node:path'
 import nodemailer from 'nodemailer'
 import { env, hasSmtp } from './env.ts'
 
+const MAIL_TIMEOUT_MS = 20_000
+
 function transport() {
   return nodemailer.createTransport({
     host: env.smtpHost,
@@ -12,6 +14,9 @@ function transport() {
       user: env.smtpUser,
       pass: env.smtpPass,
     },
+    connectionTimeout: 10_000,
+    greetingTimeout: 10_000,
+    socketTimeout: MAIL_TIMEOUT_MS,
   })
 }
 
@@ -160,7 +165,7 @@ export async function sendMail(
     return
   }
 
-  await transport().sendMail({
+  const send = transport().sendMail({
     from: env.smtpFrom,
     to,
     replyTo,
@@ -169,6 +174,13 @@ export async function sendMail(
     html,
     attachments: html ? logoAttachment() : [],
   })
+
+  await Promise.race([
+    send,
+    new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error('SMTP timed out')), MAIL_TIMEOUT_MS)
+    }),
+  ])
 }
 
 function escapeHtml(value: string) {

@@ -5,6 +5,9 @@ import { formatToolResults, isEditTool, runLocalTool, type StudioTool, type Tool
 import { pool } from './db.ts'
 import { callMcpTool, connectorBearer } from './connectors.ts'
 import { generateStillImage, examineMediaBytes } from './studioMedia.ts'
+import { imageChargeTokens } from '../shared/imageBilling.ts'
+import { IMAGE_MODEL } from '../shared/models.ts'
+import { assertPlatformTokenBudget, recordImageUsage } from './imageUsage.ts'
 import { commitRepoFiles, fetchRepoSnapshot } from './github.ts'
 import { createSandboxDir, isGitPushCommand, removeSandboxDir, runSandboxed } from './sandbox.ts'
 import { redactSecrets } from '../shared/secretsGuard.ts'
@@ -219,12 +222,27 @@ export async function executeStudioTool(
   if (name === 'generate_image') {
     const prompt = String(args.prompt || args.text || '').trim()
     try {
+      const modelId = String(args.model || '').trim() || IMAGE_MODEL.id
+      const chargeTokens = imageChargeTokens(modelId)
+      if (pool) {
+        const profile = await pool.query(`SELECT plan FROM profiles WHERE user_id = $1`, [userId])
+        const planId = String(profile.rows[0]?.plan || 'hobby')
+        const budget = await assertPlatformTokenBudget(pool, userId, planId, chargeTokens)
+        if (!budget.ok) {
+          return { name, ok: false, text: budget.error }
+        }
+      }
       const generated = await generateStillImage(prompt, args.model)
       const rel = String(args.path || `assets/generated/${Date.now().toString(36)}.${generated.ext}`).replace(/^\/+/, '')
+      let billing = ''
+      if (pool) {
+        const billed = await recordImageUsage(pool, userId, generated.model.id, generated.model.provider)
+        billing = ` Billed ${billed.tokens.toLocaleString()} tokens (~$${billed.chargeUsd.toFixed(2)} incl. platform fee).`
+      }
       return {
         name,
         ok: true,
-        text: `Generated still image (${generated.model.id}, ${generated.bytes.length} bytes). Save as ${rel} on Desktop. Web Studio cannot write binary into the sandbox — open Desktop or download from the image tool result.`,
+        text: `Generated still image (${generated.model.id}, ${generated.bytes.length} bytes). Save as ${rel} on Desktop.${billing}`,
       }
     } catch (error) {
       return { name, ok: false, text: error instanceof Error ? error.message : 'Image generation failed' }

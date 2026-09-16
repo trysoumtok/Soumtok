@@ -70,6 +70,49 @@ export function isAllowedOrigin(origin: string) {
   }
 }
 
+export function isProductionHost(hostname: string) {
+  return hostname === 'soumtok.com' || hostname === 'www.soumtok.com'
+}
+
+/** Canonical public site host — OAuth cookies and redirects must stay on one origin. */
+export function canonicalAuthHost() {
+  try {
+    const hostname = new URL(env.betterAuthUrl).hostname
+    if (isProductionHost(hostname)) return 'soumtok.com'
+    return hostname
+  } catch {
+    return 'localhost'
+  }
+}
+
+export function authBaseURLConfig():
+  | string
+  | { allowedHosts: string[]; fallback: string; protocol?: 'http' | 'https' } {
+  try {
+    const hostname = new URL(env.betterAuthUrl).hostname
+    if (isLocalHost(hostname)) return env.betterAuthUrl
+    return {
+      allowedHosts: ['soumtok.com', 'www.soumtok.com', 'localhost', '127.0.0.1'],
+      fallback: env.betterAuthUrl.replace('www.soumtok.com', 'soumtok.com'),
+      protocol: 'https',
+    }
+  } catch {
+    return env.betterAuthUrl
+  }
+}
+
+export function authCrossSubDomainCookies() {
+  try {
+    const hostname = new URL(env.betterAuthUrl).hostname
+    if (isProductionHost(hostname)) {
+      return { enabled: true as const, domain: 'soumtok.com' }
+    }
+  } catch {
+    /* ignore */
+  }
+  return undefined
+}
+
 export const trustedOrigins = [
   env.betterAuthUrl,
   'http://localhost:*',

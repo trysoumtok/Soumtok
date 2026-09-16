@@ -119,10 +119,25 @@ export function isOnboardingComplete(profile: Profile | null | undefined) {
 }
 
 export async function sendEmailCode() {
-  const res = await fetch('/api/me/verify/email/send', { method: 'POST', credentials: 'include' })
-  const data = (await res.json()) as { ok?: boolean; already?: boolean; via?: string; error?: string }
-  if (!res.ok) throw new Error(data.error || 'Could not send email code')
-  return data
+  const controller = new AbortController()
+  const timer = window.setTimeout(() => controller.abort(), 25_000)
+  try {
+    const res = await fetch('/api/me/verify/email/send', {
+      method: 'POST',
+      credentials: 'include',
+      signal: controller.signal,
+    })
+    const data = (await res.json()) as { ok?: boolean; already?: boolean; via?: string; error?: string }
+    if (!res.ok) throw new Error(data.error || 'Could not send email code')
+    return data
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw new Error('Sending timed out. Try again in a minute.')
+    }
+    throw error
+  } finally {
+    window.clearTimeout(timer)
+  }
 }
 
 export async function confirmEmailCode(code: string) {
@@ -396,6 +411,40 @@ export async function updatePassword(body: { currentPassword?: string; newPasswo
   })
   const data = (await res.json()) as { error?: string }
   if (!res.ok) throw new Error(data.error || 'Could not update password')
+}
+
+export type TestHubDeployRow = {
+  id: string
+  token: string
+  slug: string | null
+  title: string
+  path: string
+  url: string
+  file_count: number
+  project_id?: string | null
+  project_title?: string | null
+  expires_at: string
+  created_at: string
+  expired: boolean
+  live?: boolean
+}
+
+export async function fetchTestHubDeploys(limit = 30, projectId?: string) {
+  const project = projectId ? `&project=${encodeURIComponent(projectId)}` : ''
+  const res = await fetch(`/api/test-hub/deploys?limit=${limit}${project}`, { credentials: 'include' })
+  const data = (await res.json()) as { rows?: TestHubDeployRow[]; error?: string }
+  if (!res.ok) throw new Error(data.error || 'Could not load share links')
+  return data
+}
+
+export async function deleteTestHubDeploy(id: string) {
+  const res = await fetch(`/api/test-hub/deploys/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    credentials: 'include',
+  })
+  const data = (await res.json()) as { error?: string }
+  if (!res.ok) throw new Error(data.error || 'Could not delete share link')
+  return data
 }
 
 export async function fetchSessions() {
@@ -1151,6 +1200,10 @@ export async function streamStudio(
     agent?: boolean
     files?: Record<string, string>
     repo?: string
+    mode?: string
+    agentPrefs?: Record<string, unknown>
+    workspaceRoot?: string
+    openFiles?: string[]
     onRound?: (text: string) => void
     onResult?: (result: { name: string; ok: boolean; text: string; files?: Record<string, string>; command?: string }) => void
     onTools?: (tools: { name: string; args: Record<string, string> }[]) => void
@@ -1169,6 +1222,10 @@ export async function streamStudio(
       agent: opts?.agent,
       files: opts?.files,
       repo: opts?.repo,
+      mode: opts?.mode,
+      agentPrefs: opts?.agentPrefs,
+      workspaceRoot: opts?.workspaceRoot,
+      openFiles: opts?.openFiles,
     }),
     signal,
   })
