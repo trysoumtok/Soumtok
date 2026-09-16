@@ -430,7 +430,7 @@ export function UsagePanel() {
         <button
           type="button"
           className="grid h-7 w-7 place-items-center rounded-full border border-white/15 text-[11px] text-white/40"
-          onClick={() => openTab('/docs/billing')}
+          onClick={() => openTab('/docs/pricing-usage')}
           aria-label="Usage help"
         >
           i
@@ -511,6 +511,7 @@ export function UsagePanel() {
               <tr className="border-b border-white/[0.06]">
                 <th className="py-3 font-normal">Date (UTC)</th>
                 <th className="py-3 font-normal">Type</th>
+                <th className="py-3 font-normal">Surface</th>
                 <th className="py-3 font-normal">Model</th>
                 <th className="py-3 text-right font-normal">Tokens</th>
                 <th className="py-3 text-right font-normal">Cost</th>
@@ -519,7 +520,7 @@ export function UsagePanel() {
             <tbody>
               {rows.length === 0 && (
                 <tr>
-                  <td colSpan={5} className="py-10 text-center text-white/35">
+                  <td colSpan={6} className="py-10 text-center text-white/35">
                     No data
                   </td>
                 </tr>
@@ -548,6 +549,7 @@ export function UsagePanel() {
                     <td className="py-3 text-white/70">
                       {kind === 'image' ? 'Image' : includedRow ? 'Included' : 'On-Demand'}
                     </td>
+                    <td className="py-3 text-white/70 capitalize">{row.source === 'desktop' ? 'Desktop' : 'Studio'}</td>
                     <td className="py-3 text-white/80">{row.model}</td>
                     <td className="py-3 text-right text-white/70">{formatTokens(row.tokens || 0)}</td>
                     <td className="py-3 text-right text-white/70">

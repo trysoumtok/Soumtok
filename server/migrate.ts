@@ -125,6 +125,8 @@ ALTER TABLE profiles ADD COLUMN IF NOT EXISTS theme TEXT NOT NULL DEFAULT 'syste
 ALTER TABLE profiles ADD COLUMN IF NOT EXISTS light_theme TEXT NOT NULL DEFAULT 'soumtok-light';
 ALTER TABLE profiles ADD COLUMN IF NOT EXISTS dark_theme TEXT NOT NULL DEFAULT 'soumtok-dark';
 ALTER TABLE profiles ADD COLUMN IF NOT EXISTS pr_provider TEXT NOT NULL DEFAULT 'github';
+ALTER TABLE usage_events ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'studio';
+CREATE INDEX IF NOT EXISTS usage_events_source_idx ON usage_events (user_id, source, created_at DESC);
 `
 
 const automationsSql = `

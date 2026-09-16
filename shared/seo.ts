@@ -123,7 +123,12 @@ const DOC_PAGES: { id: string; title: string; description: string }[] = [
   {
     id: 'billing',
     title: 'Billing',
-    description: 'Plans, usage, included tokens, and how billing works on Soumtok.'
+    description: 'Plans, usage, included tokens, and how billing works on Soumtok.',
+  },
+  {
+    id: 'pricing-usage',
+    title: 'Pricing & usage',
+    description: 'Unified Studio + Desktop metering, per-model tokens, image charges, and how Soumtok compares to Cursor.',
   },
   {
     id: 'settings',

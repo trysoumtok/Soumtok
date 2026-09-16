@@ -1226,6 +1226,7 @@ export function registerStudio(
         { provider, requestModel, billedTo },
         { promptTokens: ran.promptTokens, completionTokens: ran.completionTokens },
         started,
+        'desktop',
       )
       return c.json({
         text: ran.text,
@@ -1344,7 +1345,7 @@ export function registerStudio(
       [session.user.id, usageFrom, usageTo],
     )
     const rows = await pool.query(
-      `SELECT id, created_at, provider, model, billed_to,
+      `SELECT id, created_at, provider, model, billed_to, coalesce(source, 'studio') AS source,
               prompt_tokens::int AS prompt_tokens,
               completion_tokens::int AS completion_tokens,
               (prompt_tokens + completion_tokens)::int AS tokens
@@ -1506,10 +1507,11 @@ export function registerStudio(
     run: { provider: ModelProvider; requestModel: string; billedTo: 'user' | 'platform' },
     tokens: { promptTokens: number; completionTokens: number },
     started: number,
+    source: 'studio' | 'desktop' = 'studio',
   ) {
     await pool!.query(
-      `INSERT INTO usage_events (id, user_id, provider, model, prompt_tokens, completion_tokens, billed_to)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      `INSERT INTO usage_events (id, user_id, provider, model, prompt_tokens, completion_tokens, billed_to, source)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
       [
         crypto.randomUUID(),
         userId,
@@ -1518,9 +1520,10 @@ export function registerStudio(
         tokens.promptTokens,
         tokens.completionTokens,
         run.billedTo,
+        source,
       ],
     )
-    await track(userId, 'studio_complete', '/dashboard/studio', {
+    await track(userId, source === 'desktop' ? 'desktop_agent_round' : 'studio_complete', source === 'desktop' ? '/desktop' : '/dashboard/studio', {
       model: run.requestModel,
       provider: run.provider,
       billedTo: run.billedTo,
@@ -1822,7 +1825,8 @@ export function registerStudio(
     if (!session || !pool) return c.json({ error: 'Unauthorized' }, 401)
     if (!ready) return c.json({ error: 'Finish account setup first' }, 403)
 
-    const body = await c.req.json<{ prompt?: string; model?: string; aspect?: string }>()
+    const body = await c.req.json<{ prompt?: string; model?: string; aspect?: string; source?: string }>()
+    const usageSource = body.source === 'desktop' ? 'desktop' : 'studio'
     const prompt = body.prompt?.trim() ?? ''
     const started = Date.now()
     const modelId = body.model?.trim() || IMAGE_MODEL.id
@@ -1852,8 +1856,8 @@ export function registerStudio(
       url = `/api/studio/images/${id}.${generated.ext}`
     }
 
-    const billed = await recordImageUsage(pool, session.user.id, generated.model.id, generated.model.provider)
-    await track(session.user.id, 'studio_image', '/dashboard/studio', {
+    const billed = await recordImageUsage(pool, session.user.id, generated.model.id, generated.model.provider, usageSource)
+    await track(session.user.id, usageSource === 'desktop' ? 'desktop_image' : 'studio_image', usageSource === 'desktop' ? '/desktop' : '/dashboard/studio', {
       model: generated.model.id,
       ms: Date.now() - started,
       tokens: billed.tokens,

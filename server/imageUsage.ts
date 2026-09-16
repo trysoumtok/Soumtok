@@ -34,12 +34,13 @@ export async function recordImageUsage(
   userId: string,
   modelId: string,
   provider: string,
+  source: 'studio' | 'desktop' = 'studio',
 ) {
   const tokens = imageChargeTokens(modelId)
   await pool.query(
-    `INSERT INTO usage_events (id, user_id, provider, model, prompt_tokens, completion_tokens, billed_to)
-     VALUES ($1, $2, $3, $4, 0, $5, 'platform')`,
-    [crypto.randomUUID(), userId, provider, modelId, tokens],
+    `INSERT INTO usage_events (id, user_id, provider, model, prompt_tokens, completion_tokens, billed_to, source)
+     VALUES ($1, $2, $3, $4, 0, $5, 'platform', $6)`,
+    [crypto.randomUUID(), userId, provider, modelId, tokens, source],
   )
   return {
     tokens,

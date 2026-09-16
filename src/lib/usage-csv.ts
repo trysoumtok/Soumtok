@@ -6,6 +6,7 @@ export type UsageCsvRow = {
   provider?: string
   model: string
   billed_to: string
+  source?: string
   prompt_tokens?: number
   completion_tokens?: number
   tokens: number
@@ -155,6 +156,7 @@ export function buildUsageCsv(input: {
       'Time (UTC)',
       'ISO 8601',
       'Type',
+      'Surface',
       'Billed to',
       'Provider',
       'Model',
@@ -174,6 +176,7 @@ export function buildUsageCsv(input: {
         utcTime(item.created_at),
         new Date(item.created_at).toISOString(),
         typeLabel(item.billed_to),
+        item.source === 'desktop' ? 'Desktop' : 'Studio',
         item.billed_to === 'user' ? 'Your provider key' : 'Soumtok included',
         item.provider || '',
         item.model,

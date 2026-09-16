@@ -437,32 +437,40 @@ async function generateImageViaApi(api, args, getBuffer) {
   const parsed = parseStillRequest(prompt)
   const aspect = normalizeStillAspect(args?.aspect || args?.aspect_ratio || args?.ratio || parsed.aspect)
   const clean = parsed.prompt
-  const local = await generateStillViaReplicate(clean, aspect)
-  if (local) return { ...local, aspect: local.aspect || aspect }
-  const body = { prompt: clean, aspect }
+  const body = { prompt: clean, aspect, source: 'desktop' }
   const model = String(args?.model || '').trim()
   if (/^(fal-ai\/|black-forest-labs\/|google\/imagen)/i.test(model)) body.model = model
   const res = await api('POST', '/api/studio/image', body, 120_000)
-  if (res.status === 401) return { ok: false, error: 'Sign in to generate images.' }
-  if (res.status !== 200) {
-    return { ok: false, error: res.data?.error || 'Image generation failed' }
-  }
-  const data = imageFieldsFromResponse(res.data)
-  let base64 = String(data.base64 || '')
-  const ext = String(data.ext || 'jpg').replace(/^\./, '')
-  let contentType = String(data.contentType || 'image/jpeg')
-  if (!base64 && data.url && typeof getBuffer === 'function') {
-    const pathName = String(data.url).startsWith('http')
-      ? new URL(data.url).pathname + (new URL(data.url).search || '')
-      : String(data.url)
-    const bin = await getBuffer('GET', pathName, 60_000)
-    if (bin?.status === 401) return { ok: false, error: 'Sign in to generate images.' }
-    if (bin?.status === 200 && bin.buffer?.length) {
-      base64 = Buffer.from(bin.buffer).toString('base64')
-      if (bin.contentType && /^image\//i.test(bin.contentType)) contentType = bin.contentType
+  if (res.status === 200) {
+    const data = imageFieldsFromResponse(res.data)
+    let base64 = String(data.base64 || '')
+    const ext = String(data.ext || 'jpg').replace(/^\./, '')
+    let contentType = String(data.contentType || 'image/jpeg')
+    if (!base64 && data.url && typeof getBuffer === 'function') {
+      const pathName = String(data.url).startsWith('http')
+        ? new URL(data.url).pathname + (new URL(data.url).search || '')
+        : String(data.url)
+      const bin = await getBuffer('GET', pathName, 60_000)
+      if (bin?.status === 200 && bin.buffer?.length) {
+        base64 = Buffer.from(bin.buffer).toString('base64')
+        if (bin.contentType && /^image\//i.test(bin.contentType)) contentType = bin.contentType
+      }
+    }
+    if (base64) {
+      return {
+        ok: true,
+        base64,
+        ext,
+        contentType,
+        aspect: data.aspect || aspect,
+        tokens: res.data?.tokens,
+        chargeUsd: res.data?.chargeUsd,
+      }
     }
   }
-  if (!base64) {
+  if (res.status === 401) return { ok: false, error: 'Sign in to generate images.' }
+  if (res.status === 402) return { ok: false, error: res.data?.error || 'Upgrade to keep generating images.' }
+  if (res.status === 200) {
     const keys = Object.keys(res.data || {}).filter((k) => k !== 'raw')
     const rawHead = String(res.data?.raw || '').replace(/\s+/g, ' ').slice(0, 80)
     return {
@@ -472,7 +480,9 @@ async function generateImageViaApi(api, args, getBuffer) {
         : `No image bytes returned. ${keys.length ? `API sent: ${keys.join(', ')}.` : 'Sign in and retry.'}`,
     }
   }
-  return { ok: true, base64, ext, contentType, model: data.model, aspect: data.aspect || aspect }
+  const local = await generateStillViaReplicate(clean, aspect)
+  if (local) return { ...local, aspect: local.aspect || aspect, offline: true }
+  return { ok: false, error: res.data?.error || 'Image generation failed' }
 }
 
 function imageFieldsFromResponse(data) {
