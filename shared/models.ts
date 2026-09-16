@@ -240,9 +240,9 @@ export function modelById(id: string) {
   return CODING_MODELS.find((model) => model.id === resolved) || CODING_MODELS[0]
 }
 
-export const TRIAL_MODEL_IDS = ['deepseek-v4-flash'] as const
+export const TRIAL_MODEL_IDS = ['deepseek-v4-flash', 'soumtok-agent'] as const
 
-export const TRIAL_MODEL_NAMES = 'DeepSeek V4.1 Flash'
+export const TRIAL_MODEL_NAMES = 'Soumtok Agent (DeepSeek V4.1 Flash)'
 
 export function isTrialModel(id: string) {
   const resolved = resolveModelId(id)

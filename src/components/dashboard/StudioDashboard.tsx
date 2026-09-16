@@ -136,6 +136,7 @@ import {
   stageChatFile,
   takeChatFiles,
 } from '../../lib/chatFiles'
+import { runStudioAgentHarness } from '../../lib/studioAgentHarness'
 import { ReplyMarkdown } from '../../lib/replyText'
 import { signIn } from '../../lib/auth-client'
 import { navigate, openTab } from '../../lib/nav'
@@ -1955,155 +1956,133 @@ function StudioChat({
       }
       let tick = ''
       let announced = ''
+      const harnessMessages = history.map((item, index) => {
+        if (index === history.length - 1 && item.role === 'user' && attached.length) {
+          return { ...item, files: attached }
+        }
+        return item
+      })
+      const uiMode = answered ? 'agent' : runMode
 
-      const run = await streamStudio(
-        sendModel,
-        [{ role: 'system', content: executeSystemPrompt(plan, extra) }, ...history],
-        (partial) => {
-          if (ac.signal.aborted) return
-          if (!partial) return
-          if (!planUsesCodingAgent(plan)) {
-            if (plan.mode === 'chat') {
-              const draft = chatReplyFromRun(partial)
-              if (draft) setLiveReply(draft)
-            }
-            setStep(plan.mode === 'ask' || plan.mode === 'plan' ? 'Drafting' : 'Answering')
-          }
-          const live = liveWorkspaceFromStream(roundBase, partial, seed)
-          live.events = eventsForMode(live.events, plan.mode)
-          const last = live.events[live.events.length - 1]
-          const fileMark = Object.entries(live.files)
-            .map(([path, content]) => `${path}:${content.length}`)
-            .join('|')
-          const mark = `${live.events.length}:${last?.kind === 'diff' ? last.lines.length : 0}:${fileMark}`
-          if (mark !== tick) {
-            tick = mark
-            const current = workspaceRef.current
-            applyWorkspace({
-              ...current,
-              files: live.files,
-              events: live.events,
-              previewHtml: live.previewHtml || current.previewHtml,
-              marks: current.marks || roundBase.marks,
-            })
-            setShown(live.events.length)
-            if (last) {
-              const label = stepLabel(last)
-              if (label) setStep(label)
-            }
-          }
-          if (live.paths.length) setLiveFiles(visibleWorkPaths(live.paths))
-          const path = live.paths.at(-1)
-          if (path && path !== announced) {
-            announced = path
-            setStep(`Writing ${path}`)
-            if (origin.previewHtml || plan.needsPreview) {
-              openBench('desktop')
-            } else {
-              setFocusPath(path)
-              openBench('files')
-            }
-          }
-        },
-        linked,
-        {
-          temperature: runTemperature(plan),
-          maxTokens: outputBudget(plan),
-          agent: planUsesCodingAgent(plan),
-          files: roundBase.files,
-          repo: project?.fullName,
-          mode: plan.mode === 'ask' ? 'ask' : plan.mode === 'plan' ? 'plan' : 'agent',
-          agentPrefs: DEFAULT_DESKTOP_AGENT_PREFS,
-          workspaceRoot: project?.fullName || project?.name || 'studio-sandbox',
-          openFiles: visibleWorkPaths(liveFiles.length ? liveFiles : Object.keys(roundBase.files)),
-          onRound: (text) => {
-            lastParsed = parseAgentRun(text || '', plan)
-            merged = mergeWorkspace(roundBase, lastParsed)
-            applyWorkspace(merged)
-            setShown(merged.events.length)
-            roundBase = merged
-            tick = ''
-            announced = ''
-          },
-          onTools: (tools) => {
-            const first = tools[0]
-            if (first) {
-              const detail = first.args?.path || first.args?.command || first.args?.pattern || ''
-              if (first.name === 'read' && detail) setStep(`Reading ${detail}`)
-              else if (first.name === 'write' && detail) setStep(`Writing ${detail}`)
-              else setStep(detail ? `Running ${first.name} · ${detail}` : `Running ${first.name}`)
-            }
-            const paths = tools
-              .map((tool) => tool.args?.path || tool.args?.file)
-              .filter((path): path is string => Boolean(path))
-            if (paths.length) setLiveFiles((current) => visibleWorkPaths([...current, ...paths]))
-            const current = workspaceRef.current
-            const last = current.events[current.events.length - 1]
-            const extra = tools.filter(
-              (tool) =>
-                !(last?.kind === 'tool' && last.name === tool.name && JSON.stringify(last.args) === JSON.stringify(tool.args)),
-            )
-            if (!extra.length) return
-            const events = [
-              ...current.events,
-              ...extra.map((tool) => ({ kind: 'tool' as const, name: tool.name, args: tool.args })),
-            ]
-            applyWorkspace({ ...current, events })
-            setShown(events.length)
-          },
-          onProgress: (calls) => {
-            const label = liveProgressStep(calls)
+      const applyPartial = (partial: string) => {
+        if (ac.signal.aborted || !partial) return
+        if (plan.mode === 'chat' || plan.mode === 'ask' || plan.mode === 'plan') {
+          const draft = chatReplyFromRun(partial)
+          if (draft) setLiveReply(draft)
+          setStep(plan.mode === 'ask' || plan.mode === 'plan' ? 'Drafting' : 'Answering')
+        }
+        const live = liveWorkspaceFromStream(roundBase, partial, seed)
+        live.events = eventsForMode(live.events, plan.mode)
+        const last = live.events[live.events.length - 1]
+        const fileMark = Object.entries(live.files)
+          .map(([path, content]) => `${path}:${content.length}`)
+          .join('|')
+        const mark = `${live.events.length}:${last?.kind === 'diff' ? last.lines.length : 0}:${fileMark}`
+        if (mark !== tick) {
+          tick = mark
+          const current = workspaceRef.current
+          applyWorkspace({
+            ...current,
+            files: live.files,
+            events: live.events,
+            previewHtml: live.previewHtml || current.previewHtml,
+            marks: current.marks || roundBase.marks,
+          })
+          setShown(live.events.length)
+          if (last) {
+            const label = stepLabel(last)
             if (label) setStep(label)
-            const paths = calls.map((item) => item.path).filter((path): path is string => Boolean(path))
-            if (paths.length) setLiveFiles((current) => visibleWorkPaths([...current, ...paths]))
-            const nextFiles = { ...workspaceRef.current.files }
-            let changed = false
-            for (const call of calls) {
-              if (!call.path || !call.content) continue
-              if (call.name !== 'write' && call.name !== 'diff' && call.name !== 'edit') continue
-              if (nextFiles[call.path] === call.content) continue
-              nextFiles[call.path] = call.content
-              changed = true
-            }
-            if (!changed) return
-            const current = workspaceRef.current
-            const rest = current.events.slice(0, prior)
-            const turn = withChangeDiffs(current.events.slice(prior), nextFiles, origin.files)
-            applyWorkspace({
-              ...current,
-              files: nextFiles,
-              events: [...rest, ...turn],
-              previewHtml: previewFromFiles(nextFiles, current.previewHtml || ''),
-            })
-            setShown(rest.length + turn.length)
-            if (plan.needsPreview || current.previewHtml) openBench('desktop')
-          },
-          onResult: (out) => {
-            const files = { ...workspaceRef.current.files, ...(out.files || {}) }
-            const events = workspaceRef.current.events.map((item) => {
-              if (
-                item.kind === 'command' &&
-                out.name === 'terminal' &&
-                item.ok === undefined &&
-                out.command &&
-                item.command === out.command
-              ) {
-                return { ...item, ok: out.ok, output: out.text.slice(0, 4000) }
-              }
-              return item
-            })
-            merged = {
-              ...workspaceRef.current,
-              files,
-              previewHtml: out.files ? previewFromFiles(files, workspaceRef.current.previewHtml || '') : workspaceRef.current.previewHtml,
-              events: [...events, { kind: 'result', name: out.name, ok: out.ok, text: toolResultLine(out.name, out.text) }],
-            }
-            applyWorkspace(merged)
-            setShown(merged.events.length)
-            roundBase = merged
-          },
+          }
+        }
+        if (live.paths.length) setLiveFiles(visibleWorkPaths(live.paths))
+        const path = live.paths.at(-1)
+        if (path && path !== announced) {
+          announced = path
+          setStep(`Writing ${path}`)
+          if (origin.previewHtml || plan.needsPreview) openBench('desktop')
+          else {
+            setFocusPath(path)
+            openBench('files')
+          }
+        }
+      }
+
+      const run = await runStudioAgentHarness({
+        model: sendModel,
+        mode: uiMode === 'ask' ? 'ask' : uiMode === 'plan' ? 'plan' : 'agent',
+        messages: harnessMessages,
+        files: roundBase.files,
+        repo: project?.fullName,
+        agentPrefs: DEFAULT_DESKTOP_AGENT_PREFS,
+        workspaceRoot: project?.fullName || project?.name || 'studio-sandbox',
+        openFiles: visibleWorkPaths(liveFiles.length ? liveFiles : Object.keys(roundBase.files)),
+        analysisKind: turnAnalysis.kind,
+        signal: linked,
+        onStatus: (line) => {
+          if (line) setStep(line)
         },
-      )
+        onText: applyPartial,
+        onRound: (text) => {
+          applyPartial(text)
+          lastParsed = parseAgentRun(text || '', plan)
+          merged = mergeWorkspace(roundBase, lastParsed)
+          applyWorkspace(merged)
+          setShown(merged.events.length)
+          roundBase = merged
+          tick = ''
+          announced = ''
+        },
+        onTools: (tools) => {
+          const first = tools[0]
+          if (first) {
+            const detail = first.args?.path || first.args?.command || first.args?.pattern || ''
+            if (first.name === 'read' && detail) setStep(`Reading ${detail}`)
+            else if (first.name === 'write' && detail) setStep(`Writing ${detail}`)
+            else setStep(detail ? `Running ${first.name} · ${detail}` : `Running ${first.name}`)
+          }
+          const paths = tools
+            .map((tool) => tool.args?.path || tool.args?.file)
+            .filter((path): path is string => Boolean(path))
+          if (paths.length) setLiveFiles((current) => visibleWorkPaths([...current, ...paths]))
+          const current = workspaceRef.current
+          const last = current.events[current.events.length - 1]
+          const extraTools = tools.filter(
+            (tool) =>
+              !(last?.kind === 'tool' && last.name === tool.name && JSON.stringify(last.args) === JSON.stringify(tool.args)),
+          )
+          if (!extraTools.length) return
+          const events = [
+            ...current.events,
+            ...extraTools.map((tool) => ({ kind: 'tool' as const, name: tool.name, args: tool.args })),
+          ]
+          applyWorkspace({ ...current, events })
+          setShown(events.length)
+        },
+        onResult: (out) => {
+          const files = { ...workspaceRef.current.files, ...(out.files || {}) }
+          const events = workspaceRef.current.events.map((item) => {
+            if (
+              item.kind === 'command' &&
+              out.name === 'terminal' &&
+              item.ok === undefined &&
+              out.command &&
+              item.command === out.command
+            ) {
+              return { ...item, ok: out.ok, output: out.text.slice(0, 4000) }
+            }
+            return item
+          })
+          merged = {
+            ...workspaceRef.current,
+            files,
+            previewHtml: out.files ? previewFromFiles(files, workspaceRef.current.previewHtml || '') : workspaceRef.current.previewHtml,
+            events: [...events, { kind: 'result', name: out.name, ok: out.ok, text: toolResultLine(out.name, out.text) }],
+          }
+          applyWorkspace(merged)
+          setShown(merged.events.length)
+          roundBase = merged
+        },
+      })
 
       if (ac.signal.aborted) return
       if (!planUsesCodingAgent(plan) && (run.text || '').trim()) {

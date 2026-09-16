@@ -1230,8 +1230,21 @@ export async function streamStudio(
     signal,
   })
   if (!res.ok || !res.body) {
-    const failed = (await res.json().catch(() => ({}))) as { error?: string }
-    throw new Error(failed.error || 'Model request failed')
+    const raw = await res.text().catch(() => '')
+    let failed: { error?: string } = {}
+    try {
+      failed = raw ? (JSON.parse(raw) as { error?: string }) : {}
+    } catch {
+      failed = {}
+    }
+    const hint =
+      failed.error ||
+      (raw && /<!doctype html/i.test(raw) ? 'Server returned a page instead of a stream — redeploy or sign in again.' : '') ||
+      (res.status === 402 ? 'Your free trial ended. Upgrade to Pro to keep coding.' : '') ||
+      (res.status === 401 ? 'Sign in with your Soumtok account.' : '') ||
+      (res.status === 403 ? 'Finish account setup first.' : '') ||
+      (res.status ? `Model request failed (${res.status})` : 'Model request failed')
+    throw new Error(hint)
   }
 
   const reader = res.body.getReader()

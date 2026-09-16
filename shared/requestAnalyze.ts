@@ -80,7 +80,9 @@ export function isGeneralOrSoumtokChat(text: string) {
     .toLowerCase()
   if (!t) return true
   if (isConfirmGoMessage(t)) return false
-  if (/^(hi|hello|hey|thanks|thank you|ok|okay|yes|no|yo)[\s!.?]*$/.test(t)) return true
+  if (/^(hi+|hello+|hey+|hy+|hii+|heyy+|thanks?|thank you|ty|ok|okay|yes|no|yo|sup|wass?up)[\s!.?]*$/i.test(t)) {
+    return true
+  }
   if (
     /\b(fix|implement|refactor|change|edit|bug|selector|patch|broken)\b/.test(t) &&
     /\b(my |this |the )?(app|project|code|repo|dashboard|file|component|selector|workspace)\b/.test(t)

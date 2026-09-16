@@ -13,6 +13,7 @@ import {
   PROVIDER_LABEL,
   isAutoModel,
   isTrialModel,
+  TRIAL_MODEL_NAMES,
   modelById,
   pickAutoModel,
   sortModelsByPower,
@@ -1434,6 +1435,19 @@ export function registerStudio(
         })
       : body.model ?? ''
     const model = modelById(requested)
+    if (
+      !openAccessForBuilding() &&
+      (planId === 'hobby' || planId === 'trial') &&
+      !isAutoModel(body.model) &&
+      body.model &&
+      !isTrialModel(body.model)
+    ) {
+      return {
+        ok: false,
+        status: 402,
+        error: `Trial includes ${TRIAL_MODEL_NAMES} only. Upgrade to Pro or pick Soumtok Agent.`,
+      }
+    }
     const attached = (lastUser?.files || []).flatMap((file) => [file.text || '', file.analysis || ''])
     const leaked = scanSecrets(lastText, attached)
     if (leaked.hits.length > 0 || leaked.offering) {
