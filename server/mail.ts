@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import nodemailer from 'nodemailer'
-import { env, hasResend, hasSmtp } from './env.ts'
+import { env, hasNeonMail, hasSmtp } from './env.ts'
 
 const MAIL_TIMEOUT_MS = 20_000
 
@@ -32,33 +32,38 @@ function transport() {
   })
 }
 
-async function sendViaResend(
+async function sendViaNeon(
   to: string,
   subject: string,
   text: string,
   html?: string,
   replyTo?: string,
 ) {
-  const res = await fetch('https://api.resend.com/emails', {
+  const res = await fetch(`${env.neonMailUrl}/send`, {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${env.resendApiKey}`,
+      Authorization: `Bearer ${env.neonMailSecret}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      from: env.smtpFrom,
-      to: [to],
+      to,
       subject,
       text,
-      ...(html ? { html } : {}),
-      ...(replyTo ? { reply_to: replyTo } : {}),
+      html,
+      replyTo,
     }),
     signal: AbortSignal.timeout(MAIL_TIMEOUT_MS),
   })
   if (!res.ok) {
     const detail = await res.text().catch(() => '')
-    throw new Error(`Resend ${res.status}: ${detail.slice(0, 240)}`)
+    throw new Error(`Neon mail ${res.status}: ${detail.slice(0, 240)}`)
   }
+}
+
+type MailAttachment = {
+  filename: string
+  content: Buffer | Uint8Array | string
+  contentType?: string
 }
 
 async function sendViaSmtp(
@@ -67,6 +72,7 @@ async function sendViaSmtp(
   text: string,
   html?: string,
   replyTo?: string,
+  attachments: MailAttachment[] = [],
 ) {
   const deliveryHtml = htmlForDelivery(html)
   const send = transport().sendMail({
@@ -76,7 +82,7 @@ async function sendViaSmtp(
     subject,
     text,
     html: deliveryHtml,
-    attachments: deliveryHtml ? logoAttachment() : [],
+    attachments: [...(deliveryHtml ? logoAttachment() : []), ...attachments],
   })
 
   await Promise.race([
@@ -226,21 +232,22 @@ export async function sendMail(
   text: string,
   html?: string,
   replyTo?: string,
+  attachments: MailAttachment[] = [],
 ) {
   const deliveryHtml = htmlForDelivery(html)
 
-  if (hasResend()) {
+  if (hasNeonMail()) {
     try {
-      await sendViaResend(to, subject, text, deliveryHtml, replyTo)
+      await sendViaNeon(to, subject, text, deliveryHtml, replyTo)
       return
     } catch (error) {
-      console.error('[mail] Resend failed', error)
+      console.error('[mail] Neon relay failed', error)
       if (!hasSmtp()) throw error
     }
   }
 
   if (hasSmtp()) {
-    await sendViaSmtp(to, subject, text, html, replyTo)
+    await sendViaSmtp(to, subject, text, html, replyTo, attachments)
     return
   }
 
@@ -266,6 +273,45 @@ export function contactInboxEmail(input: { email: string; topic: string; message
       lead: `${input.email} wrote to the Soumtok team.`,
       extraHtml: `<div style="white-space:pre-wrap;font-size:14px;line-height:1.6;color:#d4d4d0;">${escapeHtml(input.message)}</div>`,
       note: 'Reply to this email to reach the person who sent it.',
+    }),
+  }
+}
+
+export function bugReportInboxEmail(input: {
+  email: string
+  category: string
+  message: string
+  surface?: string
+  context?: Record<string, string>
+}) {
+  const meta = input.context
+    ? Object.entries(input.context)
+        .filter(([, v]) => v)
+        .map(([k, v]) => `${k}: ${v}`)
+        .join('\n')
+    : ''
+  const text = [
+    'New Soumtok bug report',
+    `From: ${input.email}`,
+    `Category: ${input.category}`,
+    input.surface ? `Surface: ${input.surface}` : '',
+    meta ? `\nContext:\n${meta}` : '',
+    `\n${input.message}`,
+  ]
+    .filter(Boolean)
+    .join('\n')
+  const contextHtml = meta
+    ? `<pre style="margin:12px 0;padding:12px;background:#1a1a18;border-radius:8px;font-size:12px;line-height:1.5;color:#a8a8a2;white-space:pre-wrap;">${escapeHtml(meta)}</pre>`
+    : ''
+  return {
+    subject: `Bug: ${input.category} — ${input.email}`,
+    text,
+    html: brandedHtml({
+      eyebrow: 'Support',
+      title: input.category,
+      lead: `${input.email} reported an issue${input.surface ? ` from ${input.surface}` : ''}.`,
+      extraHtml: `${contextHtml}<div style="white-space:pre-wrap;font-size:14px;line-height:1.6;color:#d4d4d0;">${escapeHtml(input.message)}</div>`,
+      note: 'Reply to this email to reach the reporter.',
     }),
   }
 }

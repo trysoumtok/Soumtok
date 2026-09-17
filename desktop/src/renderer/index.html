@@ -79,6 +79,7 @@
             <button type="button" data-menu="help">Help</button>
             <div class="menu-list" hidden>
               <button type="button" data-cmd="docs">Documentation</button>
+              <button type="button" data-cmd="bug-report">Report a bug</button>
               <button type="button" data-cmd="account">Account</button>
               <button type="button" data-cmd="billing">Billing</button>
               <button type="button" data-cmd="login">Sign in</button>
@@ -110,14 +111,15 @@
           </svg>
         </button>
         <div class="win-ctrls">
-          <button type="button" class="win-ctrl" data-win="min" title="Minimize">
-            <svg viewBox="0 0 12 12"><rect x="2" y="5.25" width="8" height="1.5" fill="currentColor"/></svg>
+          <button type="button" class="win-ctrl" data-win="min" title="Minimize" aria-label="Minimize">
+            <svg class="win-glyph" viewBox="0 0 16 16" aria-hidden="true"><rect x="3" y="7.25" width="10" height="1.5" rx="0.25" fill="currentColor"/></svg>
           </button>
-          <button type="button" class="win-ctrl" data-win="max" title="Maximize">
-            <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2.2" y="2.2" width="7.6" height="7.6"/></svg>
+          <button type="button" class="win-ctrl" data-win="max" title="Maximize" aria-label="Maximize">
+            <svg class="win-glyph win-glyph-max" viewBox="0 0 16 16" aria-hidden="true"><rect x="3.25" y="3.25" width="9.5" height="9.5" fill="none" stroke="currentColor" stroke-width="1.25"/></svg>
+            <svg class="win-glyph win-glyph-restore" viewBox="0 0 16 16" aria-hidden="true"><rect x="4.75" y="2.75" width="6.5" height="6.5" fill="none" stroke="currentColor" stroke-width="1.25"/><rect x="2.75" y="4.75" width="6.5" height="6.5" fill="var(--bg-3)" stroke="currentColor" stroke-width="1.25"/></svg>
           </button>
-          <button type="button" class="win-ctrl" data-win="close" title="Close">
-            <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7"/></svg>
+          <button type="button" class="win-ctrl" data-win="close" title="Close" aria-label="Close">
+            <svg class="win-glyph" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4L4 12" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/></svg>
           </button>
         </div>
       </div>
@@ -612,6 +614,39 @@
       <div class="prompt-card project-switch-progress-card">
         <div class="project-switch-spinner" aria-hidden="true"></div>
         <p id="project-switch-progress-msg">Saving project session…</p>
+      </div>
+    </div>
+    <div id="bug-report" hidden role="dialog" aria-modal="true" aria-labelledby="bug-report-title">
+      <div class="trust-publisher-card bug-report-card">
+        <p id="bug-report-title" class="trust-publisher-title">Report a bug</p>
+        <p class="trust-publisher-body">We send this to support@soumtok.com and reply to your Soumtok email.</p>
+        <div id="bug-report-form">
+          <div id="bug-report-email-row" hidden>
+            <label class="bug-report-label" for="bug-report-email">Email</label>
+            <input id="bug-report-email" type="email" class="bug-report-input" placeholder="you@company.com" />
+          </div>
+          <label class="bug-report-label" for="bug-report-category">Category</label>
+          <select id="bug-report-category" class="bug-report-input">
+            <option value="Bug">Bug</option>
+            <option value="Crash">Crash</option>
+            <option value="Billing">Billing</option>
+            <option value="Feature request">Feature request</option>
+            <option value="Other">Other</option>
+          </select>
+          <label class="bug-report-label" for="bug-report-message">What happened?</label>
+          <textarea id="bug-report-message" class="bug-report-input bug-report-textarea" rows="5" placeholder="Steps to reproduce, what you expected, and what went wrong."></textarea>
+          <p id="bug-report-error" class="bug-report-error" hidden></p>
+          <div class="prompt-row trust-publisher-actions">
+            <button type="button" class="ghost" id="bug-report-cancel">Cancel</button>
+            <button type="button" class="primary" id="bug-report-send">Send report</button>
+          </div>
+        </div>
+        <div id="bug-report-sent" hidden>
+          <p class="trust-publisher-body">Thanks — your report is on its way. We will follow up by email.</p>
+          <div class="prompt-row trust-publisher-actions">
+            <button type="button" class="primary" id="bug-report-done">Done</button>
+          </div>
+        </div>
       </div>
     </div>
     <div id="trust-publisher" hidden role="dialog" aria-modal="true" aria-labelledby="trust-publisher-title">

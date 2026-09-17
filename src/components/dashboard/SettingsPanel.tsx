@@ -12,7 +12,9 @@ import { signOut } from '../../lib/auth-client'
 import { navigate } from '../../lib/nav'
 import { usernameError } from '../../../shared/username'
 import { notifyAvatar } from '../../lib/avatar'
+import { brandMarkSrc } from '../../../shared/brandAssets.ts'
 import { applyTheme, getThemePref, type ThemePref } from '../../lib/theme'
+import { useBrandTheme } from '../../lib/useBrandTheme'
 import { ConfirmCard, DeleteAccountCard } from '../ConfirmCard'
 import { SecuritySettings } from './SecuritySettings'
 import { TestHubShareLinksPanel } from './TestHubShareLinksPanel'
@@ -133,12 +135,15 @@ export function SettingsPanel({
   email,
   name,
   onSaved,
+  onReportBug,
 }: {
   profile: Profile | null
   email?: string
   name?: string
   onSaved?: () => void
+  onReportBug?: () => void
 }) {
+  const brandThemeResolved = useBrandTheme()
   const guessed = splitName(name)
   const [firstName, setFirstName] = useState(profile?.firstName || guessed.first)
   const [lastName, setLastName] = useState(profile?.lastName || guessed.last)
@@ -214,8 +219,8 @@ export function SettingsPanel({
 
   async function onPhoto(file?: File) {
     if (!file || photoBusy) return
-    if (file.size > 2 * 1024 * 1024) {
-      setPhotoNote('Image must be under 2 MB')
+    if (file.size > 6 * 1024 * 1024) {
+      setPhotoNote('Image must be under 6 MB')
       return
     }
     setPhotoBusy(true)
@@ -314,13 +319,13 @@ export function SettingsPanel({
           <div className="flex flex-col items-start justify-between gap-4 px-5 py-4 sm:flex-row sm:items-center">
             <div className="flex items-center gap-4">
               <img
-                src={profile?.hasAvatar ? `/api/me/photo/avatar?v=${avatarKey}` : '/images/soumtok-mark.png'}
+                src={profile?.hasAvatar ? `/api/me/photo/avatar?v=${avatarKey}` : brandMarkSrc(brandThemeResolved)}
                 alt=""
                 className="h-14 w-14 rounded-full bg-white/5 object-cover"
               />
               <div>
                 <p className="text-[14px] text-white">Profile image</p>
-                <p className="mt-1 text-[12px] text-white/40">PNG, JPEG, or WebP up to 2 MB</p>
+                <p className="mt-1 text-[12px] text-white/40">PNG, JPEG, or WebP up to 6 MB</p>
               </div>
             </div>
             <div>
@@ -545,6 +550,18 @@ export function SettingsPanel({
           ))}
         </Card>
         <p className="mt-2 text-[12px] text-white/35">Session revocation may take up to 10 minutes to complete.</p>
+      </section>
+
+      <section>
+        <h2 className="mb-3 text-[13px] text-white/45">Support</h2>
+        <Card>
+          <Row
+            label="Report a bug"
+            hint="Send details to support@soumtok.com — we reply to your account email."
+          >
+            <GhostButton onClick={() => onReportBug?.()}>Report…</GhostButton>
+          </Row>
+        </Card>
       </section>
 
       <section>

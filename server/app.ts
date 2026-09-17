@@ -1,5 +1,6 @@
 import { Hono, type Context } from 'hono'
 import { cors } from 'hono/cors'
+import { secureHeaders } from 'hono/secure-headers'
 import { auth } from './auth.ts'
 import { pool } from './db.ts'
 import { normalizeUsername, usernameError } from '../shared/username.ts'
@@ -7,22 +8,15 @@ import {
   env,
   hasBunny,
   hasDatabase,
-  hasImageGen,
-  hasGithub,
-  hasGoogle,
-  hasPayhero,
-  hasPaypal,
-  hasMail,
   hasNeonMail,
   hasSmtp,
-  hasTwilio,
   canonicalAuthHost,
   isAllowedOrigin,
+  isProductionDeploy,
   isProductionHost,
-  oauthRedirectUris,
   openAccessForBuilding,
 } from './env.ts'
-import { contactInboxEmail, sendMail, verificationEmail } from './mail.ts'
+import { bugReportInboxEmail, contactInboxEmail, sendMail, verificationEmail } from './mail.ts'
 import { consumeCode, issueCode } from './verify.ts'
 import { migrate } from './migrate.ts'
 import { deleteFromBunny, downloadFromBunny, safeFileName, uploadToBunny } from './storage.ts'
@@ -46,6 +40,20 @@ import { BLOCKED_EMAIL_MESSAGE, isBlockedEmail } from './blocked-emails.ts'
 import { syncLinkedAccounts } from './account-sync.ts'
 
 export const app = new Hono()
+
+app.use(
+  '*',
+  secureHeaders({
+    crossOriginResourcePolicy: 'same-site',
+    crossOriginOpenerPolicy: 'same-origin-allow-popups',
+    referrerPolicy: 'strict-origin-when-cross-origin',
+    xFrameOptions: 'DENY',
+    xContentTypeOptions: 'nosniff',
+    ...(isProductionDeploy()
+      ? { strictTransportSecurity: 'max-age=31536000; includeSubDomains; preload' }
+      : {}),
+  }),
+)
 
 /** Keep OAuth state cookies on one host (apex, not www). */
 app.use('*', async (c, next) => {
@@ -79,7 +87,7 @@ app.use(
   cors({
     origin: (origin) => (origin && isAllowedOrigin(origin) ? origin : env.betterAuthUrl),
     credentials: true,
-    allowHeaders: ['Content-Type', 'Authorization'],
+    allowHeaders: ['Content-Type', 'Authorization', 'X-Soumtok-Session'],
     allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   }),
 )
@@ -123,28 +131,51 @@ app.post('/api/contact', async (c) => {
   return c.json({ ok: true, inbox: 'support@soumtok.com' })
 })
 
+const bugReportHits = new Map<string, number[]>()
+
+app.post('/api/bug-report', async (c) => {
+  const body = await c.req
+    .json<{
+      email?: string
+      category?: string
+      message?: string
+      surface?: string
+      context?: Record<string, string>
+    }>()
+    .catch(() => ({}))
+  const session = await requireUser(c)
+  const email = (session?.user?.email || body.email || '').trim()
+  const category = String(body.category || 'Bug').trim().slice(0, 80) || 'Bug'
+  const message = String(body.message || '').trim()
+  const surface = String(body.surface || '').trim().slice(0, 80)
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return c.json({ error: 'Sign in or enter a valid email so we can reply.' }, 400)
+  }
+  if (message.length < 8) return c.json({ error: 'Describe what happened (at least a few words).' }, 400)
+  if (message.length > 8000) return c.json({ error: 'Keep the report under 8000 characters.' }, 400)
+  const ip = c.req.header('x-forwarded-for')?.split(',')[0]?.trim() || 'local'
+  const now = Date.now()
+  const recent = (bugReportHits.get(ip) || []).filter((at) => now - at < 10 * 60_000)
+  if (recent.length >= 8) return c.json({ error: 'Too many reports. Try again in a few minutes.' }, 429)
+  recent.push(now)
+  bugReportHits.set(ip, recent)
+  const context: Record<string, string> = { ...(body.context || {}) }
+  if (session?.user?.id) context.userId = session.user.id
+  if (session?.user?.name) context.name = String(session.user.name)
+  const mail = bugReportInboxEmail({ email, category, message, surface, context })
+  try {
+    await sendMail('support@soumtok.com', mail.subject, mail.text, mail.html, email)
+  } catch (error) {
+    console.error('[bug-report] send failed', error)
+    return c.json({ error: 'Could not deliver your report. Try again.' }, 502)
+  }
+  return c.json({ ok: true, inbox: 'support@soumtok.com' })
+})
+
 app.get('/api/health', (c) =>
   c.json({
     ok: true,
     database: hasDatabase(),
-    google: hasGoogle(),
-    github: hasGithub(),
-    oauth: oauthRedirectUris(),
-    storage: hasBunny(),
-    mail: hasMail(),
-    neonMail: hasNeonMail(),
-    sms: hasTwilio(),
-    image: hasImageGen(),
-    paypal: hasPaypal(),
-    payhero: hasPayhero(),
-    coding: {
-      openai: Boolean(env.openaiKey),
-      anthropic: Boolean(env.anthropicKey),
-      google: Boolean(env.googleAiKey),
-      deepseek: Boolean(env.deepseekKey),
-      xai: Boolean(env.xaiKey),
-    },
-    openAccess: openAccessForBuilding(),
   }),
 )
 
@@ -232,7 +263,16 @@ async function requireReadyUser(c: Context) {
 app.get('/api/me', async (c) => {
   const session = await requireUser(c)
   if (!session) return c.json({ user: null }, 401)
-  return c.json(session)
+  const authSession = session.session as { id?: string; expiresAt?: Date | string; token?: string } | undefined
+  return c.json({
+    user: session.user,
+    session: authSession
+      ? {
+          id: authSession.id,
+          expiresAt: authSession.expiresAt,
+        }
+      : null,
+  })
 })
 
 app.get('/api/usernames/check', async (c) => {
@@ -531,11 +571,11 @@ app.post('/api/me/verify/email/send', async (c) => {
   } catch (error) {
     console.error('[verify/email/send]', error)
     if (openAccessForBuilding()) {
-      console.warn(`[verify/email/send] openAccess fallback code for ${session.user.email}: ${code}`)
       return c.json({
         ok: true,
-        via: 'log',
-        message: 'Email relay unavailable — code logged on server until Neon mail is configured.',
+        via: 'dev',
+        devCode: code,
+        message: 'Email relay unavailable — use devCode locally only; configure Neon mail for production.',
       })
     }
     return c.json({ error: 'Could not send the email code right now. Try again in a minute.' }, 502)

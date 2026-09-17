@@ -1,5 +1,5 @@
 const { contextBridge, ipcRenderer } = require('electron')
-const { readOpenAiKeyFromEnvFile, transcribeWithOpenAiDirect } = require('../main/speechTranscribeCore')
+const { transcribeWithOpenAiDirect } = require('../main/speechTranscribeCore')
 const { parseAgentChoices, stripNumberedListForChoices } = require('../../../shared/agentChoices.cjs')
 
 async function speechTranscribe(payload) {
@@ -10,10 +10,10 @@ async function speechTranscribe(payload) {
     const msg = String(err?.message || err)
     if (!/no handler registered/i.test(msg)) return { error: msg }
   }
-  const key = (process.env.OPENAI_API_KEY || readOpenAiKeyFromEnvFile() || '').trim()
+  const key = (process.env.OPENAI_API_KEY || '').trim()
   if (!key) {
     return {
-      error: 'Add OPENAI_API_KEY to your Soumtok repo .env file, then reload the window (Ctrl+R).',
+      error: 'Speech transcription is unavailable in this build. Sign in for cloud speech or set OPENAI_API_KEY in the app environment.',
     }
   }
   return transcribeWithOpenAiDirect(key, payload)
@@ -68,6 +68,7 @@ contextBridge.exposeInMainWorld('soumtok', {
   gitCommit: (message, workspaceHint) => ipcRenderer.invoke('git:commit', message, workspaceHint),
   gitPublish: (workspaceHint) => ipcRenderer.invoke('git:publish', workspaceHint),
   openHelp: () => ipcRenderer.invoke('help:open'),
+  sendBugReport: (payload) => ipcRenderer.invoke('bug-report:send', payload),
   login: (mode) => ipcRenderer.invoke('auth:login', mode),
   pollLogin: (id) => ipcRenderer.invoke('auth:poll', id),
   logout: () => ipcRenderer.invoke('auth:logout'),

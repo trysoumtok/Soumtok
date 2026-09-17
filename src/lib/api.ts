@@ -20,6 +20,23 @@ export async function sendContact(input: { email: string; topic: string; message
   if (!res.ok) throw new Error(data.error || 'Could not send your message')
 }
 
+export async function sendBugReport(input: {
+  email?: string
+  category?: string
+  message: string
+  surface?: string
+  context?: Record<string, string>
+}) {
+  const res = await fetch('/api/bug-report', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify(input),
+  })
+  const data = (await res.json().catch(() => ({}))) as { error?: string }
+  if (!res.ok) throw new Error(data.error || 'Could not send your report')
+}
+
 export async function fetchHealth() {
   const res = await fetch('/api/health')
   if (!res.ok) {
@@ -1166,27 +1183,51 @@ export async function removeStudioProject(id: string) {
   if (!res.ok) throw new Error('Could not remove project')
 }
 
+function parseApiJson<T extends { error?: string }>(raw: string, status: number): T {
+  const trimmed = raw.trim()
+  if (!trimmed) return {} as T
+  try {
+    return JSON.parse(trimmed) as T
+  } catch {
+    if (/^internal server error/i.test(trimmed)) {
+      throw new Error('Server error — try again in a moment.')
+    }
+    if (/^<!doctype html/i.test(trimmed)) {
+      throw new Error('Server returned a page instead of JSON — sign in again or restart dev.')
+    }
+    throw new Error(trimmed.slice(0, 240) || `Model request failed (${status || 'unknown'})`)
+  }
+}
+
 export async function completeStudio(
   model: string,
-  messages: { role: 'user' | 'assistant' | 'system'; content: string }[],
+  messages: { role: 'user' | 'assistant' | 'system'; content: string; files?: ChatFile[] }[],
   signal?: AbortSignal,
+  opts?: { agent?: boolean; client?: string; files?: Record<string, string> },
 ) {
   const res = await fetch('/api/studio/complete', {
     method: 'POST',
     credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model, messages }),
+    body: JSON.stringify({
+      model,
+      messages,
+      agent: opts?.agent,
+      client: opts?.client,
+      files: opts?.files,
+    }),
     signal,
   })
-  const data = (await res.json()) as {
+  const raw = await res.text().catch(() => '')
+  const data = parseApiJson<{
     text?: string
     error?: string
     keys?: string
     billedTo?: string
     promptTokens?: number
     completionTokens?: number
-  }
-  if (!res.ok) throw new Error(data.error || 'Model request failed')
+  }>(raw, res.status)
+  if (!res.ok) throw new Error(data.error || `Model request failed (${res.status})`)
   return data
 }
 
@@ -1280,7 +1321,7 @@ export async function streamStudio(
       buffer = buffer.slice(cut + 2)
       cut = buffer.indexOf('\n\n')
       if (!frame.startsWith('data:')) continue
-      const payload = JSON.parse(frame.slice(5).trim()) as {
+      let payload: {
         delta?: string
         error?: string
         done?: boolean
@@ -1292,6 +1333,15 @@ export async function streamStudio(
         files?: Record<string, string>
         progress?: { name: string; path?: string; chars: number; content?: string }[]
       } & StudioRun
+      try {
+        payload = JSON.parse(frame.slice(5).trim()) as typeof payload
+      } catch {
+        const body = frame.slice(5).trim()
+        if (/^internal server error/i.test(body)) {
+          throw new Error('Server error — try again in a moment.')
+        }
+        continue
+      }
       if (payload.error) throw new Error(payload.error)
       if (payload.reset) {
         text = ''
@@ -1309,7 +1359,56 @@ export async function streamStudio(
     }
   }
 
+  if (!final.text && !text && buffer.trim()) {
+    const tail = buffer.trim()
+    if (/^internal server error/i.test(tail)) {
+      throw new Error('Server error — try again in a moment.')
+    }
+  }
+
   return final.text ? final : { ...final, text }
+}
+
+/** Test Hub: stream when possible, fall back to a single completion if the stream fails or stalls. */
+export async function streamTestHub(
+  model: string,
+  messages: { role: 'user' | 'assistant' | 'system'; content: string; files?: ChatFile[] }[],
+  onText: (text: string) => void,
+  signal?: AbortSignal,
+  opts?: { files?: Record<string, string> },
+): Promise<StudioRun & { files?: Record<string, string> }> {
+  const timeout = AbortSignal.timeout(180_000)
+  const merged =
+    signal ?
+      AbortSignal.any([signal, timeout])
+    : timeout
+  try {
+    return await streamStudio(model, messages, onText, merged, {
+      agent: false,
+      client: 'test-hub',
+      files: opts?.files,
+    })
+  } catch (err) {
+    if (signal?.aborted) throw err
+    try {
+      const data = await completeStudio(model, messages, AbortSignal.timeout(180_000), {
+        agent: false,
+        client: 'test-hub',
+        files: opts?.files,
+      })
+      const text = data.text || ''
+      onText(text)
+      return {
+        text,
+        billedTo: data.billedTo,
+        promptTokens: data.promptTokens,
+        completionTokens: data.completionTokens,
+      }
+    } catch (fallbackErr) {
+      const detail = fallbackErr instanceof Error ? fallbackErr.message : 'Completion failed'
+      throw new Error(detail)
+    }
+  }
 }
 
 export async function studioPublishRepo(

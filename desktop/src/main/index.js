@@ -1024,17 +1024,21 @@ app.on('will-quit', () => {
   stopSoumtokCodeHost()
 })
 
-ipcMain.handle('app:info', (event) => ({
-  platform: process.platform,
-  api: API,
-  version: appVersion,
-  productName: appProductName,
-  folder: folderOf(event),
-  lastFolder: loadState().lastFolder || null,
-  soumtokHome: SOUMTOK_HOME,
-  localData: app.getPath('userData'),
-  monaco: path.join(__dirname, '../../node_modules/monaco-editor/min/vs').replace(/\\/g, '/'),
-}))
+ipcMain.handle('app:info', (event) => {
+  const { getDesktopConfig } = require('./desktopControl')
+  return {
+    platform: process.platform,
+    api: API,
+    version: appVersion,
+    productName: appProductName,
+    folder: folderOf(event),
+    lastFolder: loadState().lastFolder || null,
+    soumtokHome: SOUMTOK_HOME,
+    localData: app.getPath('userData'),
+    monaco: path.join(__dirname, '../../node_modules/monaco-editor/min/vs').replace(/\\/g, '/'),
+    desktopConfig: getDesktopConfig(),
+  }
+})
 
 ipcMain.handle('workspace:load', (event) => {
   const folder = folderOf(event)
@@ -1480,12 +1484,20 @@ ipcMain.handle('folder:pickAttach', async (event) => {
   return out
 })
 
-ipcMain.handle('testhub:chat', async (_e, payload) => {
-  const res = await api('POST', '/api/studio/complete', {
+function testHubStreamBody(payload) {
+  return {
     model: String(payload?.model || 'auto').trim() || 'auto',
     messages: Array.isArray(payload?.messages) ? payload.messages : [],
     agent: false,
-  }).catch(() => ({ status: 0, data: { error: 'Could not reach Soumtok.' } }))
+    client: 'test-hub',
+  }
+}
+
+ipcMain.handle('testhub:chat', async (_e, payload) => {
+  const res = await api('POST', '/api/studio/complete', testHubStreamBody(payload), 180_000).catch(() => ({
+    status: 0,
+    data: { error: 'Could not reach Soumtok.' },
+  }))
   if (res.status === 401) return { error: 'Sign in to use Test Hub.' }
   if (res.status !== 200) return { error: res.data?.error || `Request failed (${res.status || 'offline'})` }
   return { text: String(res.data?.text || '') }
@@ -1511,7 +1523,8 @@ function parseSseFrames(buffer) {
 
 function pushTestHubStreamChunk(win, streamId, text) {
   try {
-    if (!win.isDestroyed()) win.webContents.send('testhub:chunk', { streamId, text })
+    if (!win || win.isDestroyed()) return
+    win.webContents.send('testhub:chunk', { streamId, text })
   } catch {
     /* ignore */
   }
@@ -1546,6 +1559,12 @@ function streamStudioCompleteViaNode(win, cookie, streamId, body, timeoutMs = 18
     const payload = Buffer.from(JSON.stringify(body))
     let buffer = ''
     let text = ''
+    let settled = false
+    const finish = (result) => {
+      if (settled) return
+      settled = true
+      resolve(result)
+    }
     const req = lib.request(
       {
         protocol: u.protocol,
@@ -1564,7 +1583,7 @@ function streamStudioCompleteViaNode(win, cookie, streamId, body, timeoutMs = 18
       },
       (res) => {
         if (res.statusCode === 401) {
-          resolve({ error: 'Sign in to use Test Hub.', text: '' })
+          finish({ error: 'Sign in to use Test Hub.', text: '' })
           return
         }
         if (res.statusCode >= 400) {
@@ -1578,7 +1597,7 @@ function streamStudioCompleteViaNode(win, cookie, streamId, body, timeoutMs = 18
             } catch {
               /* ignore */
             }
-            resolve({ error: msg, text: '' })
+            finish({ error: msg, text: '' })
           })
           return
         }
@@ -1589,19 +1608,23 @@ function streamStudioCompleteViaNode(win, cookie, streamId, body, timeoutMs = 18
           const out = processSseEvents(parsed.events, text, win, streamId)
           text = out.text
           if (out.error) {
-            resolve({ error: out.error, text })
+            finish({ error: out.error, text })
             req.destroy()
             return
           }
-          if (out.done) resolve({ text })
+          if (out.done) finish({ text })
         })
-        res.on('end', () => resolve({ text }))
+        res.on('end', () => finish({ text }))
+        res.on('aborted', () => finish({ error: text ? undefined : 'Stream aborted', text }))
       },
     )
-    req.on('error', reject)
+    req.on('error', (err) => finish({ error: err?.message || 'Request failed', text }))
     req.on('timeout', () => {
       req.destroy()
-      reject(new Error('Request timed out'))
+      finish({ error: 'Request timed out', text })
+    })
+    req.on('close', () => {
+      if (!settled) finish({ error: text ? undefined : 'Connection closed', text })
     })
     req.write(payload)
     req.end()
@@ -1672,7 +1695,7 @@ function streamStudioCompleteViaNet(win, cookie, streamId, body, timeoutMs = 180
       })
       response.on('end', () => finish({ text }))
     })
-    request.on('error', (err) => reject(err || new Error('net.request failed')))
+    request.on('error', (err) => finish({ error: err?.message || 'net.request failed', text }))
     request.write(streamBody)
     request.end()
   })
@@ -1697,11 +1720,7 @@ async function streamStudioCompleteNonStream(body, win, streamId) {
 async function streamStudioComplete(event, payload) {
   const win = BrowserWindow.fromWebContents(event.sender)
   const streamId = String(payload?.streamId || 'default')
-  const body = {
-    model: String(payload?.model || 'auto').trim() || 'auto',
-    messages: Array.isArray(payload?.messages) ? payload.messages : [],
-    agent: false,
-  }
+  const body = testHubStreamBody(payload)
 
   const attempt = async () => {
     const cookie = await cookieHeader()
@@ -1741,7 +1760,47 @@ async function streamStudioComplete(event, payload) {
   return result
 }
 
-ipcMain.handle('testhub:stream', (event, payload) => streamStudioComplete(event, payload))
+async function runTestHubStream(event, payload) {
+  const win = BrowserWindow.fromWebContents(event.sender)
+  const streamId = String(payload?.streamId || 'default')
+  const body = testHubStreamBody(payload)
+  const STREAM_MS = 90_000
+  const raced = await Promise.race([
+    streamStudioComplete(event, payload).catch((err) => ({
+      error: err?.message || 'Stream failed',
+      text: '',
+    })),
+    new Promise((resolve) => {
+      setTimeout(() => resolve({ __timedOut: true, text: '' }), STREAM_MS)
+    }),
+  ])
+  const needsFallback =
+    raced?.__timedOut || (raced?.error && (!raced.text || isReachFailure(raced.error)))
+  if (needsFallback) {
+    const fallback = await streamStudioCompleteNonStream(body, win, streamId)
+    if (!fallback.error) return fallback
+    if (raced?.error && !raced.__timedOut) return raced
+    return fallback
+  }
+  return raced
+}
+
+ipcMain.handle('testhub:stream', async (event, payload) => {
+  try {
+    return await runTestHubStream(event, payload)
+  } catch (err) {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    const body = testHubStreamBody(payload)
+    const streamId = String(payload?.streamId || 'default')
+    try {
+      const fallback = await streamStudioCompleteNonStream(body, win, streamId)
+      if (!fallback.error) return fallback
+    } catch {
+      /* ignore */
+    }
+    return { error: err?.message || 'Test Hub request failed', text: '' }
+  }
+})
 
 const TEST_HUB_DIR = path.join(SOUMTOK_HOME, 'ide', 'test-hub')
 const TEST_HUB_SESSION = path.join(TEST_HUB_DIR, 'session.json')
@@ -2410,8 +2469,9 @@ ipcMain.handle('auth:login', async (_e, mode) => {
     data: null,
   }))
   const id = started.data?.id
+  const verifier = String(started.data?.verifier || '').trim()
   const path = mode === 'up' ? '/signup' : '/login'
-  if (!id) {
+  if (!id || !verifier) {
     const error =
       started.data?.error ||
       (started.status === 503
@@ -2421,12 +2481,14 @@ ipcMain.handle('auth:login', async (_e, mode) => {
           : reachError('Could not reach Soumtok server'))
     return { pendingId: null, user: null, error, api: API }
   }
-  const url = `${API}${path}?desktop=${encodeURIComponent(id)}`
+  desktopLoginVerifiers.set(id, verifier)
+  const url = `${API}${path}?desktop=${encodeURIComponent(id)}#dv=${encodeURIComponent(verifier)}`
   await shell.openExternal(url)
   return { pendingId: id, user: null, api: API }
 })
 
 const desktopLoginTokens = new Map()
+const desktopLoginVerifiers = new Map()
 
 async function completeDesktopLogin(token, loginId = '') {
   const sessionToken = String(token || '').trim()
@@ -2436,7 +2498,10 @@ async function completeDesktopLogin(token, loginId = '') {
   for (let attempt = 0; attempt < 10; attempt++) {
     const user = await sessionUser()
     if (user.user) {
-      if (loginId) desktopLoginTokens.delete(loginId)
+      if (loginId) {
+        desktopLoginTokens.delete(loginId)
+        desktopLoginVerifiers.delete(loginId)
+      }
       return { expired: false, user: user.user, api: API }
     }
     await new Promise((r) => setTimeout(r, 200 + attempt * 150))
@@ -2449,7 +2514,11 @@ ipcMain.handle('auth:poll', async (_e, id) => {
   if (!loginId) return sessionUser()
   const cached = desktopLoginTokens.get(loginId)
   if (cached) return completeDesktopLogin(cached, loginId)
-  const poll = await api('GET', `/api/desktop/poll/${encodeURIComponent(loginId)}`).catch(() => ({ data: null }))
+  const verifier = desktopLoginVerifiers.get(loginId) || ''
+  const poll = await api(
+    'GET',
+    `/api/desktop/poll/${encodeURIComponent(loginId)}?verifier=${encodeURIComponent(verifier)}`,
+  ).catch(() => ({ data: null }))
   if (poll.data?.status === 'expired') return { expired: true, user: null, api: API }
   if (poll.data?.token) return completeDesktopLogin(poll.data.token, loginId)
   return { expired: false, user: null, api: API }
@@ -3146,6 +3215,14 @@ ipcMain.handle('git:publish', async (event, workspaceHint) => {
 
 ipcMain.handle('help:open', () => {
   shell.openExternal(`${API}/docs`)
+})
+
+ipcMain.handle('bug-report:send', async (event, payload) => {
+  const body = payload && typeof payload === 'object' ? payload : {}
+  const res = await api('POST', '/api/bug-report', body, 30_000)
+  if (res.status === 401) return { error: 'Sign in to Soumtok first.' }
+  if (res.status !== 200) return { error: res.data?.error || 'Could not send your report.' }
+  return { ok: true, inbox: res.data?.inbox || 'support@soumtok.com' }
 })
 
 function sendTermData(id, chunk, session) {

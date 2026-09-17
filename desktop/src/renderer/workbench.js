@@ -1338,6 +1338,7 @@ const COMMANDS = [
   { id: 'account', label: 'Account & Settings', run: toggleSettings },
   { id: 'billing', label: 'Billing', run: () => api.openBilling() },
   { id: 'docs', label: 'Documentation', run: () => api.openHelp() },
+  { id: 'bug-report', label: 'Report a bug', run: () => openBugReport() },
   { id: 'palette', label: 'Command Palette', run: openPalette },
   { id: 'layout', label: 'Toggle Sidebar', run: toggleSidebar },
   { id: 'back', label: 'Back', run: goBack },
@@ -2310,7 +2311,7 @@ function renderAgentMoreMenuHtml() {
     <button type="button" class="agent-more-item" data-agent-more="browser" role="menuitem">Open Browser</button>
     <button type="button" class="agent-more-item" data-agent-more="export" role="menuitem">Export Transcript</button>
     <button type="button" class="agent-more-item" data-agent-more="copy-id" role="menuitem">Copy Request ID</button>
-    <button type="button" class="agent-more-item" data-agent-more="feedback" role="menuitem">Give Feedback</button>
+    <button type="button" class="agent-more-item" data-agent-more="feedback" role="menuitem">Report a bug</button>
     <div class="agent-more-sep" role="separator"></div>
     <button type="button" class="agent-more-item" data-agent-more="settings" role="menuitem">Agent Settings</button>
     <div class="agent-more-sep" role="separator"></div>
@@ -2366,7 +2367,7 @@ function runAgentMoreAction(action) {
   } else if (action === 'copy-chat') void copyEntireAgentChat()
   else if (action === 'export') exportAgentTranscript()
   else if (action === 'copy-id') void copyAgentRequestId()
-  else if (action === 'feedback' && typeof api.openHelp === 'function') api.openHelp()
+  else if (action === 'feedback') openBugReport()
   renderAgentPanel()
 }
 
@@ -3171,6 +3172,32 @@ async function loadAccountSummary() {
   refreshModelReadiness()
 }
 
+function showDesktopUpdateBanner(config) {
+  if (!config?.updateRequired && !config?.updateAvailable) return
+  if (document.getElementById('desktop-update-banner')) return
+  const el = document.createElement('div')
+  el.id = 'desktop-update-banner'
+  el.className = 'desktop-update-banner'
+  el.setAttribute('role', 'status')
+  const msg = document.createElement('span')
+  msg.className = 'desktop-update-banner-text'
+  const latest = String(config?.latestVersion || '').trim()
+  msg.innerHTML = `<strong>Update available</strong> — Soumtok ${latest || 'latest'} includes security fixes.`
+  const btn = document.createElement('button')
+  btn.type = 'button'
+  btn.className = 'desktop-update-banner-btn'
+  btn.textContent = 'Download update'
+  btn.addEventListener('click', () => void api.checkUpdates?.())
+  const dismiss = document.createElement('button')
+  dismiss.type = 'button'
+  dismiss.className = 'desktop-update-banner-dismiss'
+  dismiss.title = 'Dismiss'
+  dismiss.textContent = '×'
+  dismiss.addEventListener('click', () => el.remove())
+  el.append(msg, btn, dismiss)
+  document.body.prepend(el)
+}
+
 async function boot() {
   window.addEventListener('error', (event) => {
     void api.logCrash?.({
@@ -3315,6 +3342,12 @@ async function boot() {
     }
   })
   setAuthBootLoading(true, 'Checking your session…')
+  try {
+    const info = await api.info?.()
+    if (info?.desktopConfig) showDesktopUpdateBanner(info.desktopConfig)
+  } catch {
+    /* ignore */
+  }
   const snap = loadDevSnapshot()
   try {
     await refreshSession()
@@ -3689,6 +3722,12 @@ function bind() {
     if (event.key === 'Enter') closePrompt($('prompt-input').value)
     if (event.key === 'Escape') closePrompt(null)
   }
+  $('bug-report-cancel')?.addEventListener('click', closeBugReport)
+  $('bug-report-done')?.addEventListener('click', closeBugReport)
+  $('bug-report-send')?.addEventListener('click', () => void submitBugReport())
+  $('bug-report')?.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') closeBugReport()
+  })
   $('trust-publisher-cancel').onclick = () => closeTrustPublisher(false)
   $('trust-publisher-install').onclick = () => closeTrustPublisher(true)
   $('trust-publisher-learn').onclick = () => {
@@ -5271,6 +5310,11 @@ function settingsGeneralHtml() {
             'Reset preferences',
             'Restore default agent, layout, models, and editor settings on this device',
             `<button type="button" class="settings-row-btn" id="settings-reset-prefs">Reset</button>`,
+          ) +
+          settingsRow(
+            'Report a bug',
+            'Send details to support@soumtok.com',
+            `<button type="button" class="settings-row-btn" id="settings-bug-report">Report…</button>`,
           ),
       ),
     )}`
@@ -6585,6 +6629,7 @@ function bindSettingsScreen() {
   $('settings-reset-prefs')?.addEventListener('click', () => {
     if (window.confirm('Reset all Soumtok Desktop preferences on this device?')) resetDesktopPreferences()
   })
+  $('settings-bug-report')?.addEventListener('click', () => openBugReport())
   $('settings-editor-font')?.addEventListener('change', (e) => {
     applyEditorFontSize(Number(e.target.value))
   })
@@ -8748,6 +8793,74 @@ function closeTrustPublisher(confirmed) {
   trustPublisherMeta = null
   if (confirmed && meta?.publisher) trustPublisher(meta.publisher)
   done?.(Boolean(confirmed))
+}
+
+function bugReportContext() {
+  return {
+    version: String(state.appInfo?.version || ''),
+    platform: String(state.appInfo?.platform || ''),
+    api: String(state.appInfo?.api || ''),
+    folder: String(state.folder || ''),
+    product: appProductLabel(),
+  }
+}
+
+function openBugReport() {
+  const modal = $('bug-report')
+  if (!modal) return
+  $('bug-report-form').hidden = false
+  $('bug-report-sent').hidden = true
+  $('bug-report-error').hidden = true
+  $('bug-report-error').textContent = ''
+  $('bug-report-message').value = ''
+  $('bug-report-category').value = 'Bug'
+  const emailRow = $('bug-report-email-row')
+  const signedIn = Boolean(state.user?.email)
+  if (emailRow) emailRow.hidden = signedIn
+  if ($('bug-report-email')) $('bug-report-email').value = state.user?.email || ''
+  modal.hidden = false
+  $('bug-report-message')?.focus()
+}
+
+function closeBugReport() {
+  const modal = $('bug-report')
+  if (modal) modal.hidden = true
+}
+
+async function submitBugReport() {
+  const msg = String($('bug-report-message')?.value || '').trim()
+  const errEl = $('bug-report-error')
+  if (msg.length < 8) {
+    errEl.textContent = 'Describe what happened (at least a few words).'
+    errEl.hidden = false
+    return
+  }
+  const email = state.user?.email || String($('bug-report-email')?.value || '').trim()
+  if (!email) {
+    errEl.textContent = 'Enter your email or sign in to Soumtok.'
+    errEl.hidden = false
+    return
+  }
+  const btn = $('bug-report-send')
+  if (btn) btn.disabled = true
+  errEl.hidden = true
+  try {
+    const res = await api.sendBugReport({
+      email,
+      category: String($('bug-report-category')?.value || 'Bug'),
+      message: msg,
+      surface: 'Desktop',
+      context: bugReportContext(),
+    })
+    if (res?.error) throw new Error(res.error)
+    $('bug-report-form').hidden = true
+    $('bug-report-sent').hidden = false
+  } catch (err) {
+    errEl.textContent = err instanceof Error ? err.message : 'Could not send. Try again.'
+    errEl.hidden = false
+  } finally {
+    if (btn) btn.disabled = false
+  }
 }
 
 function askTrustPublisher(meta) {

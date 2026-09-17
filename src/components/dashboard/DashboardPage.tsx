@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Spinner } from '../Loaders'
+import { BrandLockup } from '../ui'
+import { GITHUB_APP_INSTALL_URL } from '../../../shared/githubApp.ts'
 import { CODING_MODELS, PROVIDER_LABEL, modelGuide, soumtokPickerModels, type CodingModel, type ModelProvider } from '../../../shared/models'
 import { ModelBriefSheet } from './ModelBriefSheet'
 import {
@@ -11,12 +13,12 @@ import {
   type GithubRepo,
   type Profile,
 } from '../../lib/api'
-import { signIn, useSession } from '../../lib/auth-client'
+import { signInSocial, useSession } from '../../lib/auth-client'
 import { navigate } from '../../lib/nav'
+import { BugReportModal } from '../BugReportModal'
 import { AccountMenu } from './AccountMenu'
 import { SettingsPanel } from './SettingsPanel'
 import { StudioDashboard } from './StudioDashboard'
-import { MembersPanel } from './MembersPanel'
 import { IntegrationsPanel } from './IntegrationsPanel'
 import { BillingPanel, KeysPanel, SpendingPanel, UsagePanel } from './WorkspacePanels'
 import { PluginsPanel } from './PluginsPanel'
@@ -28,7 +30,6 @@ import {
   GithubIcon,
   IntegrationsIcon,
   KeysIcon,
-  MembersIcon,
   ModelsIcon,
   OverviewIcon,
   PluginsIcon,
@@ -49,7 +50,6 @@ const NAV = [
   { id: 'skills', label: 'Skills', icon: SkillsIcon },
   { id: 'integrations', label: 'Integrations', icon: IntegrationsIcon },
   { id: 'keys', label: 'Keys', title: 'API', icon: KeysIcon },
-  { id: 'members', label: 'Members', icon: MembersIcon, group: 'Team' },
   { id: 'usage', label: 'Usage', icon: UsageIcon },
   { id: 'spending', label: 'Spending', icon: SpendingIcon },
   { id: 'billing', label: 'Billing', icon: BillingIcon },
@@ -66,6 +66,7 @@ function navTitle(id: Section) {
 function sectionFromPath(path: string): Section {
   const rest = path.replace(/^\/dashboard\/?/, '') || 'overview'
   const id = rest.split('/')[0] || 'overview'
+  if (id === 'members') return 'overview'
   return NAV.some((item) => item.id === id) ? (id as Section) : 'overview'
 }
 
@@ -483,7 +484,7 @@ function GithubProjects({
   const [login, setLogin] = useState<string | null>(null)
   const [repos, setRepos] = useState<GithubRepo[]>([])
   const [query, setQuery] = useState('')
-  const [installUrl, setInstallUrl] = useState('https://github.com/apps/soumtok/installations/new')
+  const [installUrl, setInstallUrl] = useState(GITHUB_APP_INSTALL_URL)
   const [status, setStatus] = useState('Loading projects…')
 
   useEffect(() => {
@@ -641,7 +642,7 @@ function Overview({
       window.location.href = '/api/setup/github/start'
       return
     }
-    await signIn.social({ provider: 'github', callbackURL: '/dashboard' })
+    await signInSocial({ provider: 'github', callbackURL: '/dashboard' })
   }
 
   return (
@@ -816,12 +817,14 @@ export function DashboardPage({
   onDownload: () => void
 }) {
   const { data: session } = useSession()
+  const user = session?.user
   const [menuOpen, setMenuOpen] = useState(false)
   const [liveProfile, setLiveProfile] = useState(profile)
   const urlSection = sectionFromPath(path)
   const [section, setSection] = useState<Section>(urlSection)
   const [mounted, setMounted] = useState<Set<Section>>(() => new Set([urlSection]))
   const [painting, setPainting] = useState(false)
+  const [bugReportOpen, setBugReportOpen] = useState(false)
 
   useEffect(() => {
     setLiveProfile(profile)
@@ -892,7 +895,6 @@ export function DashboardPage({
     })
   }
 
-  const user = session?.user
   const displayName = user?.name || liveProfile?.username || user?.email || 'You'
   const sectionBody = (
     <>
@@ -908,6 +910,7 @@ export function DashboardPage({
           email={user?.email}
           name={user?.name}
           onSaved={() => fetchProfile().then(setLiveProfile)}
+          onReportBug={() => setBugReportOpen(true)}
         />
       </Keep>
       <Keep id="plugins" active={section} mounted={mounted}>
@@ -922,14 +925,11 @@ export function DashboardPage({
       <Keep id="integrations" active={section} mounted={mounted}>
         <IntegrationsPanel
           connected={Boolean(liveProfile?.githubId)}
-          onConnect={() => signIn.social({ provider: 'github', callbackURL: '/dashboard/integrations' })}
+          onConnect={() => signInSocial({ provider: 'github', callbackURL: '/dashboard/integrations' })}
         />
       </Keep>
       <Keep id="keys" active={section} mounted={mounted}>
         <KeysPanel />
-      </Keep>
-      <Keep id="members" active={section} mounted={mounted}>
-        <MembersPanel plan={liveProfile?.plan} name={displayName} email={user?.email} />
       </Keep>
       <Keep id="usage" active={section} mounted={mounted}>
         <UsagePanel />
@@ -952,17 +952,13 @@ export function DashboardPage({
           displayName={displayName}
           onDownload={onDownload}
           onProfileSaved={() => fetchProfile().then(setLiveProfile)}
+          onReportBug={() => setBugReportOpen(true)}
         />
       )}
     <div className={`theme-app flex min-h-svh ${section === 'studio' ? 'hidden' : ''}`} hidden={section === 'studio'}>
       <aside className="sticky top-0 z-30 hidden h-svh w-[248px] shrink-0 flex-col border-r border-white/[0.05] px-3 pt-6 pb-4 lg:flex">
         <button type="button" className="dash-aside-head mb-4 px-1.5 text-left" aria-label="Soumtok" onClick={() => openSection('overview')}>
-          <img
-            src="/images/soumtok-lockup.png"
-            alt="Soumtok"
-            className="brand-logo h-8 w-auto max-w-[168px] select-none object-contain object-left"
-            draggable={false}
-          />
+          <BrandLockup className="h-8 w-auto max-w-[168px] object-contain object-left" />
         </button>
         <nav className="thin-scroll mt-4 min-h-0 flex-1 space-y-0.5 overflow-y-auto pr-0.5">
           {NAV.map((item) => {
@@ -1002,17 +998,13 @@ export function DashboardPage({
           hasAvatar={liveProfile?.hasAvatar}
           onDownload={onDownload}
           onProfileSaved={() => fetchProfile().then(setLiveProfile)}
+          onReportBug={() => setBugReportOpen(true)}
         />
       </aside>
 
       <div className="flex min-w-0 flex-1 flex-col">
         <header className="flex items-center justify-between gap-3 border-b border-white/[0.05] px-4 py-3 lg:hidden">
-          <img
-            src="/images/soumtok-lockup.png"
-            alt="Soumtok"
-            className="brand-logo h-6 w-auto max-w-[140px] select-none object-contain"
-            draggable={false}
-          />
+          <BrandLockup className="h-6 w-auto max-w-[140px] object-contain" />
           <button
             type="button"
             className="grid h-10 w-10 place-items-center text-[13px] text-white/70"
@@ -1023,11 +1015,9 @@ export function DashboardPage({
             {menuOpen ? 'Close' : 'Menu'}
           </button>
         </header>
-        {section !== 'members' && (
-          <header className="hidden items-center border-b border-white/[0.05] px-8 py-4 lg:flex">
-            <h1 className="text-[22px] font-medium tracking-[-0.03em]">{navTitle(section)}</h1>
-          </header>
-        )}
+        <header className="hidden items-center border-b border-white/[0.05] px-8 py-4 lg:flex">
+          <h1 className="text-[22px] font-medium tracking-[-0.03em]">{navTitle(section)}</h1>
+        </header>
         {menuOpen && (
           <div className="mobile-drawer lg:hidden">
             <button type="button" className="absolute inset-0 bg-black/55" aria-label="Close menu" onClick={() => setMenuOpen(false)} />
@@ -1055,6 +1045,7 @@ export function DashboardPage({
                   hasAvatar={liveProfile?.hasAvatar}
                   onDownload={onDownload}
                   onProfileSaved={() => fetchProfile().then(setLiveProfile)}
+                  onReportBug={() => setBugReportOpen(true)}
                 />
               </div>
             </div>
@@ -1068,9 +1059,7 @@ export function DashboardPage({
               : 'mx-auto w-full max-w-[1080px] min-w-0 flex-1 px-4 py-6 sm:px-5 sm:py-8 md:px-10 md:py-10'
           }
         >
-          {section !== 'members' && (
-            <h1 className="text-[22px] font-medium tracking-[-0.04em] sm:text-[28px] lg:hidden">{navTitle(section)}</h1>
-          )}
+          <h1 className="text-[22px] font-medium tracking-[-0.04em] sm:text-[28px] lg:hidden">{navTitle(section)}</h1>
           <div className="mt-8 lg:mt-0">
             {painting && <SectionLoader />}
             <div hidden={painting}>{sectionBody}</div>
@@ -1078,6 +1067,13 @@ export function DashboardPage({
         </main>
       </div>
     </div>
+      <BugReportModal
+        open={bugReportOpen}
+        onClose={() => setBugReportOpen(false)}
+        email={user?.email || ''}
+        surface="Dashboard"
+        context={{ section, path }}
+      />
     </>
   )
 }

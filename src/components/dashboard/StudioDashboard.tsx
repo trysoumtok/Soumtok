@@ -254,12 +254,14 @@ export function StudioDashboard({
   displayName,
   onDownload,
   onProfileSaved,
+  onReportBug,
 }: {
   profile: Profile | null
   path: string
   displayName: string
   onDownload?: () => void
   onProfileSaved?: () => void
+  onReportBug?: () => void
 }) {
   const view = studioView(path)
   const chatId = studioChatId(path)
@@ -452,6 +454,7 @@ export function StudioDashboard({
           collapsed={collapsed}
           onDownload={onDownload}
           onProfileSaved={onProfileSaved}
+          onReportBug={onReportBug}
         />
       </aside>
 
@@ -524,6 +527,7 @@ export function StudioDashboard({
                   hasAvatar={profile?.hasAvatar}
                   onDownload={onDownload}
                   onProfileSaved={onProfileSaved}
+                  onReportBug={onReportBug}
                 />
               </div>
             </div>
@@ -2930,8 +2934,17 @@ function StudioChat({
                 disabled={repoPushing || busy}
                 onClick={() => void createGithubRepo()}
                 className="mb-3 rounded-full border border-white/12 bg-[#141413] px-3 py-1.5 text-[13px] text-white/70 hover:text-white disabled:opacity-50"
+                title={
+                  githubConnected
+                    ? 'Create a private GitHub repo and push your project files'
+                    : 'Connect GitHub first — we will open the connect flow'
+                }
               >
-                {repoPushing ? 'Creating repo…' : 'Create repo'}
+                {repoPushing
+                  ? 'Creating repo…'
+                  : githubConnected
+                    ? 'Create repo on GitHub'
+                    : 'Create repo · connect GitHub'}
               </button>
             )}
             {composer}

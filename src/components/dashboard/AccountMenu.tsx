@@ -6,7 +6,6 @@ import { signOut, useSession } from '../../lib/auth-client'
 import { navigate, openTab } from '../../lib/nav'
 import { avatarUrl } from '../../lib/avatar'
 import { applyTheme, getThemePref, type ThemePref } from '../../lib/theme'
-import { AGENT_DRIVER_LABELS, type AgentDriver } from '../../../shared/soumtokBot'
 import { CreateProfileModal } from './CreateProfileModal'
 
 function MenuIcon({ d }: { d: string }) {
@@ -25,8 +24,7 @@ export function AccountMenu({
   collapsed,
   onDownload,
   onProfileSaved,
-  agentDriver,
-  onAgentDriverChange,
+  onReportBug,
 }: {
   name: string
   plan?: string
@@ -35,8 +33,7 @@ export function AccountMenu({
   collapsed?: boolean
   onDownload?: () => void
   onProfileSaved?: () => void
-  agentDriver?: AgentDriver
-  onAgentDriverChange?: (driver: AgentDriver) => void
+  onReportBug?: () => void
 }) {
   const { data: session } = useSession()
   const [open, setOpen] = useState(false)
@@ -204,37 +201,6 @@ export function AccountMenu({
         )}
       </div>
 
-      {onAgentDriverChange ? (
-        <div className="px-3 py-2.5">
-          <p className="mb-2 text-[11px] text-white/40">Agent driver</p>
-          <div className="flex gap-1 rounded-lg border border-white/[0.08] bg-black/25 p-1">
-            {(['ide', 'bot'] as const).map((item) => {
-              const on = (agentDriver || 'ide') === item
-              return (
-                <button
-                  key={item}
-                  type="button"
-                  className={`flex-1 rounded-md px-2 py-1.5 text-[11px] font-medium ${
-                    on ? 'bg-white/[0.12] text-white' : 'text-white/55 hover:bg-white/[0.05] hover:text-white/80'
-                  }`}
-                  onClick={() => {
-                    onAgentDriverChange(item)
-                    closeMenu()
-                  }}
-                >
-                  {AGENT_DRIVER_LABELS[item]}
-                </button>
-              )
-            })}
-          </div>
-          <p className="mt-2 text-[10px] leading-snug text-white/35">
-            {(agentDriver || 'ide') === 'bot'
-              ? 'Full bot chat — switch to IDE Agent to edit code in the project.'
-              : 'Editor + agent panel — pair-program on your codebase.'}
-          </p>
-        </div>
-      ) : null}
-
       <MenuRow
         icon={<MenuIcon d="M4 5.5h8v5H4v-5Zm1 7h6M6 4.5V3M10 4.5V3" />}
         label="Open Test Hub"
@@ -369,6 +335,14 @@ export function AccountMenu({
         }}
       />
       <MenuRow
+        icon={<MenuIcon d="M8 2.2 14.5 13H1.5L8 2.2zM8 6.2v3.4M8 11.4v.8" />}
+        label="Report a bug"
+        onClick={() => {
+          closeMenu()
+          onReportBug?.()
+        }}
+      />
+      <MenuRow
         icon={<MenuIcon d="M3.2 4.2h9.6A1.2 1.2 0 0 1 14 5.4v5.2A1.2 1.2 0 0 1 12.8 11.8H6.4L3.2 14V4.2Z" />}
         label="Contact Us"
         onClick={() => {
@@ -397,12 +371,12 @@ export function AccountMenu({
           <img
             src={avatarUrl(avatarBust)}
             alt=""
-            className={`h-8 w-8 shrink-0 rounded-full object-cover ${agentDriver === 'bot' ? 'ring-2 ring-[#f54e00]' : ''}`}
+            className="h-8 w-8 shrink-0 rounded-full object-cover"
             onError={() => setPhotoFailed(true)}
           />
         ) : (
           <span
-            className={`grid h-8 w-8 shrink-0 place-items-center rounded-full bg-white/10 text-[12px] ${agentDriver === 'bot' ? 'ring-2 ring-[#f54e00]' : ''}`}
+            className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-white/10 text-[12px]"
           >
             {initial}
           </span>
