@@ -98,6 +98,26 @@ export function Footer() {
           </div>
           <div className="flex flex-wrap items-center gap-4">
             <a
+              href="/terms"
+              className="text-white/40 no-underline hover:text-white/70"
+              onClick={(event) => {
+                event.preventDefault()
+                navigate('/terms')
+              }}
+            >
+              Terms
+            </a>
+            <a
+              href="/privacy"
+              className="text-white/40 no-underline hover:text-white/70"
+              onClick={(event) => {
+                event.preventDefault()
+                navigate('/privacy')
+              }}
+            >
+              Privacy
+            </a>
+            <a
               href={SITE_GITHUB}
               target="_blank"
               rel="noreferrer"

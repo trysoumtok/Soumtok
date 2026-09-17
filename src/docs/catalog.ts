@@ -1683,17 +1683,24 @@ export const DOCS_PAGES: DocsPage[] = [
   },
   {
     id: 'cli',
-    title: 'CLI',
+    title: 'CLI & Terminal',
     crumb: 'Reference',
     toc: [
+      { id: 'terminal', title: 'Soumtok Terminal CLI' },
       { id: 'dev', title: 'Local app' },
       { id: 'env', title: 'What env is for' },
-      { id: 'not', title: 'No product CLI yet' },
+      { id: 'automations', title: 'Unattended work' },
     ],
     blocks: [
       {
         type: 'p',
-        text: 'Soumtok ships as a web app and as Soumtok Desktop (Windows, macOS, Linux) from the download page. There is no separate Soumtok CLI for Studio chat — use Automations or cloud agents for unattended work. Developers run the web app locally with npm run dev -- --host --port 5173, then open http://localhost:5173/. If 5173 is taken, Vite picks the next port — check the terminal for Local:.',
+        text: 'Soumtok ships as Studio in the browser, Soumtok Desktop (Windows, macOS, Linux), and the Soumtok Terminal CLI — a Cursor-style agent in your shell. All three share one account, models, and usage meter. Download links and install commands live on /download.',
+      },
+      {
+        id: 'terminal',
+        title: 'Soumtok Terminal CLI',
+        type: 'p',
+        text: 'Install from the download page: Windows (PowerShell), macOS, or Linux (curl | bash). Run soumtok login once, then soumtok in any project folder. The CLI calls the same Soumtok agent API as Studio and Desktop. You can also set SOUMTOK_API_KEY for headless use.',
       },
       {
         id: 'dev',
@@ -1715,10 +1722,10 @@ export const DOCS_PAGES: DocsPage[] = [
         ],
       },
       {
-        id: 'not',
-        title: 'No product CLI yet',
+        id: 'automations',
+        title: 'Unattended work',
         type: 'p',
-        text: 'GitHub is the git remote. Soumtok does not host origin remotes and does not ship a command-line agent you curl into CI. If you need unattended work, use Automations (schedule or webhook) or Cloud agents. For a local IDE shell, download Soumtok Desktop from the landing page.',
+        text: 'GitHub is the git remote. Soumtok does not host origin remotes. For scheduled or webhook jobs without an open terminal, use Automations or Cloud agents. For a full IDE, download Soumtok Desktop. For a shell agent, use the Terminal CLI.',
       },
     ],
   },
@@ -1809,7 +1816,7 @@ export const DOCS_PAGES: DocsPage[] = [
         id: 'legal',
         title: 'Legal',
         type: 'p',
-        text: 'Terms, acceptable use, privacy, data use, and security are linked from the footer. Soumtok is based in Nairobi. We do not print SOC or ISO badges we have not earned.',
+        text: 'Terms of Service (/terms) and Privacy Policy (/privacy) cover acceptable use, billing, data use, and security. Soumtok is based in Nairobi, Kenya. We do not print SOC or ISO badges we have not earned.',
       },
     ],
   },

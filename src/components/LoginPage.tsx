@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { checkSignupEmail, confirmTwoFactor, fetchHealth } from '../lib/api'
-import { signIn, signUp } from '../lib/auth-client'
+import { authRedirectUrl, signIn, signInSocial, signUp } from '../lib/auth-client'
 import { navigate } from '../lib/nav'
 import { AuthOverlay, Spinner } from './Loaders'
 import { BrandMark, InfoIcon, Logo } from './ui'
@@ -9,6 +9,19 @@ function GithubIcon() {
   return (
     <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
       <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82A7.68 7.68 0 0 1 8 4.14c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z" />
+    </svg>
+  )
+}
+
+function PasskeyIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <path
+        d="M12 3a4 4 0 0 0-4 4v2H7a3 3 0 0 0-3 3v7a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3v-7a3 3 0 0 0-3-3h-1V7a4 4 0 0 0-4-4Z"
+        stroke="currentColor"
+        strokeWidth="1.6"
+      />
+      <circle cx="12" cy="14" r="1.6" fill="currentColor" />
     </svg>
   )
 }
@@ -110,7 +123,7 @@ export function LoginPage({ mode, force2fa }: { mode: 'in' | 'up'; force2fa?: bo
     setBusy('github')
     try {
       const result = await Promise.race([
-        signIn.social({
+        signInSocial({
           provider: 'github',
           callbackURL: postLoginPath(),
         }),
@@ -136,10 +149,19 @@ export function LoginPage({ mode, force2fa }: { mode: 'in' | 'up'; force2fa?: bo
     setError('')
     setBusy('google')
     try {
-      await signIn.social({
-        provider: 'google',
-        callbackURL: postLoginPath(),
-      })
+      const result = await Promise.race([
+        signInSocial({
+          provider: 'google',
+          callbackURL: postLoginPath(),
+        }),
+        new Promise<{ error: { message: string } }>((resolve) =>
+          setTimeout(() => resolve({ error: { message: 'Google took too long. Try again or use a magic link.' } }), 10000),
+        ),
+      ])
+      if (result.error) {
+        setError(result.error.message || 'Google sign-in failed')
+        setBusy('idle')
+      }
     } catch {
       setError('Google sign-in failed. Try email or a magic link.')
       setBusy('idle')
@@ -240,7 +262,7 @@ export function LoginPage({ mode, force2fa }: { mode: 'in' | 'up'; force2fa?: bo
     setBusy('magic')
     const result = await signIn.magicLink({
       email,
-      callbackURL: postLoginPath(),
+      callbackURL: authRedirectUrl(postLoginPath()),
     })
     setBusy('idle')
     if (result.error) {
@@ -345,8 +367,8 @@ export function LoginPage({ mode, force2fa }: { mode: 'in' | 'up'; force2fa?: bo
           disabled={busy !== 'idle'}
           className="mt-3 flex w-full items-center justify-center gap-3 rounded-lg border border-white/8 bg-[#262626] py-3 text-[15px] font-medium text-white transition hover:bg-[#2e2e2e] disabled:opacity-50"
         >
-          {busy === 'passkey' ? <Spinner className="h-4 w-4" /> : <GoogleIcon />}
-          {busy === 'passkey' ? 'Waiting for passkey' : 'Continue with Google passkey'}
+          {busy === 'passkey' ? <Spinner className="h-4 w-4" /> : <PasskeyIcon />}
+          {busy === 'passkey' ? 'Waiting for passkey' : 'Continue with passkey'}
         </button>
 
         <div className="my-6 flex w-full items-center gap-3 text-[12px] text-white/30">
@@ -492,7 +514,7 @@ export function LoginPage({ mode, force2fa }: { mode: 'in' | 'up'; force2fa?: bo
         </div>
         {!mailReady && (
           <p className="mt-2 text-[12px] text-white/35">
-            Add SMTP_USER and SMTP_PASS in .env so magic links can send.
+            Email delivery is not configured — magic links and codes cannot send yet.
           </p>
         )}
 
@@ -537,11 +559,11 @@ export function LoginPage({ mode, force2fa }: { mode: 'in' | 'up'; force2fa?: bo
       )}
 
       <footer className="absolute inset-x-0 bottom-6 text-center text-[12px] text-white/30">
-        <a href="#legal" className="hover:text-white/55">
+        <a href="/terms" className="hover:text-white/55" onClick={(e) => { e.preventDefault(); navigate('/terms') }}>
           Terms of Service
         </a>
         {' and '}
-        <a href="#legal" className="hover:text-white/55">
+        <a href="/privacy" className="hover:text-white/55" onClick={(e) => { e.preventDefault(); navigate('/privacy') }}>
           Privacy Policy
         </a>
       </footer>

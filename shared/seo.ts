@@ -206,6 +206,18 @@ const PAGES: Record<string, SeoPage> = {
       'Download Soumtok Desktop for Windows, macOS, and Linux. Install the Terminal CLI for a Cursor-style coding agent in your shell. Same account, models, and GitHub agents.',
     path: '/download',
   },
+  '/terms': {
+    title: `Terms of Service | ${SITE_NAME}`,
+    description:
+      'Terms for Soumtok Studio, Desktop, Terminal CLI, cloud agents, and paid plans — Start $5, Pro $20, Pro Plus $48. Nairobi, Kenya.',
+    path: '/terms',
+  },
+  '/privacy': {
+    title: `Privacy Policy | ${SITE_NAME}`,
+    description:
+      'How Soumtok collects, uses, and protects account, billing, GitHub, and usage data. Built in Nairobi.',
+    path: '/privacy',
+  },
   '/login': {
     title: `Sign in | ${SITE_NAME}`,
     description: 'Sign in to Soumtok.',
@@ -318,6 +330,8 @@ export function marketingSitemapEntries(): SitemapEntry[] {
     { loc: '/help', changefreq: 'weekly', priority: '0.7', lastmod: SITEMAP_LASTMOD },
     { loc: '/download', changefreq: 'weekly', priority: '0.8', lastmod: SITEMAP_LASTMOD },
     { loc: '/contact', changefreq: 'weekly', priority: '0.6', lastmod: SITEMAP_LASTMOD },
+    { loc: '/terms', changefreq: 'monthly', priority: '0.5', lastmod: SITEMAP_LASTMOD },
+    { loc: '/privacy', changefreq: 'monthly', priority: '0.5', lastmod: SITEMAP_LASTMOD },
   ]
 }
 

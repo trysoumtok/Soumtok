@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { emptyProfile, fetchProfile, fetchTwoFactorStatus, isOnboardingComplete, type Profile } from './lib/api'
-import { signOut, useSession } from './lib/auth-client'
+import { authErrorMessage, isProtectedAppPath, signOut, useSession } from './lib/auth-client'
 import { sessionTimedOut } from '../shared/session'
 import { navigate, openTab, usePath } from './lib/nav'
 import { isMarketingPath, setMarketingSurface } from './lib/theme'
@@ -12,13 +12,14 @@ import { OnboardingPage } from './components/OnboardingPage'
 import { DashboardPage } from './components/dashboard/DashboardPage'
 import { DocsPage } from './components/docs/DocsPage'
 import { CheckoutPage } from './components/CheckoutPage'
-import { NewTeamPage } from './components/NewTeamPage'
 import { PublicProfilePage } from './components/PublicProfilePage'
 import { NotFoundPage } from './components/NotFoundPage'
 import { HelpPage } from './components/HelpPage'
 import { ContactPage } from './components/ContactPage'
 import { ConnectDevicePage } from './components/ConnectDevicePage'
 import { DesktopLinkPage } from './components/DesktopLinkPage'
+import { TermsPage } from './components/TermsPage'
+import { PrivacyPage } from './components/PrivacyPage'
 
 const RESERVED_PATHS = new Set([
   '',
@@ -69,25 +70,16 @@ export default function App() {
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
     const authError = params.get('error')
-    if (
-      authError === 'state_mismatch' ||
-      authError === 'state_security_mismatch' ||
-      authError === 'state_invalid' ||
-      authError === 'invalid_callback' ||
-      authError === 'access_denied'
-    ) {
-      sessionStorage.setItem(
-        'soumtok-auth-error',
-        authError === 'access_denied'
-          ? 'Sign-in was cancelled. Try again when you are ready.'
-          : 'Sign-in expired or opened in a different tab. Please try again on soumtok.com (not www).',
-      )
-      params.delete('error')
-      const rest = params.toString()
-      const nextPath = window.location.pathname === '/' ? '/login' : window.location.pathname
-      window.history.replaceState(null, '', rest ? `${nextPath}?${rest}` : nextPath)
-      if (window.location.pathname === '/') navigate('/login')
-    }
+    const authDescription = params.get('error_description')
+    if (!authError) return
+    sessionStorage.setItem(
+      'soumtok-auth-error',
+      authDescription?.trim() || authErrorMessage(authError),
+    )
+    params.delete('error')
+    params.delete('error_description')
+    const rest = params.toString()
+    navigate(rest ? `/login?${rest}` : '/login')
   }, [])
 
   useEffect(() => {
@@ -158,8 +150,8 @@ export default function App() {
   useEffect(() => {
     if (isPending) return
     if (!ready && !booted) return
-    if (!session && (onOnboarding || onDashboard || onCheckout || onTeamNew || onConnect || onDesktopLink)) {
-      if (onCheckout || onTeamNew || onConnect || onDesktopLink) {
+    if (!session && (onOnboarding || onDashboard || onCheckout || onTeamNew || onDesktopLink)) {
+      if (onCheckout || onTeamNew || onDesktopLink) {
         sessionStorage.setItem('soumtok-next', `${window.location.pathname}${window.location.search}`)
       }
       if (onDesktopLink) {
@@ -180,6 +172,10 @@ export default function App() {
         return
       }
       navigate('/onboarding')
+      return
+    }
+    if (session && path.startsWith('/team')) {
+      navigate('/dashboard')
       return
     }
     if (need2fa && (onDashboard || onCheckout || onTeamNew)) {
@@ -257,8 +253,15 @@ export default function App() {
     return <DownloadPage />
   }
 
+  if (path === '/terms') {
+    return <TermsPage />
+  }
+
+  if (path === '/privacy') {
+    return <PrivacyPage />
+  }
+
   if (path.startsWith('/connect/')) {
-    if (!session) return <PageSkeleton />
     const code = path.slice('/connect/'.length).split('/')[0] || ''
     return <ConnectDevicePage code={decodeURIComponent(code)} />
   }
@@ -266,10 +269,6 @@ export default function App() {
   const publicHandle = publicProfileHandle(path)
   if (publicHandle) {
     return <PublicProfilePage username={publicHandle} />
-  }
-
-  if (session && path.startsWith('/team')) {
-    return <NewTeamPage />
   }
 
   if (session && path.startsWith('/checkout')) {
@@ -282,6 +281,10 @@ export default function App() {
         <DashboardPage profile={profile ?? null} path={path} onDownload={openDownload} />
       </>
     )
+  }
+
+  if (isProtectedAppPath(path) && !session) {
+    return <PageSkeleton />
   }
 
   if (path !== '/' && path !== '/agents') {

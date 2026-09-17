@@ -59,3 +59,9 @@ test('download page mentions desktop and terminal cli', () => {
   assert.match(page.description, /Terminal CLI/)
   assert.match(page.description, /Desktop/)
 })
+
+test('terms and privacy pages resolve', () => {
+  assert.match(seoForPath('/terms').title, /Terms/)
+  assert.match(seoForPath('/privacy').title, /Privacy/)
+  assert.equal(seoForPath('/terms').noindex, undefined)
+})
