@@ -175,7 +175,7 @@ export function ContactPage() {
                     <img
                       src={model.src}
                       alt=""
-                      className={`h-5 w-5 object-contain ${model.mono ? 'logo-mark' : ''}`}
+                      className={`h-5 w-5 object-contain ${model.mono ? 'pricing-model-logo' : ''}`}
                     />
                     <span className="text-[15px] font-medium tracking-[-0.02em]">{model.name}</span>
                   </span>

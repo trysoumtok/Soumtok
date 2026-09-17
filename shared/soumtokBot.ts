@@ -45,9 +45,7 @@ export const AGENT_DRIVER_STORAGE_KEY = 'soumtok-agent-driver'
 
 export function readStoredAgentDriver(): AgentDriver {
   try {
-    const raw = localStorage.getItem(AGENT_DRIVER_STORAGE_KEY)
-    if (raw === 'bot') return 'ide'
-    return parseAgentDriver(raw)
+    return parseAgentDriver(localStorage.getItem(AGENT_DRIVER_STORAGE_KEY))
   } catch {
     return 'ide'
   }

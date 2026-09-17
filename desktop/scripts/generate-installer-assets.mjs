@@ -9,27 +9,32 @@ const BUILD = path.join(__dirname, '../build')
 const ICON = path.join(__dirname, '../resources/icon.png')
 const PKG = JSON.parse(fs.readFileSync(path.join(__dirname, '../package.json'), 'utf8'))
 const VERSION = PKG.version || '0.0.0'
-const BRAND = { bg: '#141414', bg2: '#1e1e1e', accent: '#f54e00', text: '#f3f3f3', mute: '#858585' }
+const BRAND = { bg: '#141414', bg2: '#1e1e1e', accent: '#f54e00', text: '#f3f3f3', mute: '#858585', ink: '#141414' }
 
-function licenseRtf() {
-  const lines = fs.readFileSync(path.join(BUILD, 'license.txt'), 'utf8').split(/\r?\n/)
-  const body = lines
-    .map((line) => {
-      const safe = line.replace(/\\/g, '\\\\').replace(/\{/g, '\\{').replace(/\}/g, '\\}')
-      if (!safe.trim()) return '\\par'
-      return `${safe}\\par`
-    })
-    .join('\n')
-  return `{\\rtf1\\ansi\\ansicpg1252\\deff0\\nouicompat
-{\\fonttbl{\\f0\\Segoe UI;}}
-{\\colortbl;\\red243\\green243\\blue243;\\red245\\green78\\blue0;\\red133\\green133\\blue133;}
-\\viewkind4\\uc1
-\\pard\\sa160\\sl276\\slmult1\\cf1\\b\\fs28 Soumtok Desktop\\b0\\fs22\\par
-\\pard\\sa120\\cf2 End User License Agreement\\cf1\\par
-\\pard\\sa80\\cf3 Version ${VERSION}\\cf1\\par
-\\pard\\sa160\\fs20
-${body}
-}`
+/** White mark -> dark ink for light backgrounds (installer title bar, etc.) */
+async function darkLogoBuffer(sharp, w, h) {
+  const resized = sharp(ICON).resize(w, h, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } }).ensureAlpha()
+  const { data, info } = await resized.raw().toBuffer({ resolveWithObject: true })
+  for (let i = 0; i < data.length; i += 4) {
+    const a = data[i + 3]
+    if (a === 0) continue
+    const r = data[i]
+    const g = data[i + 1]
+    const b = data[i + 2]
+    if (r > 180 && g < 120 && b < 80) {
+      data[i] = 245
+      data[i + 1] = 78
+      data[i + 2] = 0
+    } else {
+      data[i] = 20
+      data[i + 1] = 20
+      data[i + 2] = 20
+    }
+    data[i + 3] = a
+  }
+  return sharp(data, { raw: { width: info.width, height: info.height, channels: 4 } })
+    .png()
+    .toBuffer()
 }
 
 async function brandedIcon(sharp, size) {
@@ -38,12 +43,25 @@ async function brandedIcon(sharp, size) {
   const radius = Math.round(size * 0.2)
   const bgSvg = `<svg width="${size}" height="${size}" xmlns="http://www.w3.org/2000/svg">
     <rect width="${size}" height="${size}" rx="${radius}" ry="${radius}" fill="${BRAND.bg}"/>
-    <rect x="0" y="${size - Math.max(2, Math.round(size * 0.06))}" width="${size}" height="${Math.max(2, Math.round(size * 0.06))}" rx="0" fill="${BRAND.accent}"/>
+    <rect x="0" y="${size - Math.max(2, Math.round(size * 0.06))}" width="${size}" height="${Math.max(2, Math.round(size * 0.06))}" fill="${BRAND.accent}"/>
   </svg>`
   const logo = await sharp(ICON)
     .resize(inner, inner, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
     .png()
     .toBuffer()
+  return sharp(Buffer.from(bgSvg)).composite([{ input: logo, gravity: 'center' }]).png()
+}
+
+/** Light tile + dark mark — readable on white Windows title bars */
+async function installerIcon(sharp, size) {
+  const pad = Math.max(2, Math.round(size * 0.14))
+  const inner = size - pad * 2
+  const radius = Math.round(size * 0.2)
+  const bgSvg = `<svg width="${size}" height="${size}" xmlns="http://www.w3.org/2000/svg">
+    <rect width="${size}" height="${size}" rx="${radius}" ry="${radius}" fill="#ffffff"/>
+    <rect x="0" y="${size - Math.max(2, Math.round(size * 0.06))}" width="${size}" height="${Math.max(2, Math.round(size * 0.06))}" fill="${BRAND.accent}"/>
+  </svg>`
+  const logo = await darkLogoBuffer(sharp, inner, inner)
   return sharp(Buffer.from(bgSvg)).composite([{ input: logo, gravity: 'center' }]).png()
 }
 
@@ -61,9 +79,9 @@ async function main() {
     <text x="82" y="248" text-anchor="middle" fill="${BRAND.mute}" font-family="Segoe UI,sans-serif" font-size="10">AI-native IDE</text>
     <text x="82" y="286" text-anchor="middle" fill="${BRAND.mute}" font-family="Segoe UI,sans-serif" font-size="9">v${VERSION}</text></svg>`
   const headerSvg = `<svg width="150" height="57" xmlns="http://www.w3.org/2000/svg">
-    <rect width="150" height="57" fill="${BRAND.bg2}"/>
+    <rect width="150" height="57" fill="#ffffff"/>
     <rect x="0" y="54" width="150" height="3" fill="${BRAND.accent}"/>
-    <text x="46" y="34" fill="${BRAND.text}" font-family="Segoe UI,sans-serif" font-size="15" font-weight="600">Soumtok Setup</text></svg>`
+    <text x="46" y="34" fill="${BRAND.ink}" font-family="Segoe UI,sans-serif" font-size="15" font-weight="600">Soumtok Setup</text></svg>`
   const dmgSvg = `<svg width="540" height="380" xmlns="http://www.w3.org/2000/svg">
     <defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#1a1a1a"/><stop offset="100%" stop-color="#0f0f0f"/></linearGradient></defs>
     <rect width="540" height="380" fill="url(#bg)"/>
@@ -73,8 +91,8 @@ async function main() {
     <text x="130" y="320" text-anchor="middle" fill="${BRAND.mute}" font-size="12">Drag Soumtok here</text>
     <text x="410" y="320" text-anchor="middle" fill="${BRAND.mute}" font-size="12">Applications</text></svg>`
 
-  async function withLogo(svg, lw, lh, cx, cy) {
-    const logo = await sharp(ICON)
+  async function withLogo(svg, lw, lh, cx, cy, dark = false) {
+    const logo = dark ? await darkLogoBuffer(sharp, lw, lh) : await sharp(ICON)
       .resize(lw, lh, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
       .png()
       .toBuffer()
@@ -91,11 +109,19 @@ async function main() {
   }
   await (await brandedIcon(sharp, 512)).toFile(path.join(BUILD, 'icon.png'))
   fs.writeFileSync(path.join(BUILD, 'icon.ico'), await pngToIco(pngs))
-  await (await withLogo(sidebarSvg, 96, 96, 82, 132)).toFile(path.join(BUILD, 'installerSidebar.bmp'))
-  await (await withLogo(headerSvg, 32, 32, 24, 28)).toFile(path.join(BUILD, 'installerHeader.bmp'))
-  await (await withLogo(dmgSvg, 96, 96, 270, 168)).png().toFile(path.join(BUILD, 'dmg-background.png'))
+
+  const installerPngs = []
+  for (const s of [16, 24, 32, 48, 64, 128, 256]) {
+    const p = path.join(BUILD, `installer-icon-${s}.png`)
+    await (await installerIcon(sharp, s)).toFile(p)
+    installerPngs.push(p)
+  }
+  fs.writeFileSync(path.join(BUILD, 'installer-icon.ico'), await pngToIco(installerPngs))
+
+  await (await withLogo(sidebarSvg, 96, 96, 82, 132, false)).toFile(path.join(BUILD, 'installerSidebar.bmp'))
+  await (await withLogo(headerSvg, 32, 32, 24, 28, true)).toFile(path.join(BUILD, 'installerHeader.bmp'))
+  await (await withLogo(dmgSvg, 96, 96, 270, 168, false)).png().toFile(path.join(BUILD, 'dmg-background.png'))
   fs.copyFileSync(ICON, path.join(BUILD, 'linux-icon.png'))
-  fs.writeFileSync(path.join(BUILD, 'license.rtf'), licenseRtf(), 'utf8')
   console.log('OK installer assets -> desktop/build/')
 }
 

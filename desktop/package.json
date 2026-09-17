@@ -53,12 +53,14 @@
     "win": {
       "icon": "build/icon.ico",
       "target": ["nsis", "zip"],
-      "publisherName": "Soumtok",
       "legalTrademarks": "Soumtok",
       "verifyUpdateCodeSignature": true,
-      "signDlls": true,
-      "signingHashAlgorithms": ["sha256"],
-      "rfc3161TimeStampServer": "http://timestamp.digicert.com"
+      "signExts": [".dll"],
+      "signtoolOptions": {
+        "publisherName": "Soumtok",
+        "signingHashAlgorithms": ["sha256"],
+        "rfc3161TimeStampServer": "http://timestamp.digicert.com"
+      }
     },
     "mac": {
       "icon": "build/icon.png",
@@ -94,12 +96,12 @@
       "perMachine": false,
       "allowToChangeInstallationDirectory": true,
       "allowElevation": true,
-      "installerIcon": "build/icon.ico",
-      "uninstallerIcon": "build/icon.ico",
+      "installerIcon": "build/installer-icon.ico",
+      "uninstallerIcon": "build/installer-icon.ico",
       "installerSidebar": "build/installerSidebar.bmp",
       "installerHeader": "build/installerHeader.bmp",
-      "installerHeaderIcon": "build/icon.ico",
-      "license": "build/license.rtf",
+      "installerHeaderIcon": "build/installer-icon.ico",
+      "license": "build/license.txt",
       "include": "build/installer.nsh",
       "shortcutName": "Soumtok",
       "uninstallDisplayName": "Soumtok",

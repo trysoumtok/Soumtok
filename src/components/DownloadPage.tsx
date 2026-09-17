@@ -14,6 +14,7 @@ import { navigate, openTab } from '../lib/nav'
 import { Footer } from './Footer'
 import { Nav } from './Nav'
 import { DownloadIcon, PillButton } from './ui'
+import { WindowsSmartScreenGuide } from './WindowsSmartScreenGuide.tsx'
 
 function fetchManifest() {
   return fetch('/api/desktop/releases')
@@ -539,6 +540,12 @@ export function DownloadPage() {
           <p className="mt-8 text-[14px] text-white/35 sm:text-[15px]">
             Available for macOS, Windows, and Linux · v{latest?.version || config?.latestVersion || '…'}
           </p>
+
+          {(platform === 'windows' || platform === 'unknown') && !disabled && (
+            <div className="mx-auto mt-10 max-w-[820px] text-left">
+              <WindowsSmartScreenGuide />
+            </div>
+          )}
         </div>
 
         <div className="my-16 h-px bg-white/[0.08] sm:my-20" />
@@ -608,6 +615,10 @@ export function DownloadPage() {
           <p className="mt-3 text-[16px] text-white/45 sm:text-[17px]">
             Every platform and architecture for each release.
           </p>
+
+          <div className="mt-6">
+            <WindowsSmartScreenGuide />
+          </div>
 
           <div className="mt-6 rounded-2xl border border-white/[0.08] bg-[#111110] px-5 py-5 text-[14px] leading-7 text-white/55 sm:px-6 sm:text-[15px]">
             <p className="font-medium text-white/80">Which Windows installer?</p>

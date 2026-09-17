@@ -1,5 +1,6 @@
 import type { ChatFile } from '../../shared/chatMedia'
 import type { DesktopAgentMode } from '../../shared/desktopHarness'
+import type { AgentDriver } from '../../shared/soumtokBot'
 import { openaiToolCalls, studioToolsFromNative, type NativeToolCall } from '../../shared/nativeTools'
 import { friendlyStreamError } from '../../shared/streamDrop'
 import type { StudioRun } from './api'
@@ -39,6 +40,7 @@ export type StudioAgentHarnessInput = {
   analysisKind?: string
   signal?: AbortSignal
   maxRounds?: number
+  driver?: AgentDriver
 } & StudioAgentHarnessCallbacks
 
 type RoundResponse = {
@@ -118,7 +120,7 @@ export async function runStudioAgentHarness(input: StudioAgentHarnessInput): Pro
       {
         model: input.model,
         mode: input.mode,
-        driver: 'ide',
+        driver: input.driver ?? 'ide',
         messages: work,
         workspaceRoot: input.workspaceRoot || input.repo || 'studio-sandbox',
         openFiles: input.openFiles,

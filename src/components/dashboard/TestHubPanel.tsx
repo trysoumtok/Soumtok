@@ -29,8 +29,39 @@ import {
   highlightCode,
   parseSegments,
 } from '../../../shared/testHub'
+import { looksLikeViteProject, scoreCompareRun } from '../../../shared/testHubBenchmark'
 import { fetchDocuments, fetchModels, streamStudio } from '../../lib/api'
 import { filesFromDrop, readChatFiles } from '../../lib/chatFiles'
+
+const DEFAULT_COMPARE_PICK = ['deepseek-v4-flash', 'deepseek-chat']
+
+type PreviewLogRow = {
+  level: string
+  message: string
+  source: string
+  line: number
+}
+
+type CompareRunRow = {
+  streamId: string
+  model: string
+  modelName: string
+  text: string
+  status: 'running' | 'done' | 'error'
+  ms: number
+  error: string
+  previewErrors?: number
+  viteBuildOk?: boolean | null
+}
+
+type BenchmarkSummaryRow = {
+  model?: string
+  model_name?: string
+  avg_score?: number
+  runs?: number
+  avg_ms?: number
+  avg_files?: number
+}
 
 type HubModel = {
   id: string
@@ -109,12 +140,71 @@ type HubWorkspace = {
   model: string
   messages: HubMsg[]
   activeFile: string
-  outputTab: 'preview' | 'code'
+  outputTab: 'preview' | 'code' | 'compare'
   fileEdits?: Record<string, string>
 }
 
 function uid() {
   return crypto.randomUUID?.() || String(Date.now() + Math.random())
+}
+
+const LIVE_LINKS_KEY = 'soumtok-test-hub-live-links'
+
+type LiveDeployRow = {
+  id?: string
+  url: string
+  slug?: string
+  expires_at: string
+  created_at?: string
+  expired?: boolean
+  project_id?: string
+  project_title?: string
+  title?: string
+}
+
+function deployIsLive(row: LiveDeployRow | null | undefined) {
+  if (!row?.url || row.expired) return false
+  if (!row.expires_at) return true
+  return new Date(row.expires_at).getTime() > Date.now()
+}
+
+function readLiveLinkStore(): Record<string, LiveDeployRow> {
+  try {
+    return JSON.parse(localStorage.getItem(LIVE_LINKS_KEY) || '{}') as Record<string, LiveDeployRow>
+  } catch {
+    return {}
+  }
+}
+
+function cacheLiveDeploy(projectId: string, deploy: LiveDeployRow) {
+  if (!projectId || !deploy.url) return
+  const store = readLiveLinkStore()
+  store[projectId] = deploy
+  if (deploy.slug) store[`slug:${deploy.slug}`] = deploy
+  try {
+    localStorage.setItem(LIVE_LINKS_KEY, JSON.stringify(store))
+  } catch {
+    /* ignore */
+  }
+}
+
+function pickCachedLiveDeploy(projectId: string, projectLabel: string) {
+  const store = readLiveLinkStore()
+  if (deployIsLive(store[projectId])) return store[projectId]
+  const label = projectLabel.trim().toLowerCase()
+  for (const row of Object.values(store)) {
+    if (!deployIsLive(row)) continue
+    if (row.project_id === projectId) return row
+    const rowLabel = String(row.project_title || row.title || '').trim().toLowerCase()
+    if (label && rowLabel === label) return row
+  }
+  const guessSlug = suggestTestHubSlug(projectLabel)
+  if (guessSlug && deployIsLive(store[`slug:${guessSlug}`])) return store[`slug:${guessSlug}`]
+  return (
+    Object.values(store)
+      .filter((row) => deployIsLive(row))
+      .sort((a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime())[0] || null
+  )
 }
 
 function workspaceTitle(messages: HubMsg[], fallback = 'New project') {
@@ -205,7 +295,14 @@ export function TestHubPanel() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [live, setLive] = useState('')
-  const [outputTab, setOutputTab] = useState<'preview' | 'code'>('preview')
+  const [outputTab, setOutputTab] = useState<'preview' | 'code' | 'compare'>('preview')
+  const [compareMode, setCompareMode] = useState(false)
+  const [comparePick, setComparePick] = useState<string[]>([])
+  const [compareRuns, setCompareRuns] = useState<CompareRunRow[]>([])
+  const [previewLogs, setPreviewLogs] = useState<PreviewLogRow[]>([])
+  const [scoresOpen, setScoresOpen] = useState(false)
+  const [scoreRows, setScoreRows] = useState<BenchmarkSummaryRow[]>([])
+  const [scoresLoading, setScoresLoading] = useState(false)
   const [activeFile, setActiveFile] = useState('')
   const [archivesOpen, setArchivesOpen] = useState(false)
   const [archives, setArchives] = useState<{ id: string; title: string; updatedAt: string; fileCount: number }[]>([])
@@ -222,12 +319,7 @@ export function TestHubPanel() {
   const [shareCopyLabel, setShareCopyLabel] = useState('Copy link')
   const [linksOpen, setLinksOpen] = useState(false)
   const [linksRefreshKey, setLinksRefreshKey] = useState(0)
-  const [activeLiveDeploy, setActiveLiveDeploy] = useState<{
-    url: string
-    expires_at: string
-    created_at?: string
-    expired?: boolean
-  } | null>(null)
+  const [activeLiveDeploy, setActiveLiveDeploy] = useState<LiveDeployRow | null>(null)
   const [shareExisting, setShareExisting] = useState(false)
   const [briefModel, setBriefModel] = useState<CodingModel | null>(null)
   const [docs, setDocs] = useState<{ id: string; title: string }[]>([])
@@ -240,6 +332,7 @@ export function TestHubPanel() {
   const [fileEdits, setFileEdits] = useState<Record<string, string>>({})
   const abortRef = useRef<AbortController | null>(null)
   const feedRef = useRef<HTMLDivElement>(null)
+  const previewFrameRef = useRef<HTMLIFrameElement>(null)
   const fileRef = useRef<HTMLInputElement>(null)
   const folderRef = useRef<HTMLInputElement>(null)
   const bootRef = useRef(false)
@@ -267,8 +360,33 @@ export function TestHubPanel() {
   }, [baseArtifacts])
 
   useEffect(() => {
-    if (previewHtml) setOutputTab('preview')
-  }, [previewHtml])
+    if (previewHtml && outputTab !== 'compare') setOutputTab('preview')
+  }, [previewHtml, outputTab])
+
+  useEffect(() => {
+    const handler = (event: MessageEvent) => {
+      if (!event.data || event.data.type !== 'soumtok-preview-log') return
+      const frame = previewFrameRef.current
+      if (!frame?.contentWindow || event.source !== frame.contentWindow) return
+      setPreviewLogs((rows) =>
+        [
+          ...rows,
+          {
+            level: event.data.level || 'error',
+            message: String(event.data.message || ''),
+            source: event.data.source || '',
+            line: event.data.line || 0,
+          },
+        ].slice(-48),
+      )
+    }
+    window.addEventListener('message', handler)
+    return () => window.removeEventListener('message', handler)
+  }, [])
+
+  useEffect(() => {
+    setPreviewLogs([])
+  }, [activeId])
 
   useEffect(() => {
     if (!artifactPaths.length) return
@@ -297,7 +415,7 @@ export function TestHubPanel() {
         setActiveId(active.id)
         setMessages(active.messages || [])
         setModel(active.model || 'auto')
-        setOutputTab(active.outputTab === 'code' ? 'code' : 'preview')
+        setOutputTab(active.outputTab === 'code' ? 'code' : active.outputTab === 'compare' ? 'compare' : 'preview')
         setActiveFile(active.activeFile || '')
         setFileEdits(active.fileEdits && typeof active.fileEdits === 'object' ? active.fileEdits : {})
       } else {
@@ -383,6 +501,104 @@ export function TestHubPanel() {
   }, [messages, live])
 
   const selected = models.find((m) => m.id === model)
+  const enabledModels = useMemo(() => models.filter((m) => !isHubModelDisabled(m)), [models])
+  const comparePool = useMemo(() => {
+    const { top } = partitionHubPickerModels(enabledModels)
+    return top.length ? top : enabledModels.slice(0, 8)
+  }, [enabledModels])
+
+  const modelNameById = useCallback(
+    (id: string) => models.find((m) => m.id === id)?.name || id,
+    [models],
+  )
+
+  const lastUserPrompt = useCallback(() => {
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      if (messages[i]?.role === 'user') return String(messages[i].content || '')
+    }
+    return ''
+  }, [messages])
+
+  const saveBenchmarkRuns = useCallback(
+    async (runs: CompareRunRow[], opts: { compareMode?: boolean; viteEnabled?: boolean }) => {
+      if (!runs.length) return
+      try {
+        const res = await fetch('/api/test-hub/benchmarks', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            prompt: lastUserPrompt(),
+            compareMode: Boolean(opts.compareMode),
+            viteEnabled: Boolean(opts.viteEnabled),
+            runs: runs.map((run) => ({
+              model: run.model,
+              modelName: run.modelName,
+              text: run.text,
+              ms: run.ms,
+              status: run.status,
+              error: run.error,
+              previewErrors: run.previewErrors || previewLogs.length,
+              viteBuildOk: run.viteBuildOk ?? null,
+            })),
+          }),
+        })
+        const data = (await res.json()) as { winnerModel?: string; winnerScore?: number; error?: string }
+        if (data.winnerModel && data.winnerScore != null) {
+          setStatus(`Benchmark saved · ${modelNameById(data.winnerModel)} ${Math.round(data.winnerScore)}/100`)
+        } else if (res.ok) {
+          setStatus('Benchmark saved')
+        }
+      } catch {
+        /* optional when signed out */
+      }
+    },
+    [lastUserPrompt, modelNameById, previewLogs.length],
+  )
+
+  const loadBenchmarkScores = useCallback(async () => {
+    setScoresLoading(true)
+    try {
+      const res = await fetch('/api/test-hub/benchmarks/summary', { credentials: 'include' })
+      const data = (await res.json()) as { rows?: BenchmarkSummaryRow[] }
+      setScoreRows(data.rows || [])
+    } catch {
+      setScoreRows([])
+    } finally {
+      setScoresLoading(false)
+    }
+  }, [])
+
+  const toggleCompareMode = useCallback(() => {
+    setCompareMode((on) => {
+      const next = !on
+      if (next && comparePick.length < 2) {
+        const pick = comparePool
+          .slice(0, 2)
+          .map((m) => m.id)
+          .filter(Boolean)
+        setComparePick(pick.length >= 2 ? pick : [...DEFAULT_COMPARE_PICK])
+      }
+      return next
+    })
+  }, [comparePick.length, comparePool])
+
+  const toggleComparePick = useCallback(
+    (id: string) => {
+      const m = models.find((row) => row.id === id)
+      if (!m || isHubModelDisabled(m)) return
+      setComparePick((pick) => {
+        const idx = pick.indexOf(id)
+        if (idx >= 0) {
+          if (pick.length <= 2) return pick
+          return pick.filter((item) => item !== id)
+        }
+        if (pick.length >= 3) return pick
+        return [...pick, id]
+      })
+    },
+    [models],
+  )
 
   const attachFiles = useCallback(async (list: File[]) => {
     setError('')
@@ -395,7 +611,100 @@ export function TestHubPanel() {
     }
   }, [])
 
-  async function onSend() {
+  const applyCompareWinner = useCallback(
+    (idx: number) => {
+      const run = compareRuns[idx]
+      if (!run?.text) return
+      setModel(run.model)
+      setMessages((cur) => [...cur, { id: uid(), role: 'assistant', content: run.text }])
+      setCompareRuns([])
+      setOutputTab('preview')
+      setStatus(`Using ${run.modelName}`)
+    },
+    [compareRuns],
+  )
+
+  async function onSendCompare() {
+    const text = prompt.trim()
+    if (busy || (!text && !pending.length)) return
+    const modelIds = comparePick.filter((id) => {
+      const m = models.find((row) => row.id === id)
+      return m && !isHubModelDisabled(m)
+    })
+    if (modelIds.length < 2) {
+      setError('Pick at least 2 models to compare')
+      return
+    }
+    setError('')
+    const userMsg: HubMsg = { id: uid(), role: 'user', content: text, files: pending.length ? pending : undefined }
+    const next = [...messages, userMsg]
+    setMessages(next)
+    setPrompt('')
+    setPending([])
+    setBusy(true)
+    setLive('')
+    setOutputTab('compare')
+    const stamp = Date.now()
+    const initialRuns: CompareRunRow[] = modelIds.map((id) => ({
+      streamId: `compare-${id}-${stamp}-${Math.random().toString(36).slice(2, 8)}`,
+      model: id,
+      modelName: modelNameById(id),
+      text: '',
+      status: 'running',
+      ms: 0,
+      error: '',
+    }))
+    setCompareRuns(initialRuns)
+    abortRef.current?.abort()
+    abortRef.current = new AbortController()
+    const signal = abortRef.current.signal
+    try {
+      const apiMessages = buildTestHubApiMessages(next, { files: artifacts })
+      const finished = await Promise.all(
+        initialRuns.map(async (run) => {
+          const t0 = performance.now()
+          try {
+            let assistant = ''
+            await streamStudio(
+              run.model,
+              apiMessages,
+              (chunk) => {
+                assistant = chunk
+                setCompareRuns((rows) =>
+                  rows.map((row) => (row.streamId === run.streamId ? { ...row, text: chunk } : row)),
+                )
+              },
+              signal,
+              { agent: false },
+            )
+            const done: CompareRunRow = {
+              ...run,
+              text: assistant,
+              status: 'done',
+              ms: Math.round(performance.now() - t0),
+              previewErrors: previewLogs.length,
+            }
+            return done
+          } catch (err) {
+            if (signal.aborted) return run
+            return {
+              ...run,
+              status: 'error' as const,
+              error: err instanceof Error ? err.message : 'Request failed',
+              ms: Math.round(performance.now() - t0),
+            }
+          }
+        }),
+      )
+      setCompareRuns(finished)
+      const viteAny = finished.some((run) => looksLikeViteProject(extractBuildArtifacts(run.text || '')))
+      await saveBenchmarkRuns(finished, { compareMode: true, viteEnabled: viteAny })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function onSendSingle() {
     const text = prompt.trim()
     if (busy || (!text && !pending.length)) return
     setError('')
@@ -408,6 +717,7 @@ export function TestHubPanel() {
     setLive('')
     abortRef.current?.abort()
     abortRef.current = new AbortController()
+    const t0 = performance.now()
     try {
       const apiMessages = buildTestHubApiMessages(next, { files: artifacts })
       let assistant = ''
@@ -423,6 +733,21 @@ export function TestHubPanel() {
       )
       setMessages((cur) => [...cur, { id: uid(), role: 'assistant', content: assistant || live }])
       setLive('')
+      const run: CompareRunRow = {
+        streamId: uid(),
+        model,
+        modelName: modelNameById(model),
+        text: assistant,
+        status: 'done',
+        ms: Math.round(performance.now() - t0),
+        error: '',
+        previewErrors: previewLogs.length,
+        viteBuildOk: looksLikeViteProject(extractBuildArtifacts(assistant)) ? null : undefined,
+      }
+      await saveBenchmarkRuns([run], {
+        compareMode: false,
+        viteEnabled: looksLikeViteProject(extractBuildArtifacts(assistant)),
+      })
     } catch (err) {
       if (abortRef.current?.signal.aborted) return
       setError(err instanceof Error ? err.message : 'Request failed')
@@ -431,24 +756,69 @@ export function TestHubPanel() {
     }
   }
 
+  function onSend() {
+    if (compareMode) void onSendCompare()
+    else void onSendSingle()
+  }
+
+  function fixPreviewErrors() {
+    if (!previewLogs.length) return
+    const summary = previewLogs
+      .map((row) => {
+        const where = row.source ? ` (${row.source}${row.line ? `:${row.line}` : ''})` : ''
+        return `[${row.level}] ${row.message}${where}`
+      })
+      .join('\n')
+    setPrompt(
+      `The live preview threw these runtime errors:\n\n${summary}\n\nFix the project files so the preview runs without errors.`,
+    )
+  }
+
   const canShare = Boolean(previewHtml && artifactPaths.length)
-  const hasLiveLink = Boolean(activeLiveDeploy?.url && !activeLiveDeploy?.expired)
+  const hasLiveLink = deployIsLive(activeLiveDeploy)
 
   useEffect(() => {
+    const projectLabel = workspaceTitle(messages, workspaces.find((w) => w.id === activeId)?.title || 'Project')
+    const cached = pickCachedLiveDeploy(activeId, projectLabel)
+    if (cached) setActiveLiveDeploy(cached)
+
     let cancelled = false
-    void fetch(`/api/test-hub/deploys?limit=5&project=${encodeURIComponent(activeId)}`, { credentials: 'include' })
-      .then((r) => r.json())
-      .then((data: { rows?: typeof activeLiveDeploy[] }) => {
-        if (cancelled) return
-        setActiveLiveDeploy((data.rows || []).find((row) => row && !row.expired) || null)
-      })
-      .catch(() => {
-        if (!cancelled) setActiveLiveDeploy(null)
-      })
+    async function load() {
+      try {
+        const fetchRows = async (project?: string) => {
+          const q = project ? `?limit=10&project=${encodeURIComponent(project)}` : '?limit=30'
+          const r = await fetch(`/api/test-hub/deploys${q}`, { credentials: 'include' })
+          const data = (await r.json()) as { rows?: LiveDeployRow[] }
+          return (data.rows || []).filter((row) => deployIsLive(row))
+        }
+        let rows = await fetchRows(activeId)
+        if (!rows.length) {
+          const all = await fetchRows()
+          const label = projectLabel.trim().toLowerCase()
+          rows =
+            all.filter(
+              (row) =>
+                row.project_id === activeId ||
+                String(row.project_title || row.title || '')
+                  .trim()
+                  .toLowerCase() === label,
+            ) || []
+          if (!rows.length && all.length) rows = [all[0]]
+        }
+        const live = rows[0] || pickCachedLiveDeploy(activeId, projectLabel)
+        if (!cancelled) {
+          setActiveLiveDeploy(live)
+          if (live) cacheLiveDeploy(activeId, live)
+        }
+      } catch {
+        if (!cancelled) setActiveLiveDeploy(pickCachedLiveDeploy(activeId, projectLabel))
+      }
+    }
+    void load()
     return () => {
       cancelled = true
     }
-  }, [activeId, linksRefreshKey])
+  }, [activeId, linksRefreshKey, messages, workspaces])
 
   const openSharePublishForm = useCallback(() => {
     if (!canShare) return
@@ -504,7 +874,14 @@ export function TestHubPanel() {
           ttlMinutes: shareTtlMinutes,
         }),
       })
-      const data = (await res.json()) as { url?: string; error?: string; ttlMinutes?: number }
+      const data = (await res.json()) as {
+        url?: string
+        error?: string
+        ttlMinutes?: number
+        expiresAt?: string
+        id?: string
+        slug?: string
+      }
       if (!res.ok) {
         setShareError(data.error || `Publish failed (${res.status})`)
         return
@@ -519,12 +896,19 @@ export function TestHubPanel() {
         setSharePublishedTtl(data.ttlMinutes || shareTtlMinutes)
         setShareExisting(false)
         setShareCopyLabel('Copy link')
-        setActiveLiveDeploy({
+        const live: LiveDeployRow = {
+          id: data.id,
           url: data.url,
+          slug: data.slug,
           expires_at: data.expiresAt || '',
           created_at: new Date().toISOString(),
           expired: false,
-        })
+          project_id: activeId,
+          project_title: workspaceTitle(messages, workspaces.find((w) => w.id === activeId)?.title || 'Project'),
+          title,
+        }
+        setActiveLiveDeploy(live)
+        cacheLiveDeploy(activeId, live)
         setStatus(`Published · link copied · live ${formatShareDuration(data.ttlMinutes || shareTtlMinutes)}`)
         setLinksOpen(true)
         setLinksRefreshKey((n) => n + 1)
@@ -627,24 +1011,31 @@ export function TestHubPanel() {
             <OutTab active={outputTab === 'code'} onClick={() => setOutputTab('code')}>
               Code
             </OutTab>
+            {(compareMode || compareRuns.length > 0) && (
+              <OutTab active={outputTab === 'compare'} onClick={() => setOutputTab('compare')}>
+                Compare
+              </OutTab>
+            )}
           </div>
           <div className="h-8 w-px bg-white/10" aria-hidden="true" />
-          <ModelPicker
-            model={model}
-            selected={selected}
-            models={models}
-            open={modelOpen}
-            onToggle={() => setModelOpen((o) => !o)}
-            onClose={() => setModelOpen(false)}
-            onBrief={(m) => {
-              setModelOpen(false)
-              setBriefModel(CODING_MODELS.find((c) => c.id === m.id) ?? null)
-            }}
-            onPick={(id) => {
-              setModel(id)
-              setModelOpen(false)
-            }}
-          />
+          {!compareMode ? (
+            <ModelPicker
+              model={model}
+              selected={selected}
+              models={models}
+              open={modelOpen}
+              onToggle={() => setModelOpen((o) => !o)}
+              onClose={() => setModelOpen(false)}
+              onBrief={(m) => {
+                setModelOpen(false)
+                setBriefModel(CODING_MODELS.find((c) => c.id === m.id) ?? null)
+              }}
+              onPick={(id) => {
+                setModel(id)
+                setModelOpen(false)
+              }}
+            />
+          ) : null}
         </div>
         <div className="ml-auto flex items-center gap-2 px-3 py-2 lg:hidden">
           <div className="relative">
@@ -781,6 +1172,43 @@ export function TestHubPanel() {
           <div className="shrink-0 border-t border-white/[0.06] px-4 py-3 md:px-6">
             <div className="mx-auto max-w-[720px]">
               {error && <p className="mb-2 text-[12px] text-[#f48771]">{error}</p>}
+              {compareMode && (
+                <div className="mb-2 rounded-lg border border-white/[0.08] bg-[#141413] px-3 py-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-[11px] text-white/45">Same prompt → parallel builds · pick 2–3</span>
+                    <button
+                      type="button"
+                      className={`rounded-md px-2 py-1 text-[11px] font-medium ${
+                        compareMode ? 'bg-[#007acc]/20 text-[#9fd0ff]' : 'text-white/50 hover:bg-white/[0.05]'
+                      }`}
+                      aria-pressed={compareMode}
+                      onClick={toggleCompareMode}
+                    >
+                      Compare
+                    </button>
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-1.5" role="group" aria-label="Models to compare">
+                    {comparePool.slice(0, 8).map((m) => {
+                      const on = comparePick.includes(m.id)
+                      return (
+                        <button
+                          key={m.id}
+                          type="button"
+                          disabled={isHubModelDisabled(m)}
+                          className={`rounded-full border px-2.5 py-1 text-[11px] ${
+                            on
+                              ? 'border-[#007acc]/50 bg-[#007acc]/15 text-[#d6ebff]'
+                              : 'border-white/10 text-white/55 hover:border-white/20 hover:text-white/80'
+                          } disabled:opacity-40`}
+                          onClick={() => toggleComparePick(m.id)}
+                        >
+                          {m.name}
+                        </button>
+                      )
+                    })}
+                  </div>
+                </div>
+              )}
               {pending.length > 0 && (
                 <div className="mb-2 flex flex-wrap gap-2">
                   {pending.map((f) => (
@@ -824,14 +1252,23 @@ export function TestHubPanel() {
                     <ToolBtn onClick={() => fileRef.current?.click()}>Files</ToolBtn>
                     <ToolBtn onClick={() => folderRef.current?.click()}>Folder</ToolBtn>
                     {docs.length > 0 && <ToolBtn onClick={() => setDocsOpen((o) => !o)}>Docs</ToolBtn>}
+                    {!compareMode && (
+                      <ToolBtn
+                        onClick={() => {
+                          toggleCompareMode()
+                        }}
+                      >
+                        Compare
+                      </ToolBtn>
+                    )}
                   </div>
                   <button
                     type="button"
-                    disabled={busy}
+                    disabled={busy || (compareMode && comparePick.length < 2)}
                     onClick={() => void onSend()}
                     className="rounded-lg bg-[#007acc] px-4 py-1.5 text-[13px] font-medium text-white disabled:opacity-40"
                   >
-                    {busy ? 'Sending…' : 'Send'}
+                    {busy ? 'Sending…' : compareMode ? 'Compare' : 'Send'}
                   </button>
                 </div>
               </div>
@@ -874,7 +1311,9 @@ export function TestHubPanel() {
               Code
             </OutTab>
           </div>
-          {outputTab === 'preview' ? (
+          {outputTab === 'compare' ? (
+            <CompareOutputPane runs={compareRuns} onUse={applyCompareWinner} />
+          ) : outputTab === 'preview' ? (
             <div className="relative flex min-h-0 flex-1 flex-col bg-white">
               {canShare ? (
                 <div className="shrink-0 border-b border-black/10 bg-[#eef0f3] px-3 py-2">
@@ -911,11 +1350,39 @@ export function TestHubPanel() {
                 </p>
               ) : (
                 <iframe
+                  ref={previewFrameRef}
                   title="Test Hub preview"
                   sandbox="allow-scripts allow-same-origin"
                   srcDoc={previewHtml}
                   className="min-h-0 flex-1 w-full border-0 bg-white"
                 />
+              )}
+              {previewLogs.length > 0 && (
+                <div className="shrink-0 border-t border-black/10 bg-[#1e1e1e] text-[#d4d4d4]">
+                  <div className="flex items-center justify-between gap-2 px-3 py-1.5">
+                    <span className="text-[10px] font-medium uppercase tracking-wide text-white/45">Preview console</span>
+                    <div className="flex gap-2">
+                      <button type="button" className="text-[10px] text-[#007acc] hover:underline" onClick={fixPreviewErrors}>
+                        Fix errors
+                      </button>
+                      <button
+                        type="button"
+                        className="text-[10px] text-white/45 hover:text-white/70"
+                        onClick={() => setPreviewLogs([])}
+                      >
+                        Clear
+                      </button>
+                    </div>
+                  </div>
+                  <pre className="thin-scroll max-h-[120px] overflow-auto px-3 pb-2 font-mono text-[10px] leading-relaxed text-[#f48771]">
+                    {previewLogs
+                      .map((row) => {
+                        const where = row.source ? ` (${row.source}${row.line ? `:${row.line}` : ''})` : ''
+                        return `[${row.level}] ${row.message}${where}`
+                      })
+                      .join('\n')}
+                  </pre>
+                </div>
               )}
             </div>
           ) : (
@@ -1003,6 +1470,21 @@ export function TestHubPanel() {
                 }
                 setStatus(`Downloaded ${artifactPaths.length} files`)
               }}
+              scoresOpen={scoresOpen}
+              scoreRows={scoreRows}
+              scoresLoading={scoresLoading}
+              onToggleScores={() => {
+                setScoresOpen((open) => {
+                  const next = !open
+                  if (next) {
+                    setArchivesOpen(false)
+                    setLinksOpen(false)
+                    void loadBenchmarkScores()
+                  }
+                  return next
+                })
+              }}
+              onCloseScores={() => setScoresOpen(false)}
             />
           )}
         </aside>
@@ -1156,6 +1638,76 @@ export function TestHubPanel() {
   )
 }
 
+function CompareOutputPane({
+  runs,
+  onUse,
+}: {
+  runs: CompareRunRow[]
+  onUse: (idx: number) => void
+}) {
+  if (!runs.length) {
+    return (
+      <p className="flex flex-1 items-center justify-center px-6 text-center text-[13px] text-white/35">
+        Turn on Compare, pick 2–3 models, then send a prompt.
+      </p>
+    )
+  }
+  return (
+    <div className="thin-scroll grid min-h-0 flex-1 auto-rows-min grid-cols-1 gap-3 overflow-y-auto p-3 xl:grid-cols-2">
+      {runs.map((run, idx) => {
+        const files = extractBuildArtifacts(run.text || '')
+        const preview = buildPreviewHtml(files)
+        const autoScore = run.status === 'done' ? scoreCompareRun(run) : null
+        const ms = run.ms ? `${(run.ms / 1000).toFixed(1)}s` : run.status === 'running' ? '…' : '—'
+        const status =
+          run.status === 'error'
+            ? run.error || 'Error'
+            : run.status === 'running'
+              ? 'Building…'
+              : `${Object.keys(files).length} file${Object.keys(files).length === 1 ? '' : 's'}${
+                  autoScore != null ? ` · ${autoScore}/100` : ''
+                }${run.viteBuildOk === true ? ' · vite ✓' : run.viteBuildOk === false ? ' · vite ✗' : ''}`
+        return (
+          <article
+            key={run.streamId}
+            className={`flex min-h-[220px] flex-col overflow-hidden rounded-lg border border-white/[0.08] bg-[#141413] ${
+              run.status === 'running' ? 'ring-1 ring-[#007acc]/40' : ''
+            }`}
+          >
+            <header className="flex items-start justify-between gap-2 border-b border-white/[0.06] px-3 py-2">
+              <span className="text-[12px] font-medium text-white/90">{run.modelName}</span>
+              <span className="text-[10px] text-white/40">
+                {ms} · {status}
+              </span>
+            </header>
+            {preview ? (
+              <iframe
+                title={`Preview ${run.modelName}`}
+                sandbox="allow-scripts allow-same-origin"
+                srcDoc={preview}
+                className="min-h-[160px] flex-1 w-full border-0 bg-white"
+              />
+            ) : (
+              <div className="grid flex-1 place-items-center px-4 text-[12px] text-white/35">No preview yet</div>
+            )}
+            {run.status === 'done' && run.text ? (
+              <div className="border-t border-white/[0.06] p-2">
+                <button
+                  type="button"
+                  className="w-full rounded-md border border-[#007acc]/35 bg-[#007acc]/10 px-2 py-1.5 text-[11px] font-medium text-[#9fd0ff] hover:bg-[#007acc]/18"
+                  onClick={() => onUse(idx)}
+                >
+                  Use this build
+                </button>
+              </div>
+            ) : null}
+          </article>
+        )
+      })}
+    </div>
+  )
+}
+
 function CodeWorkspace({
   paths,
   files,
@@ -1182,6 +1734,11 @@ function CodeWorkspace({
   onCloseLinks,
   projectId,
   projectTitle,
+  scoresOpen,
+  scoreRows,
+  scoresLoading,
+  onToggleScores,
+  onCloseScores,
 }: {
   paths: string[]
   files: Record<string, string>
@@ -1208,6 +1765,11 @@ function CodeWorkspace({
   onCloseLinks: () => void
   projectId: string
   projectTitle: string
+  scoresOpen: boolean
+  scoreRows: BenchmarkSummaryRow[]
+  scoresLoading: boolean
+  onToggleScores: () => void
+  onCloseScores: () => void
 }) {
   if (!paths.length) {
     return (
@@ -1234,6 +1796,7 @@ function CodeWorkspace({
               {shareLinkLabel}
             </CodeAction>
           ) : null}
+          <CodeAction onClick={onToggleScores}>Scores</CodeAction>
           <CodeAction onClick={onToggleLinks}>Links</CodeAction>
           <CodeAction onClick={onToggleArchives}>Builds</CodeAction>
           <CodeAction onClick={onSaveArchive}>Save</CodeAction>
@@ -1242,6 +1805,50 @@ function CodeWorkspace({
           <CodeAction onClick={onDownload}>Download</CodeAction>
         </div>
       </div>
+      {scoresOpen && (
+        <div className="shrink-0 border-b border-[#333] bg-[#1a1a18]">
+          <div className="flex items-center justify-between px-3 py-1.5 text-[11px] text-white/45">
+            <span>Model scores</span>
+            <button type="button" className="text-white/50 hover:text-white/80" onClick={onCloseScores}>
+              ×
+            </button>
+          </div>
+          <div className="max-h-[180px] overflow-auto px-3 pb-2">
+            {scoresLoading ? (
+              <p className="py-2 text-[11px] text-white/35">Loading scores…</p>
+            ) : !scoreRows.length ? (
+              <p className="py-2 text-[11px] text-white/35">
+                No benchmark runs yet. Send a build or run Compare — scores save when you are signed in.
+              </p>
+            ) : (
+              <table className="w-full text-left text-[11px] text-white/75">
+                <thead>
+                  <tr className="text-white/40">
+                    <th className="pb-1 pr-2 font-medium">Model</th>
+                    <th className="pb-1 pr-2 font-medium">Avg</th>
+                    <th className="pb-1 pr-2 font-medium">Runs</th>
+                    <th className="pb-1 pr-2 font-medium">Time</th>
+                    <th className="pb-1 font-medium">Files</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {scoreRows.map((row) => (
+                    <tr key={row.model} className="border-t border-white/[0.06]">
+                      <td className="py-1 pr-2">{row.model_name || row.model || '—'}</td>
+                      <td className="py-1 pr-2 font-semibold text-white">{row.avg_score ?? '—'}</td>
+                      <td className="py-1 pr-2">{row.runs ?? 0}</td>
+                      <td className="py-1 pr-2">
+                        {row.avg_ms ? `${(Number(row.avg_ms) / 1000).toFixed(1)}s` : '—'}
+                      </td>
+                      <td className="py-1">{row.avg_files ?? '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </div>
+      )}
       {linksOpen && (
         <div className="shrink-0 border-b border-[#333] bg-[#1a1a18] px-3 py-2">
           <div className="mb-2 flex items-center justify-between text-[11px] text-white/45">

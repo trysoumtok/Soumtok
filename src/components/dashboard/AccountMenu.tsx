@@ -6,7 +6,7 @@ import { signOut, useSession } from '../../lib/auth-client'
 import { navigate, openTab } from '../../lib/nav'
 import { avatarUrl } from '../../lib/avatar'
 import { applyTheme, getThemePref, type ThemePref } from '../../lib/theme'
-import type { AgentDriver } from '../../../shared/soumtokBot'
+import { AGENT_DRIVER_LABELS, type AgentDriver } from '../../../shared/soumtokBot'
 import { CreateProfileModal } from './CreateProfileModal'
 
 function MenuIcon({ d }: { d: string }) {
@@ -203,6 +203,37 @@ export function AccountMenu({
           </button>
         )}
       </div>
+
+      {onAgentDriverChange ? (
+        <div className="px-3 py-2.5">
+          <p className="mb-2 text-[11px] text-white/40">Agent driver</p>
+          <div className="flex gap-1 rounded-lg border border-white/[0.08] bg-black/25 p-1">
+            {(['ide', 'bot'] as const).map((item) => {
+              const on = (agentDriver || 'ide') === item
+              return (
+                <button
+                  key={item}
+                  type="button"
+                  className={`flex-1 rounded-md px-2 py-1.5 text-[11px] font-medium ${
+                    on ? 'bg-white/[0.12] text-white' : 'text-white/55 hover:bg-white/[0.05] hover:text-white/80'
+                  }`}
+                  onClick={() => {
+                    onAgentDriverChange(item)
+                    closeMenu()
+                  }}
+                >
+                  {AGENT_DRIVER_LABELS[item]}
+                </button>
+              )
+            })}
+          </div>
+          <p className="mt-2 text-[10px] leading-snug text-white/35">
+            {(agentDriver || 'ide') === 'bot'
+              ? 'Full bot chat — switch to IDE Agent to edit code in the project.'
+              : 'Editor + agent panel — pair-program on your codebase.'}
+          </p>
+        </div>
+      ) : null}
 
       <MenuRow
         icon={<MenuIcon d="M4 5.5h8v5H4v-5Zm1 7h6M6 4.5V3M10 4.5V3" />}

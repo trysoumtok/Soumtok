@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Spinner } from '../Loaders'
-import { CODING_MODELS, PROVIDER_LABEL, modelGuide, type CodingModel, type ModelProvider } from '../../../shared/models'
+import { CODING_MODELS, PROVIDER_LABEL, modelGuide, soumtokPickerModels, type CodingModel, type ModelProvider } from '../../../shared/models'
 import { ModelBriefSheet } from './ModelBriefSheet'
 import {
   fetchAnalytics,
@@ -399,7 +399,7 @@ function ModelsSection() {
     .map((provider) => ({
       provider,
       label: PROVIDER_LABEL[provider],
-      models: CODING_MODELS.filter((model) => {
+      models: soumtokPickerModels().filter((model) => {
         if (model.provider !== provider) return false
         if (!search) return true
         const hay = `${model.name} ${model.id} ${model.strength} ${PROVIDER_LABEL[model.provider]} ${(model.tags ?? []).join(' ')}`.toLowerCase()

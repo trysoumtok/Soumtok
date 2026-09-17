@@ -43,7 +43,13 @@ import {
   svgFromFetchedPages,
   wantsBrandAsset,
 } from '../../../shared/brandLogo'
-import { readStoredAgentDriver, soumtokBotStudioContext, writeStoredAgentDriver, type AgentDriver } from '../../../shared/soumtokBot'
+import {
+  botMaxToolRounds,
+  readStoredAgentDriver,
+  soumtokBotStudioContext,
+  writeStoredAgentDriver,
+  type AgentDriver,
+} from '../../../shared/soumtokBot'
 import { DEFAULT_DESKTOP_AGENT_PREFS } from '../../../shared/desktopAgentPrefs'
 import { analyzeUserRequest, formatAnalyzedRequest, repairUserText } from '../../../shared/requestAnalyze'
 import {
@@ -146,7 +152,7 @@ import { AgentTimeline } from './AgentTimeline'
 import { AgentLiveCard } from './AskCards'
 import { AgentWorkbench, type BenchTab } from './AgentWorkbench'
 import { AccountMenu } from './AccountMenu'
-import { SoumtokBotChatHeader, SoumtokBotComposer, SoumtokBotOnboarding } from './SoumtokBotShell'
+import { SoumtokBotChatHeader, SoumtokBotComposer, SoumtokBotOnboarding, SoumtokBotShell } from './SoumtokBotShell'
 import { TestHubPanel } from './TestHubPanel'
 import {
   AutomationsIcon,
@@ -271,6 +277,15 @@ export function StudioDashboard({
     writeStoredAgentDriver(driver)
   }
 
+  useEffect(() => {
+    const onDriver = (event: Event) => {
+      const next = (event as CustomEvent<AgentDriver>).detail
+      if (next === 'ide' || next === 'bot') setAgentDriver(next)
+    }
+    window.addEventListener('soumtok-agent-driver', onDriver)
+    return () => window.removeEventListener('soumtok-agent-driver', onDriver)
+  }, [])
+
   function goChat(fresh = false) {
     if (fresh) setChatNonce((n) => n + 1)
     navigate('/dashboard/studio')
@@ -318,6 +333,48 @@ export function StudioDashboard({
     if (!chatId && row.id) {
       window.history.replaceState({}, '', `/dashboard/studio/${row.id}`)
     }
+  }
+
+  const searchOverlay = searchOpen ? (
+    <StudioSearch
+      projects={projects}
+      onClose={() => setSearchOpen(false)}
+      onPick={(href) => {
+        setSearchOpen(false)
+        if (href === '/dashboard/studio') goChat(true)
+        else navigate(href)
+      }}
+    />
+  ) : null
+
+  if (agentDriver === 'bot' && view === 'chat') {
+    return (
+      <>
+        <SoumtokBotShell
+          displayName={displayName}
+          profile={profile}
+          projects={projects}
+          projectsReady={projectsReady}
+          chatId={chatId}
+          onNewChat={() => goChat(true)}
+          onPickChat={(id) => navigate(`/dashboard/studio/${id}`)}
+          onSearch={() => setSearchOpen(true)}
+          onDownload={onDownload}
+          onProfileSaved={onProfileSaved}
+          agentDriver={agentDriver}
+          onAgentDriverChange={setStudioAgentDriver}
+        >
+          <StudioChat
+            key={chatId || `new-${chatNonce}`}
+            initialId={chatId}
+            onSaved={upsertProject}
+            plan={profile?.plan}
+            agentDriver={agentDriver}
+          />
+        </SoumtokBotShell>
+        {searchOverlay}
+      </>
+    )
   }
 
   return (
@@ -544,17 +601,7 @@ export function StudioDashboard({
         {view === 'codebase' && <StudioCodebase />}
       </div>
 
-      {searchOpen && (
-        <StudioSearch
-          projects={projects}
-          onClose={() => setSearchOpen(false)}
-          onPick={(href) => {
-            setSearchOpen(false)
-            if (href === '/dashboard/studio') goChat(true)
-            else navigate(href)
-          }}
-        />
-      )}
+      {searchOverlay}
     </div>
   )
 }
@@ -2010,6 +2057,8 @@ function StudioChat({
       const run = await runStudioAgentHarness({
         model: sendModel,
         mode: uiMode === 'ask' ? 'ask' : uiMode === 'plan' ? 'plan' : 'agent',
+        driver: agentDriver,
+        maxRounds: botMaxToolRounds(agentDriver, 12),
         messages: harnessMessages,
         files: roundBase.files,
         repo: project?.fullName,

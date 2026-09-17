@@ -459,6 +459,23 @@ html[data-surface="marketing"] .brand-logo {
   opacity: 1 !important;
 }
 
+/* Pricing model rows sit on dark cards — keep provider marks visible on marketing. */
+.pricing-model-logo {
+  filter: brightness(0) invert(1);
+  opacity: 0.92;
+}
+
+html[data-surface="marketing"] .pricing-model-logo {
+  filter: brightness(0) invert(1) !important;
+  opacity: 0.92 !important;
+}
+
+html[data-surface="marketing"] .keep-dark .logo-mark,
+html[data-surface="marketing"] .theme-app.keep-dark .logo-mark {
+  filter: brightness(0) invert(1) !important;
+  opacity: 0.92 !important;
+}
+
 html[data-theme="light"] .theme-app .window .logo-mark,
 html[data-theme="light"] .theme-app .keep-dark .logo-mark {
   filter: brightness(0) invert(1);
