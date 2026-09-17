@@ -4,7 +4,6 @@ import { serveStatic } from '@hono/node-server/serve-static'
 import { SITE_URL, injectSeo, seoForPath } from '../shared/seo.ts'
 import { app, ensureMigrated } from './app.ts'
 import { env } from './env.ts'
-import { registerInstallStatic } from './install-static.ts'
 
 await ensureMigrated().catch((error) => {
   console.warn('Database migrate skipped:', error instanceof Error ? error.message : error)
@@ -12,7 +11,6 @@ await ensureMigrated().catch((error) => {
 
 const indexHtml = await readFile('./dist/index.html', 'utf8')
 
-registerInstallStatic(app)
 app.use('/install/*', serveStatic({ root: './dist' }))
 app.use('/*', serveStatic({ root: './dist' }))
 app.get('/*', (c) => {

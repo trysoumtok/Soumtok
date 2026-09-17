@@ -13,7 +13,7 @@ import {
   hasPayhero,
   hasPaypal,
   hasMail,
-  hasResend,
+  hasNeonMail,
   hasSmtp,
   hasTwilio,
   canonicalAuthHost,
@@ -40,8 +40,10 @@ import { cleanupExpiredDeploys, hydrateTestHubDeploys, registerTestHub } from '.
 import { registerSkills } from './skills.ts'
 import { registerSeo } from './seo.ts'
 import { registerDesktopControl } from './desktop-control.ts'
+import { registerInstallStatic } from './install-static.ts'
 import { hashSecret } from './secrets.ts'
 import { BLOCKED_EMAIL_MESSAGE, isBlockedEmail } from './blocked-emails.ts'
+import { syncLinkedAccounts } from './account-sync.ts'
 
 export const app = new Hono()
 
@@ -57,10 +59,11 @@ app.use('*', async (c, next) => {
 })
 
 registerSeo(app)
+registerInstallStatic(app)
 registerDesktopControl(app)
 registerGithubSetup(app)
 registerGithub(app, requireReadyUser)
-registerStudio(app, requireReadyUser)
+registerStudio(app, requireReadyUser, requireUser)
 registerTestHub(app, requireReadyUser)
 registerBilling(app, requireReadyUser)
 registerAccountKeys(app, requireReadyUser)
@@ -129,7 +132,7 @@ app.get('/api/health', (c) =>
     oauth: oauthRedirectUris(),
     storage: hasBunny(),
     mail: hasMail(),
-    resend: hasResend(),
+    neonMail: hasNeonMail(),
     sms: hasTwilio(),
     image: hasImageGen(),
     paypal: hasPaypal(),
@@ -195,7 +198,7 @@ async function requireReadyUser(c: Context) {
   const session = cookieSession || (await sessionFromApiKey(c))
   if (!session || !pool) return { session: null as typeof cookieSession, ready: false }
   if (cookieSession && (await sessionNeedsTwoFactor(c, cookieSession.user.id, cookieSession.session.token))) {
-    return { session: null as typeof cookieSession, ready: false }
+    return { session: cookieSession, ready: false }
   }
 
   const result = await pool.query(
@@ -381,22 +384,7 @@ app.get('/api/me/profile', async (c) => {
   const session = await requireUser(c)
   if (!session || !pool) return c.json({ error: 'Unauthorized' }, 401)
 
-  await pool.query(
-    `INSERT INTO profiles (user_id, updated_at) VALUES ($1, NOW())
-     ON CONFLICT (user_id) DO NOTHING`,
-    [session.user.id],
-  )
-
-  await pool.query(
-    `UPDATE profiles p
-     SET github_id = a."accountId",
-         updated_at = NOW()
-     FROM account a
-     WHERE p.user_id = $1
-       AND a."userId" = p.user_id
-       AND a."providerId" = 'github'`,
-    [session.user.id],
-  )
+  await syncLinkedAccounts(session.user.id)
   await syncGithubProfile(session.user.id).catch(() => undefined)
 
   await finishIfReady(session.user.id)
@@ -531,12 +519,12 @@ app.post('/api/me/verify/email/send', async (c) => {
       return c.json({
         ok: true,
         via: 'log',
-        message: 'Email server blocked on Railway — code logged on server until Resend is configured.',
+        message: 'Email relay unavailable — code logged on server until Neon mail is configured.',
       })
     }
     return c.json({ error: 'Could not send the email code right now. Try again in a minute.' }, 502)
   }
-  return c.json({ ok: true, via: hasResend() ? 'resend' : hasSmtp() ? 'email' : 'log' })
+  return c.json({ ok: true, via: hasNeonMail() ? 'neon' : hasSmtp() ? 'smtp' : 'log' })
 })
 
 app.post('/api/me/verify/email/confirm', async (c) => {
