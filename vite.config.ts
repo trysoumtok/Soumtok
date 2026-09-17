@@ -2,7 +2,7 @@ import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
 import { defineConfig, type Plugin } from 'vite'
 
-/** Stop Chrome ERR_CACHE_READ_FAILURE on 304 during dev reloads. */
+/** Tell browsers not to disk-cache dev modules (avoids ERR_CACHE_READ_FAILURE on Windows). */
 function devNoCache(): Plugin {
   return {
     name: 'soumtok-dev-no-cache',
@@ -26,8 +26,14 @@ export default defineConfig(async ({ command }) => {
   return {
     plugins,
     server: {
+      // Listen on IPv4 + IPv6 — Windows often resolves localhost to ::1 only, which breaks 127.0.0.1 probes from Desktop.
+      host: true,
       port: 5173,
       strictPort: true,
+      headers: {
+        'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+        Pragma: 'no-cache',
+      },
       watch: {
         ignored: ['**/public/logos/**', '**/dist/**', '**/desktop/**'],
       },

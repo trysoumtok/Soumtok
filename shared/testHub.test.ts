@@ -6,6 +6,10 @@ import {
   buildTestHubApiMessages,
   extractBuildArtifacts,
   filesFromFences,
+  listArtifactPaths,
+  mergeArtifactFiles,
+  mergeFileBodies,
+  workspaceDisplayFiles,
 } from './testHub.ts'
 
 test('test hub system prompt forbids phantom repo access', () => {
@@ -55,6 +59,120 @@ console.log(1)
   assert.match(preview, /calculator/)
   assert.equal(preview.includes('```'), false)
   assert.equal(/background:#111[\s\S]*background:#111/.test(preview), false)
+})
+
+test('extractBuildArtifacts ignores reasoning prose before first build fence', () => {
+  const text = `Let me think about the cube geometry for a while…
+\`\`\`html file="index.html"
+<!DOCTYPE html><html><body><div id="app">cube</div></body></html>
+\`\`\``
+  const files = extractBuildArtifacts(text)
+  assert.match(files['index.html'] || '', /cube/)
+})
+
+test('buildPreviewHtml runs JS instead of showing raw source when index.html is mislabeled script', () => {
+  const preview = buildPreviewHtml({
+    'index.html': `const state = { current: '0', previous: null, operator: null, overwrite: true };`,
+    'style.css': 'body{margin:0;font-family:system-ui}',
+  })
+  assert.equal(preview.includes('const state'), true)
+  assert.match(preview, /<script[\s>]/)
+  assert.doesNotMatch(preview, /<body>\s*const state/)
+})
+
+test('buildPreviewHtml wraps raw JS inside html body in script tags', () => {
+  const preview = buildPreviewHtml({
+    'index.html': `<!DOCTYPE html><html><head></head><body>
+const state = { current: '0' };
+document.body.innerHTML = '<button>1</button>';
+</body></html>`,
+  })
+  assert.match(preview, /<script[\s\S]*const state/)
+  assert.match(preview, /innerHTML = '<button>1<\/button>'/)
+})
+
+test('mergeFileBodies keeps full file when a later fence is a tiny snippet', () => {
+  const full = 'let current = "0";\nfunction render(){}\n'.repeat(20)
+  const snippet = 'function inputDecimal() {}'
+  const out = mergeFileBodies(full, snippet)
+  assert.ok(out.length > 500)
+  assert.ok(!out.includes('inputDecimal'))
+})
+
+test('mergeFileBodies concatenates separate script blocks for the same file', () => {
+  const a = 'let x = 1;'
+  const b = 'function render() { return x; }'
+  assert.match(mergeFileBodies(a, b), /let x = 1/)
+  assert.match(mergeFileBodies(a, b), /function render/)
+})
+
+test('filesFromParseSegments stitches many script.js blocks like the chat UI', () => {
+  const text = `\`\`\`javascript file="script.js"
+function init() { return 1; }
+\`\`\`
+Some prose here.
+\`\`\`javascript file="script.js"
+const groups = [];
+\`\`\`
+\`\`\`javascript file="script.js"
+function isSolved() { return true; }
+\`\`\``
+  const files = extractBuildArtifacts(text)
+  const js = files['script.js'] || ''
+  assert.match(js, /function init/)
+  assert.match(js, /const groups/)
+  assert.match(js, /function isSolved/)
+})
+
+test('filesFromFences merges multiple javascript fences into one script.js', () => {
+  const text = `\`\`\`javascript file="script.js"
+let a = 1;
+\`\`\`
+\`\`\`javascript file="script.js"
+function render() { return a; }
+\`\`\``
+  const files = extractBuildArtifacts(text)
+  assert.match(files['script.js'] || '', /let a = 1/)
+  assert.match(files['script.js'] || '', /function render/)
+})
+
+test('workspaceDisplayFiles adds index.html and base css for js-only builds', () => {
+  const files = workspaceDisplayFiles({ 'script.js': 'document.body.innerHTML="hi"' })
+  assert.match(files['index.html'] || '', /<body>/i)
+  assert.match(files['style.css'] || '', /margin:0/)
+})
+
+test('mergeArtifactFiles lets the latest chunk override the same path', () => {
+  const turn1 =
+    '```javascript file="script.js"\nconst V = { add: 1 };\n```\n```css file="style.css"\nbody{margin:0}\n```'
+  const turn2 = '```javascript file="script.js"\nfunction resize() { canvas.width = 1; }\n```'
+  const files = mergeArtifactFiles([turn1, turn2])
+  assert.match(files['script.js'] || '', /function resize/)
+  assert.match(files['style.css'] || '', /margin:0/)
+})
+
+test('listArtifactPaths sorts html css js for the Code panel', () => {
+  const paths = listArtifactPaths({
+    'script.js': 'x',
+    'style.css': 'y',
+    'index.html': '<html></html>',
+  })
+  assert.deepEqual(paths, ['index.html', 'style.css', 'script.js'])
+})
+
+test('extractBuildArtifacts keeps package.json when path is set', () => {
+  const files = extractBuildArtifacts('```json file="package.json"\n{"name":"demo"}\n```')
+  assert.match(files['package.json'] || '', /"name":"demo"/)
+})
+
+test('buildPreviewHtml inlines script.js when index already has a CDN script tag', () => {
+  const preview = buildPreviewHtml({
+    'index.html':
+      '<!DOCTYPE html><html><head></head><body><canvas id="c"></canvas><script src="https://cdn.example/three.min.js"></script></body></html>',
+    'script.js': 'document.getElementById("c").style.background = "rgb(0,128,0)";',
+  })
+  assert.match(preview, /getElementById\("c"\)/)
+  assert.match(preview, /data-soumtok-preview-bridge/)
 })
 
 test('buildPreviewHtml strips trailing fence junk after </html>', () => {

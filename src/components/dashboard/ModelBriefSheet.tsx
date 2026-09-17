@@ -3,8 +3,10 @@ import { buildModelStudy, type ModelBrief } from '../../../shared/modelBrief'
 import { studyImageSrc } from '../../../shared/modelStudyDossier'
 import type { CodingModel } from '../../../shared/models'
 
-const LOCKUP = '/images/soumtok-lockup.png'
-const MARK = '/images/soumtok-mark.png'
+import { BRAND_LOCKUP_DARK, BRAND_MARK_DARK } from '../../../shared/brandAssets.ts'
+
+const LOCKUP = BRAND_LOCKUP_DARK
+const MARK = BRAND_MARK_DARK
 
 async function saveStudyPdf(study: ModelBrief) {
   const article = document.getElementById('model-brief-print')

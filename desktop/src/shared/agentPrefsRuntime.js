@@ -69,8 +69,8 @@ function maxToolRoundsForPrefs(driver, prefs) {
   const custom = Number(prefs?.maxToolRounds)
   if (Number.isFinite(custom) && custom > 0) return Math.min(64, Math.max(4, Math.floor(custom)))
   const intel = normalizeIntelligence(prefs?.intelligence)
-  if (intel === 'fast') return driver === 'bot' ? 18 : 12
-  if (intel === 'balanced') return driver === 'bot' ? 36 : 24
+  if (intel === 'fast') return driver === 'bot' ? 14 : 10
+  if (intel === 'balanced') return driver === 'bot' ? 28 : 18
   return driver === 'bot' ? 52 : 42
 }
 

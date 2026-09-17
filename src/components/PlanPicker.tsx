@@ -2,11 +2,17 @@ import {
   BILLING_PLANS,
   PRICING_PLAN_IDS,
   formatUsd,
-  monthlyUnit,
+  planChargeUsd,
+  planDiscountUsd,
   planMonthlyEquivalentUsd,
-  planMonthlySavedUsd,
   type PaidPlanId,
 } from '../../shared/plans'
+
+const FEATURE_INTRO: Record<(typeof PRICING_PLAN_IDS)[number], string> = {
+  start: 'Includes',
+  pro: 'Everything in Start, plus',
+  pro_plus: 'Everything in Pro, plus',
+}
 
 export function CycleToggle({
   cycle,
@@ -16,13 +22,13 @@ export function CycleToggle({
   onChange: (cycle: 'monthly' | 'annual') => void
 }) {
   return (
-    <div className="text-center">
+    <div className="flex flex-col items-center gap-3">
       <div className="inline-flex rounded-full border border-white/10 bg-[#1b1b19] p-1">
         <button
           type="button"
           onClick={() => onChange('monthly')}
-          className={`rounded-full px-4 py-1.5 text-[13px] ${
-            cycle === 'monthly' ? 'bg-white text-black' : 'text-white/55'
+          className={`rounded-full px-5 py-1.5 text-[13px] font-medium transition-colors ${
+            cycle === 'monthly' ? 'bg-white text-black' : 'text-white/55 hover:text-white/80'
           }`}
         >
           Monthly
@@ -30,14 +36,17 @@ export function CycleToggle({
         <button
           type="button"
           onClick={() => onChange('annual')}
-          className={`rounded-full px-4 py-1.5 text-[13px] ${
-            cycle === 'annual' ? 'bg-white text-black' : 'text-white/55'
+          className={`rounded-full px-5 py-1.5 text-[13px] font-medium transition-colors ${
+            cycle === 'annual' ? 'bg-white text-black' : 'text-white/55 hover:text-white/80'
           }`}
         >
-          Annual
+          Yearly
+          <span className="ml-1.5 text-[11px] font-normal text-emerald-500">−20%</span>
         </button>
       </div>
-      <p className="mt-3 text-[12px] text-emerald-400">Save 20% when billed annually</p>
+      {cycle === 'annual' && (
+        <p className="text-[13px] text-emerald-400">Pay yearly — 2 months free on every plan</p>
+      )}
     </div>
   )
 }
@@ -56,65 +65,80 @@ export function PlanGrid({
   const paid = BILLING_PLANS.filter((item) => PRICING_PLAN_IDS.includes(item.id as (typeof PRICING_PLAN_IDS)[number]))
 
   return (
-    <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+    <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
       {paid.map((item) => {
+        const planId = item.id as (typeof PRICING_PLAN_IDS)[number]
         const mine = currentId === item.id
-        const team = item.id === 'team'
+        const featured = item.featured
         const monthlyPay = planMonthlyEquivalentUsd(item, cycle)
-        const monthlyCut = planMonthlySavedUsd(item)
+        const yearlyTotal = planChargeUsd(item, 'annual')
+        const yearlySave = planDiscountUsd(item, 'annual')
+        const cta =
+          planId === 'start' ? 'Get Start' : planId === 'pro' ? 'Get Pro' : 'Get Pro Plus'
+
         return (
           <article
             key={item.id}
-            className={`flex flex-col rounded-xl border p-5 ${
-              item.featured ? 'border-white/16 bg-[#161614]' : 'border-white/10 bg-[#121211]'
+            className={`flex flex-col rounded-2xl border p-6 ${
+              featured
+                ? 'border-[#f54e00]/35 bg-[#161614] shadow-[0_0_48px_rgba(245,78,0,0.06)]'
+                : 'border-white/10 bg-[#121211]'
             }`}
           >
-            <div className="flex items-center justify-between gap-2">
-              <p className="text-[15px] font-medium">{item.name}</p>
-              {mine && (
-                <span className="rounded-md bg-white/10 px-2 py-0.5 text-[11px] text-white/70">Current plan</span>
+            <div>
+              <p className="text-[16px] font-semibold tracking-[-0.02em]">{item.name}</p>
+              <p className="mt-1 text-[13px] text-white/45">{item.tagline}</p>
+            </div>
+
+            <div className="mt-6">
+              <p className="text-[36px] font-semibold leading-none tracking-[-0.04em]">
+                {formatUsd(monthlyPay)}
+                <span className="ml-1 text-[15px] font-normal text-white/40">/ mo</span>
+              </p>
+              {cycle === 'annual' ? (
+                <div className="mt-2 space-y-0.5">
+                  <p className="text-[12px] text-white/45">
+                    {formatUsd(yearlyTotal)} billed yearly
+                    <span className="ml-2 line-through decoration-white/30">{formatUsd(Number(item.amount) * 12)}</span>
+                  </p>
+                  <p className="text-[12px] font-medium text-emerald-400">
+                    Save {formatUsd(yearlySave)}/yr
+                  </p>
+                </div>
+              ) : (
+                <p className="mt-2 text-[12px] text-white/35">Billed monthly</p>
               )}
             </div>
-            <p className="mt-4 text-[28px] font-semibold tracking-[-0.03em]">
-              {formatUsd(monthlyPay)}
-              <span className="ml-1 text-[13px] font-normal text-white/45">{monthlyUnit(item.id)}</span>
-            </p>
-            {cycle === 'annual' ? (
-              <p className="mt-1.5 text-[12px] text-white/45">
-                <span className="mr-2 line-through decoration-white/35">{item.price}</span>
-                <span className="text-emerald-400">Save {formatUsd(monthlyCut)} / mo</span>
-              </p>
-            ) : (
-              <p className="mt-1.5 text-[12px] text-white/35">Billed monthly</p>
-            )}
-            <p className="mt-3 text-[13px] leading-6 text-white/65">{item.explain}</p>
-            <ul className="mt-5 flex-1 space-y-2.5 text-[13px] leading-5 text-white/85">
-              {item.points.map((point) => (
-                <li key={point} className="flex gap-2">
-                  <span className="mt-0.5 text-white/70">✓</span>
-                  <span>{point}</span>
-                </li>
-              ))}
-            </ul>
+
+            <p className="mt-5 text-[13px] leading-6 text-white/55">{item.explain}</p>
+
+            <div className="mt-6 flex-1">
+              <p className="text-[12px] font-medium text-white/70">{FEATURE_INTRO[planId]}</p>
+              <ul className="mt-3 space-y-2.5">
+                {item.points.map((point) => (
+                  <li key={point} className="flex gap-2.5 text-[13px] leading-5 text-white/80">
+                    <span className="mt-0.5 shrink-0 text-white/50" aria-hidden>
+                      ✓
+                    </span>
+                    <span>{point}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+
             <button
               type="button"
               disabled={mine || busy != null}
               onClick={() => onChoose(item.id as PaidPlanId)}
-              className={`mt-6 w-full rounded-md px-3 py-2 text-[13px] font-medium disabled:opacity-50 ${
+              className={`mt-8 w-full rounded-lg px-4 py-2.5 text-[14px] font-medium transition-colors disabled:opacity-50 ${
                 mine
                   ? 'border border-white/10 text-white/45'
-                  : team
-                    ? 'border border-white/18 text-white hover:bg-white/[0.04]'
-                    : 'bg-white text-black'
+                  : featured
+                    ? 'bg-white text-black hover:bg-white/90'
+                    : 'border border-white/15 bg-white/[0.04] text-white hover:bg-white/[0.08]'
               }`}
             >
-              {mine
-                ? 'Your current plan'
-                : busy === item.id
-                  ? 'Opening checkout...'
-                  : team
-                    ? 'Get Team'
-                    : 'Choose plan'}
+              {mine ? 'Current plan' : busy === item.id ? 'Opening checkout…' : cta}
             </button>
           </article>
         )

@@ -254,6 +254,26 @@ test('git push is recognized but not spawned', () => {
   assert.equal(parseSandboxCommand('git push origin main'), null)
 })
 
+test('studio sandbox allows safe semicolon chains', async () => {
+  const { runSandboxed } = await import('../server/sandbox.ts')
+  const ran = await runSandboxed('echo v1; echo v2', {}, {})
+  assert.equal(ran.ok, true)
+  assert.match(ran.text, /v1/)
+  assert.match(ran.text, /v2/)
+  assert.doesNotMatch(ran.text, /not allowed in the sandbox/)
+})
+
+test('list_dir and glob run on in-memory workspace files', async () => {
+  const { executeStudioTool } = await import('../server/studioTools.ts')
+  const files = { 'package.json': '{}', 'src/main.ts': 'export {}' }
+  const listed = await executeStudioTool('user', { name: 'list_dir', args: { path: '.' } }, files)
+  assert.equal(listed.ok, true)
+  assert.match(listed.text, /package\.json/)
+  const globbed = await executeStudioTool('user', { name: 'glob', args: { pattern: '**/*.ts' } }, files)
+  assert.equal(globbed.ok, true)
+  assert.match(globbed.text, /src\/main\.ts/)
+})
+
 test('ls cat and mkdir stay in memory even with a persist dir', async () => {
   const { runSandboxed } = await import('../server/sandbox.ts')
   const files = { 'index.html': '<h1>Hi</h1>', 'styles.css': 'body{color:#f54e00}' }

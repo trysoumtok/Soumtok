@@ -80,7 +80,7 @@ const cheapModel = process.env.TEST_HUB_MODEL || 'deepseek-v4-flash'
 if (process.env.DEEPSEEK_API_KEY || process.env.SOUMTOK_TEST_API) {
   console.log(`— Live API smoke (${cheapModel})`)
   const { platformKey } = await import('../../server/env.ts')
-  const { completionUrl, extractText, requestBody } = await import('../../server/studio.ts')
+  const { completionUrl, extractText, requestBody, streamDelta } = await import('../../server/studio.ts')
   const { upstreamModelId } = await import('../../shared/models.ts')
   const key = platformKey('deepseek') || process.env.DEEPSEEK_API_KEY
   if (key) {
@@ -105,6 +105,46 @@ if (process.env.DEEPSEEK_API_KEY || process.env.SOUMTOK_TEST_API) {
     const apiFiles = ART.extractBuildArtifacts(text)
     assert.ok(Object.keys(apiFiles).length >= 1)
     console.log(`  ${cheapModel} returned ${Object.keys(apiFiles).length} file(s), score ${scoreCompareRun({ model: cheapModel, status: 'done', text, ms: 1000 })}`)
+
+    console.log('— Live stream smoke (first delta within 30s)')
+    const streamBody = { ...body, stream: true, stream_options: { include_usage: true } }
+    const streamRes = await fetch(url, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(streamBody),
+      signal: AbortSignal.timeout(30_000),
+    })
+    assert.ok(streamRes.ok && streamRes.body, `stream ${streamRes.status}`)
+    const reader = streamRes.body.getReader()
+    const decoder = new TextDecoder()
+    let buf = ''
+    let streamed = ''
+    const t0 = Date.now()
+    while (Date.now() - t0 < 28_000) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buf += decoder.decode(value, { stream: true })
+      let cut = buf.indexOf('\n')
+      while (cut >= 0) {
+        const line = buf.slice(0, cut).trim()
+        buf = buf.slice(cut + 1)
+        cut = buf.indexOf('\n')
+        if (!line.startsWith('data:')) continue
+        const payload = line.slice(5).trim()
+        if (!payload || payload === '[DONE]') continue
+        try {
+          const frame = JSON.parse(payload)
+          const delta = streamDelta(frame)
+          if (delta) streamed += delta
+        } catch {
+          /* partial line */
+        }
+      }
+      if (streamed.length > 8) break
+    }
+    reader.cancel().catch(() => {})
+    assert.ok(streamed.length > 0, 'stream produced no visible deltas (check streamDelta)')
+    console.log(`  first stream chars in ${Date.now() - t0}ms (${streamed.length} chars)`)
   } else {
     console.log('— Live API skipped (no deepseek key)')
   }

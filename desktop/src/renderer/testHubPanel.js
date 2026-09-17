@@ -34,6 +34,7 @@ Prefer rewriting the full updated file contents for each changed path so the liv
   ]
 
   const STORAGE_KEY = 'soumtok-test-hub-session'
+  const LIVE_LINKS_KEY = 'soumtok-test-hub-live-links'
 
   const state = {
     model: 'auto',
@@ -65,16 +66,22 @@ Prefer rewriting the full updated file contents for each changed path so the liv
     linksOpen: false,
     shareBusy: false,
     activeLiveDeploy: null,
+    plan: 'hobby',
+    byokAllowed: false,
   }
 
-  const DEFAULT_COMPARE_PICK = ['deepseek-v4-flash', 'deepseek-chat']
+  const DEFAULT_COMPARE_PICK = ['deepseek-v4-flash', 'gpt-4.1-mini']
+
+  /** Matches shared/usagePools EVERYDAY_MODEL_IDS — Start plan pool. */
+  const EVERYDAY_MODEL_IDS = new Set(['deepseek-v4-flash', 'deepseek-v4-pro', 'gpt-4.1-mini'])
 
   let persistTimer = null
+  let upgradeModalEl = null
   let previewMessageBound = false
   let lastPreviewSrc = ''
 
-  function $(id) {
-    return document.getElementById(id)
+  function $(id, root) {
+    return (root || document).getElementById(id)
   }
 
   function api() {
@@ -291,9 +298,192 @@ Prefer rewriting the full updated file contents for each changed path so the liv
     return m?.provider === 'google' || /^gemini|gemma/i.test(String(m?.id || ''))
   }
 
+  function isUnpaidPlan(plan) {
+    return !plan || plan === 'hobby' || plan === 'trial'
+  }
+
+  function hasAdditionalPool(plan) {
+    const p = plan === 'teams' ? 'team' : plan || 'hobby'
+    return p === 'pro' || p === 'pro_plus' || p === 'team' || p === 'team_plus'
+  }
+
+  function isEverydayModelId(id) {
+    return EVERYDAY_MODEL_IDS.has(String(id || ''))
+  }
+
+  /** @returns {{ tier: 'ok' | 'locked', pool?: 'everyday' | 'additional', reason?: 'subscribe' | 'pro' | 'soon' | 'keys' }} */
+  function modelAccess(m) {
+    const id = m?.id || 'auto'
+    if (isGoogleModel(m)) return { tier: 'locked', reason: 'soon' }
+    if (isUnpaidPlan(state.plan)) return { tier: 'locked', reason: 'subscribe' }
+    if (id === 'auto') return { tier: 'ok', pool: 'everyday' }
+    if (isEverydayModelId(id)) return { tier: 'ok', pool: 'everyday' }
+    if (hasAdditionalPool(state.plan)) return { tier: 'ok', pool: 'additional' }
+    return { tier: 'locked', reason: 'pro' }
+  }
+
+  function isHubModelSelectable(m) {
+    return modelAccess(m).tier === 'ok'
+  }
+
   function isHubModelDisabled(m) {
-    if (!m || m.id === 'auto') return false
-    return isGoogleModel(m)
+    return !isHubModelSelectable(m)
+  }
+
+  function planLabelShort() {
+    if (isUnpaidPlan(state.plan)) return 'Free — no plan'
+    const labels = {
+      start: 'Start',
+      pro: 'Pro',
+      pro_plus: 'Pro Plus',
+      team: 'Team',
+      teams: 'Team',
+      team_plus: 'Team Premium',
+    }
+    return labels[state.plan] || 'Plan'
+  }
+
+  function upgradeCopy(reason) {
+    if (reason === 'subscribe') {
+      return {
+        title: 'Subscribe to start coding',
+        body: 'Test Hub uses your Soumtok plan pools. Start ($5/mo) unlocks Everyday models — DeepSeek Flash, DeepSeek Pro, and GPT-4.1 Mini.',
+        cta: 'Subscribe — $5/mo',
+      }
+    }
+    if (reason === 'pro') {
+      return {
+        title: 'Upgrade to Pro',
+        body: 'This model uses the Additional pool — Opus, GPT-6, Sonnet, Grok, and the rest. Pro ($20/mo) adds a separate $10 Additional budget. Or add your own API keys on Pro and pay your vendor directly.',
+        cta: 'Upgrade to Pro — $20/mo',
+      }
+    }
+    if (reason === 'keys') {
+      return {
+        title: 'Pro plan for your own keys',
+        body: 'Bring your own OpenAI, Anthropic, DeepSeek, or xAI keys on Pro ($20/mo) to code at vendor cost without touching Soumtok pools.',
+        cta: 'Upgrade to Pro',
+      }
+    }
+    return {
+      title: 'Coming soon',
+      body: 'This model is not available in Test Hub yet.',
+      cta: 'OK',
+    }
+  }
+
+  function ensureUpgradeModal() {
+    if (upgradeModalEl) return upgradeModalEl
+    const el = document.createElement('div')
+    el.id = 'test-hub-upgrade-modal'
+    el.className = 'test-hub-upgrade-modal'
+    el.hidden = true
+    el.innerHTML = `<div class="test-hub-upgrade-backdrop" data-close="1"></div>
+      <div class="test-hub-upgrade-card" role="dialog" aria-modal="true" aria-labelledby="test-hub-upgrade-title">
+        <h2 id="test-hub-upgrade-title"></h2>
+        <p id="test-hub-upgrade-body"></p>
+        <div class="test-hub-upgrade-actions">
+          <button type="button" class="test-hub-upgrade-primary" id="test-hub-upgrade-go"></button>
+          <button type="button" class="test-hub-upgrade-ghost" data-close="1">Not now</button>
+        </div>
+      </div>`
+    document.body.appendChild(el)
+    el.querySelectorAll('[data-close]').forEach((node) => {
+      node.addEventListener('click', () => {
+        el.hidden = true
+      })
+    })
+    el.querySelector('#test-hub-upgrade-go')?.addEventListener('click', () => {
+      el.hidden = true
+      const reason = el.dataset.reason || 'subscribe'
+      if (reason === 'soon') return
+      api().openBilling?.()
+    })
+    upgradeModalEl = el
+    return el
+  }
+
+  function showUpgradeModal(reason) {
+    const copy = upgradeCopy(reason)
+    const el = ensureUpgradeModal()
+    el.dataset.reason = reason || 'subscribe'
+    const title = el.querySelector('#test-hub-upgrade-title')
+    const body = el.querySelector('#test-hub-upgrade-body')
+    const go = el.querySelector('#test-hub-upgrade-go')
+    if (title) title.textContent = copy.title
+    if (body) body.textContent = copy.body
+    if (go) {
+      go.textContent = copy.cta
+      go.hidden = reason === 'soon'
+    }
+    el.hidden = false
+  }
+
+  function accessibleCompareDefaults() {
+    const ids = ['deepseek-v4-flash', 'gpt-4.1-mini', 'deepseek-v4-pro']
+    const picked = ids.filter((id) => modelAccess({ id }).tier === 'ok')
+    return picked.length >= 2 ? picked.slice(0, 2) : picked.length ? [...picked, ...picked] : []
+  }
+
+  function sanitizeComparePick() {
+    state.comparePick = state.comparePick.filter((id) => modelAccess({ id }).tier === 'ok')
+    if (state.comparePick.length < 2) {
+      const next = accessibleCompareDefaults()
+      state.comparePick = next.length >= 2 ? next : next.length ? next : []
+    }
+  }
+
+  function comparePoolModels() {
+    const byId = new Map(state.models.map((m) => [m.id, m]))
+    const out = []
+    for (const id of CATALOG.TOP_HUB_MODEL_IDS || []) {
+      const hit = byId.get(id)
+      if (hit && !isGoogleModel(hit)) out.push(hit)
+    }
+    for (const m of state.models) {
+      if (!out.some((row) => row.id === m.id) && !isGoogleModel(m)) out.push(m)
+    }
+    return out.slice(0, 16)
+  }
+
+  function partitionCompareModels(list) {
+    const onPlan = []
+    const needUpgrade = []
+    for (const m of list) {
+      const access = modelAccess(m)
+      if (access.tier === 'ok') onPlan.push(m)
+      else if (access.reason === 'pro' || access.reason === 'subscribe') needUpgrade.push(m)
+    }
+    return { onPlan, needUpgrade }
+  }
+
+  function renderCompareChip(m, on) {
+    const access = modelAccess(m)
+    const locked = access.tier === 'locked'
+    const badge =
+      locked && access.reason === 'pro'
+        ? ' <span class="test-hub-compare-chip-badge">Pro</span>'
+        : locked && access.reason === 'subscribe'
+          ? ' <span class="test-hub-compare-chip-badge">Start</span>'
+          : ''
+    return `<button type="button" class="test-hub-compare-chip ${on ? 'on' : ''}${locked ? ' locked' : ''}" data-id="${escapeAttr(m.id)}" data-locked="${locked ? access.reason || '1' : ''}">${escapeHtml(m.name)}${badge}</button>`
+  }
+
+  function renderCompareGate(run) {
+    const msg = String(run.error || '')
+    let reason = 'pro'
+    if (/Subscribe to Start/i.test(msg)) reason = 'subscribe'
+    else if (/requires Pro|own API key/i.test(msg)) reason = 'pro'
+    const copy = upgradeCopy(reason)
+    return `<div class="test-hub-compare-gate">
+      <p class="test-hub-compare-gate-title">${escapeHtml(copy.title)}</p>
+      <p class="test-hub-compare-gate-body">${escapeHtml(copy.body)}</p>
+      <button type="button" class="test-hub-compare-upgrade" data-reason="${escapeAttr(reason)}">${escapeHtml(copy.cta)}</button>
+    </div>`
+  }
+
+  function isUpgradeError(msg) {
+    return /Subscribe to Start|Everyday models only|requires Pro|own API key/i.test(String(msg || ''))
   }
 
   function mergeAllModels(apiList) {
@@ -325,6 +515,54 @@ Prefer rewriting the full updated file contents for each changed path so the liv
     return hit?.name || state.model
   }
 
+  let modelPopListeners = null
+
+  function clearModelPopPosition() {
+    const pop = $('test-hub-model-pop')
+    if (!pop) return
+    pop.classList.remove('is-portal', 'is-above')
+    pop.style.removeProperty('position')
+    pop.style.removeProperty('top')
+    pop.style.removeProperty('bottom')
+    pop.style.removeProperty('left')
+    pop.style.removeProperty('width')
+    pop.style.removeProperty('max-height')
+    if (modelPopListeners) {
+      window.removeEventListener('resize', modelPopListeners.reposition)
+      window.removeEventListener('scroll', modelPopListeners.reposition, true)
+      modelPopListeners = null
+    }
+  }
+
+  function positionModelPop() {
+    const pop = $('test-hub-model-pop')
+    const btn = $('test-hub-model-btn')
+    if (!pop || !btn || pop.hidden) return
+
+    const margin = 8
+    const rect = btn.getBoundingClientRect()
+    const maxH = Math.min(360, Math.max(180, window.innerHeight * 0.42))
+    const width = Math.min(Math.max(rect.width, 260), window.innerWidth - margin * 2)
+    const left = Math.min(Math.max(margin, rect.left), window.innerWidth - width - margin)
+    const spaceBelow = window.innerHeight - rect.bottom - margin
+    const spaceAbove = rect.top - margin
+    const openAbove = spaceBelow < 220 && spaceAbove > spaceBelow
+
+    pop.classList.add('is-portal')
+    pop.classList.toggle('is-above', openAbove)
+    pop.style.width = `${width}px`
+    pop.style.left = `${left}px`
+    pop.style.maxHeight = `${Math.min(maxH, openAbove ? spaceAbove : spaceBelow)}px`
+
+    if (openAbove) {
+      pop.style.bottom = `${window.innerHeight - rect.top + margin}px`
+      pop.style.top = 'auto'
+    } else {
+      pop.style.top = `${rect.bottom + margin}px`
+      pop.style.bottom = 'auto'
+    }
+  }
+
   function closeModelPanel() {
     state.modelPanelOpen = false
     const pop = $('test-hub-model-pop')
@@ -333,6 +571,7 @@ Prefer rewriting the full updated file contents for each changed path so the liv
     if (pop) pop.hidden = true
     if (btn) btn.setAttribute('aria-expanded', 'false')
     picker?.classList.remove('is-open')
+    clearModelPopPosition()
   }
 
   function openModelPanel() {
@@ -350,6 +589,15 @@ Prefer rewriting the full updated file contents for each changed path so the liv
       setTimeout(() => search.focus(), 20)
     }
     paintModelList()
+    requestAnimationFrame(() => {
+      positionModelPop()
+      const reposition = () => {
+        if (state.modelPanelOpen) positionModelPop()
+      }
+      modelPopListeners = { reposition }
+      window.addEventListener('resize', reposition)
+      window.addEventListener('scroll', reposition, true)
+    })
   }
 
   function paintModelTrigger() {
@@ -389,17 +637,23 @@ Prefer rewriting the full updated file contents for each changed path so the liv
   }
 
   function renderHubModelRow(m) {
-    const disabled = isHubModelDisabled(m)
+    const access = modelAccess(m)
+    const disabled = access.tier === 'locked'
     const on = !disabled && state.model === m.id
     const newTag = m.tags?.includes('New') ? '<span class="test-hub-model-chip-tag tag-new">New</span>' : ''
-    const lock = disabled ? '<span class="test-hub-model-chip-lock tag-soon">Soon</span>' : ''
+    const lockLabel =
+      access.reason === 'pro' ? 'Pro'
+      : access.reason === 'subscribe' ? 'Start'
+      : access.reason === 'soon' ? 'Soon'
+      : ''
+    const lock = lockLabel ? `<span class="test-hub-model-chip-lock tag-soon">${lockLabel}</span>` : ''
     const strength = m.strength ? escapeHtml(m.strength) : ''
     const price = escapeHtml(hubModelPriceLine(m))
     const tier = m.cost
       ? `<span class="${hubTierTagClass(m.cost)}">${escapeHtml(m.cost)}</span>`
       : ''
     return `<div class="test-hub-model-row">
-      <button type="button" class="test-hub-model-chip ${on ? 'on' : ''} ${disabled ? 'off' : ''}" data-id="${escapeAttr(m.id)}" role="option" aria-selected="${on}" ${disabled ? 'disabled' : ''}>
+      <button type="button" class="test-hub-model-chip ${on ? 'on' : ''} ${disabled ? 'off locked' : ''}" data-id="${escapeAttr(m.id)}" data-locked="${disabled ? access.reason || '1' : ''}" role="option" aria-selected="${on}">
         <span class="test-hub-model-chip-main">
           <span class="test-hub-model-chip-head">
             <span class="test-hub-model-chip-name">${escapeHtml(m.name)}</span>
@@ -428,11 +682,13 @@ Prefer rewriting the full updated file contents for each changed path so the liv
     if (!host) return
 
     const q = state.modelSearch.trim().toLowerCase()
+    const autoAccess = modelAccess({ id: 'auto' })
+    const autoLocked = autoAccess.tier === 'locked'
     const autoOn = state.model === 'auto'
     const showAuto = !q || 'auto'.includes(q) || 'pick'.includes(q)
     let html = showAuto
       ? `<div class="test-hub-model-row test-hub-model-row-auto">
-        <button type="button" class="test-hub-model-chip ${autoOn ? 'on' : ''}" data-id="auto" role="option" aria-selected="${autoOn}">
+        <button type="button" class="test-hub-model-chip ${autoOn ? 'on' : ''}${autoLocked ? ' locked off' : ''}" data-id="auto" data-locked="${autoLocked ? autoAccess.reason || '1' : ''}" role="option" aria-selected="${autoOn}">
           <span class="test-hub-model-chip-main">
             <span class="test-hub-model-chip-head">
               <span class="test-hub-model-chip-name">Auto</span>
@@ -454,22 +710,28 @@ Prefer rewriting the full updated file contents for each changed path so the liv
     } else {
       const grouped =
         typeof CATALOG.partitionHubPickerModels === 'function'
-          ? CATALOG.partitionHubPickerModels(state.models)
+          ? CATALOG.partitionHubPickerModels(state.models.filter((m) => !isGoogleModel(m)))
           : { top: state.models.slice(0, 10), rest: state.models.slice(10) }
-      if (grouped.top.length) {
-        html += `<p class="test-hub-model-section">Top models</p>`
-        for (const m of grouped.top) html += renderHubModelRow(m)
+      const flat = [...grouped.top, ...grouped.rest]
+      const { onPlan, needUpgrade } = partitionCompareModels(flat)
+      if (onPlan.length) {
+        html += `<p class="test-hub-model-section">On your plan · ${escapeHtml(planLabelShort())}</p>`
+        for (const m of onPlan) html += renderHubModelRow(m)
       }
-      if (grouped.rest.length) {
-        html += `<p class="test-hub-model-section">All models</p>`
-        for (const m of grouped.rest) html += renderHubModelRow(m)
+      if (needUpgrade.length) {
+        html += `<p class="test-hub-model-section">${isUnpaidPlan(state.plan) ? 'Subscribe to unlock' : 'Upgrade to Pro'}</p>`
+        for (const m of needUpgrade.slice(0, 12)) html += renderHubModelRow(m)
       }
     }
 
     host.innerHTML = html
-    host.querySelectorAll('.test-hub-model-chip:not(:disabled)').forEach((btn) => {
+    host.querySelectorAll('.test-hub-model-chip').forEach((btn) => {
       btn.onclick = (e) => {
         e.stopPropagation()
+        if (btn.dataset.locked) {
+          showUpgradeModal(btn.dataset.locked)
+          return
+        }
         pickHubModel(btn.dataset.id)
       }
     })
@@ -785,6 +1047,71 @@ Prefer rewriting the full updated file contents for each changed path so the liv
     return rowLabel === label
   }
 
+  function deployIsLive(row) {
+    if (!row?.url) return false
+    if (row.expired) return false
+    if (!row.expires_at) return true
+    return new Date(row.expires_at).getTime() > Date.now()
+  }
+
+  function readLiveLinkStore() {
+    try {
+      return JSON.parse(localStorage.getItem(LIVE_LINKS_KEY) || '{}')
+    } catch {
+      return {}
+    }
+  }
+
+  function writeLiveLinkStore(store) {
+    try {
+      localStorage.setItem(LIVE_LINKS_KEY, JSON.stringify(store))
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function cacheLiveDeploy(projectId, deploy) {
+    if (!projectId || !deploy?.url) return
+    const store = readLiveLinkStore()
+    store[projectId] = deploy
+    if (deploy.slug) store[`slug:${deploy.slug}`] = deploy
+    writeLiveLinkStore(store)
+  }
+
+  function removeCachedLiveDeploy(projectId, deployId) {
+    const store = readLiveLinkStore()
+    if (projectId && store[projectId]?.id === deployId) delete store[projectId]
+    for (const [key, row] of Object.entries(store)) {
+      if (row?.id === deployId) delete store[key]
+    }
+    writeLiveLinkStore(store)
+  }
+
+  function pickCachedLiveDeploy(projectId, projectLabel) {
+    const store = readLiveLinkStore()
+    if (deployIsLive(store[projectId])) return store[projectId]
+    const label = String(projectLabel || '').trim().toLowerCase()
+    for (const row of Object.values(store)) {
+      if (!deployIsLive(row)) continue
+      if (deployMatchesProject(row, projectId, label)) return row
+    }
+    const guessSlug = suggestShareSlug(projectLabel)
+    if (guessSlug && deployIsLive(store[`slug:${guessSlug}`])) return store[`slug:${guessSlug}`]
+    const rows = Object.values(store)
+      .filter((row) => deployIsLive(row))
+      .sort((a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime())
+    return rows[0] || null
+  }
+
+  function syncCachedLiveDeploy() {
+    if (state.activeLiveDeploy?.url && deployIsLive(state.activeLiveDeploy)) return state.activeLiveDeploy
+    const ws = ensureActiveWorkspace()
+    const projectId = state.activeId || ws.id
+    const cached = pickCachedLiveDeploy(projectId, ws.title || projectTitle())
+    if (cached) state.activeLiveDeploy = cached
+    return state.activeLiveDeploy
+  }
+
   async function refreshActiveLiveDeploy() {
     if (!api().testHubListDeploys) {
       state.activeLiveDeploy = null
@@ -804,9 +1131,13 @@ Prefer rewriting the full updated file contents for each changed path so the liv
           allRows.find((row) => !row.expired) ||
           null
       }
-      state.activeLiveDeploy = live
+      if (live) cacheLiveDeploy(projectId, live)
+      state.activeLiveDeploy = live || pickCachedLiveDeploy(projectId, projectLabel)
     } catch {
-      state.activeLiveDeploy = null
+      state.activeLiveDeploy = pickCachedLiveDeploy(
+        state.activeId || ensureActiveWorkspace().id,
+        ensureActiveWorkspace().title || projectTitle(),
+      )
     }
     paintRunViteButton()
     return state.activeLiveDeploy
@@ -952,7 +1283,11 @@ Prefer rewriting the full updated file contents for each changed path so the liv
           created_at: new Date().toISOString(),
           expired: false,
           live: true,
+          project_id: state.activeId || ws.id,
+          project_title: ws.title || projectTitle(),
+          title,
         }
+        cacheLiveDeploy(state.activeId || ws.id, state.activeLiveDeploy)
         showShareDialogSuccess(res.url, res.ttlMinutes)
         flashSaveHint('Published · link copied')
         state.linksOpen = true
@@ -981,12 +1316,13 @@ Prefer rewriting the full updated file contents for each changed path so the liv
   }
 
   function paintRunViteButton() {
+    syncCachedLiveDeploy()
     const files = state.files || {}
     const vite = isViteProject(files)
     const busy = state.sandboxBusy || state.busy || state.shareBusy
     const label = state.sandboxBusy ? 'Building…' : 'Run Vite'
     const canShare = Boolean(Object.keys(files).length && buildPreviewHtml(files))
-    const hasLiveLink = Boolean(state.activeLiveDeploy?.url && !state.activeLiveDeploy?.expired)
+    const hasLiveLink = deployIsLive(state.activeLiveDeploy)
     const shareLabel = state.shareBusy ? 'Publishing…' : hasLiveLink ? 'Manage' : 'Share link'
     for (const id of ['test-hub-run-vite', 'test-hub-preview-run-vite']) {
       const btn = $(id)
@@ -1028,7 +1364,15 @@ Prefer rewriting the full updated file contents for each changed path so the liv
     if (meta && mode) {
       const hasPreview = Boolean(buildPreviewHtml(files))
       meta.hidden = !hasPreview && !vite
-      mode.textContent = vite ? 'Vite project — run npm build to verify' : 'Static preview — HTML/CSS/JS inlined'
+      if (vite) {
+        mode.textContent = hasLiveLink
+          ? 'Vite project · share link is live'
+          : 'Vite project — run npm build to verify'
+      } else {
+        mode.textContent = hasLiveLink
+          ? 'Static preview · share link is live'
+          : 'Static preview — HTML/CSS/JS inlined'
+      }
       const liveUrl = hasLiveLink ? String(state.activeLiveDeploy?.url || '').trim() : ''
       meta.classList.toggle('is-live-bar', Boolean(liveUrl))
       if (liveLinkWrap && liveUrlEl) {
@@ -1124,7 +1468,10 @@ Prefer rewriting the full updated file contents for each changed path so the liv
           return
         }
         flashSaveHint('Link deleted')
+        if (state.activeLiveDeploy?.id === id) state.activeLiveDeploy = null
+        removeCachedLiveDeploy(state.activeId || ensureActiveWorkspace().id, id)
         void paintDeployLinks()
+        paintRunViteButton()
       })
     })
   }
@@ -1166,12 +1513,7 @@ Prefer rewriting the full updated file contents for each changed path so the liv
   function toggleCompareMode() {
     state.compareMode = !state.compareMode
     if (state.compareMode && state.comparePick.length < 2) {
-      const top = (CATALOG.partitionHubPickerModels?.(state.models.filter((m) => !isHubModelDisabled(m))) || { top: [] }).top
-      state.comparePick = top
-        .slice(0, 2)
-        .map((m) => m.id)
-        .filter(Boolean)
-      if (state.comparePick.length < 2) state.comparePick = [...DEFAULT_COMPARE_PICK]
+      sanitizeComparePick()
     }
     const tab = $('test-hub-compare-tab')
     if (tab) tab.hidden = !state.compareMode && !state.compareRuns.length
@@ -1182,7 +1524,12 @@ Prefer rewriting the full updated file contents for each changed path so the liv
   function toggleComparePick(id) {
     if (!id) return
     const m = state.models.find((row) => row.id === id)
-    if (!m || isHubModelDisabled(m)) return
+    if (!m) return
+    const access = modelAccess(m)
+    if (access.tier === 'locked') {
+      showUpgradeModal(access.reason)
+      return
+    }
     const pick = [...state.comparePick]
     const idx = pick.indexOf(id)
     if (idx >= 0) {
@@ -1209,18 +1556,31 @@ Prefer rewriting the full updated file contents for each changed path so the liv
       toggle.setAttribute('aria-pressed', state.compareMode ? 'true' : 'false')
     }
     if (!host || !state.compareMode) return
-    const pool =
-      CATALOG.partitionHubPickerModels?.(state.models.filter((m) => !isHubModelDisabled(m)))?.top ||
-      state.models.filter((m) => !isHubModelDisabled(m)).slice(0, 8)
-    host.innerHTML = pool
-      .slice(0, 8)
-      .map((m) => {
-        const on = state.comparePick.includes(m.id)
-        return `<button type="button" class="test-hub-compare-chip ${on ? 'on' : ''}" data-id="${escapeAttr(m.id)}">${escapeHtml(m.name)}</button>`
-      })
-      .join('')
+    const { onPlan, needUpgrade } = partitionCompareModels(comparePoolModels())
+    let html = ''
+    if (onPlan.length) {
+      html += `<div class="test-hub-compare-section">
+        <p class="test-hub-compare-section-label">On your plan · ${escapeHtml(planLabelShort())}</p>
+        <div class="test-hub-compare-models-row">${onPlan.map((m) => renderCompareChip(m, state.comparePick.includes(m.id))).join('')}</div>
+      </div>`
+    } else if (isUnpaidPlan(state.plan)) {
+      html += `<div class="test-hub-compare-section">
+        <p class="test-hub-compare-section-label">No models on your plan yet</p>
+        <button type="button" class="test-hub-compare-inline-upgrade" data-reason="subscribe">Subscribe to Start — $5/mo</button>
+      </div>`
+    }
+    if (needUpgrade.length) {
+      html += `<div class="test-hub-compare-section locked">
+        <p class="test-hub-compare-section-label">${isUnpaidPlan(state.plan) ? 'After you subscribe' : 'Upgrade to Pro'}</p>
+        <div class="test-hub-compare-models-row">${needUpgrade.slice(0, 8).map((m) => renderCompareChip(m, false)).join('')}</div>
+      </div>`
+    }
+    host.innerHTML = html
     host.querySelectorAll('.test-hub-compare-chip').forEach((btn) => {
       btn.onclick = () => toggleComparePick(btn.dataset.id)
+    })
+    host.querySelectorAll('.test-hub-compare-inline-upgrade, .test-hub-compare-upgrade').forEach((btn) => {
+      btn.onclick = () => showUpgradeModal(btn.dataset.reason || 'subscribe')
     })
   }
 
@@ -1245,13 +1605,20 @@ Prefer rewriting the full updated file contents for each changed path so the liv
         const autoScore = run.status === 'done' ? scoreRun(run) : null
         const status =
           run.status === 'error'
-            ? escapeHtml(run.error || 'Error')
+            ? isUpgradeError(run.error)
+              ? 'Plan limit'
+              : 'Error'
             : run.status === 'running'
               ? 'Building…'
               : `${Object.keys(files).length} file${Object.keys(files).length === 1 ? '' : 's'}${autoScore != null ? ` · ${autoScore}/100` : ''}${run.viteBuildOk === true ? ' · vite ✓' : run.viteBuildOk === false ? ' · vite ✗' : ''}`
-        const previewBlock = preview
-          ? `<iframe class="test-hub-compare-frame" title="Preview ${escapeAttr(run.modelName)}" sandbox="allow-scripts allow-same-origin" srcdoc="${escapeAttr(preview)}"></iframe>`
-          : `<div class="test-hub-compare-no-preview">No preview yet</div>`
+        const previewBlock =
+          run.status === 'error' && isUpgradeError(run.error)
+            ? renderCompareGate(run)
+            : preview
+              ? `<iframe class="test-hub-compare-frame" title="Preview ${escapeAttr(run.modelName)}" sandbox="allow-scripts allow-same-origin" srcdoc="${escapeAttr(preview)}"></iframe>`
+              : run.status === 'error'
+                ? `<div class="test-hub-compare-gate error"><p>${escapeHtml(run.error || 'Error')}</p></div>`
+                : `<div class="test-hub-compare-no-preview">No preview yet</div>`
         const useBtn =
           run.status === 'done' && run.text
             ? `<button type="button" class="test-hub-compare-use" data-idx="${idx}">Use this build</button>`
@@ -1268,6 +1635,9 @@ Prefer rewriting the full updated file contents for each changed path so the liv
       .join('')
     grid.querySelectorAll('.test-hub-compare-use').forEach((btn) => {
       btn.onclick = () => applyCompareWinner(Number(btn.dataset.idx))
+    })
+    grid.querySelectorAll('.test-hub-compare-upgrade').forEach((btn) => {
+      btn.onclick = () => showUpgradeModal(btn.dataset.reason || 'pro')
     })
   }
 
@@ -1398,6 +1768,7 @@ Prefer rewriting the full updated file contents for each changed path so the liv
         const active = state.workspaces.find((w) => w.id === saved.activeId) || state.workspaces[0]
         applyWorkspace(active)
         if (state.linksOpen) void paintDeployLinks()
+        void refreshActiveLiveDeploy()
         return
       }
       const ws = emptyWorkspace({
@@ -1413,6 +1784,7 @@ Prefer rewriting the full updated file contents for each changed path so the liv
     } catch {
       ensureActiveWorkspace()
     }
+    void refreshActiveLiveDeploy()
   }
 
   function rebuildWorkspace(liveText) {
@@ -1904,7 +2276,21 @@ Prefer rewriting the full updated file contents for each changed path so the liv
     return out
   }
 
+  async function loadPlanAccess() {
+    try {
+      const data = await api().fetchAccountSummary?.()
+      if (data && !data.error) {
+        state.plan = data.plan || 'hobby'
+        state.byokAllowed = Boolean(data.byokAllowed)
+      }
+    } catch {
+      /* ignore */
+    }
+    sanitizeComparePick()
+  }
+
   async function loadModels() {
+    await loadPlanAccess()
     let apiList = []
     try {
       const data = await api().fetchModels?.()
@@ -1913,10 +2299,12 @@ Prefer rewriting the full updated file contents for each changed path so the liv
       /* ignore */
     }
     state.models = mergeAllModels(apiList)
-    if (state.model !== 'auto' && isHubModelDisabled(state.models.find((m) => m.id === state.model))) {
+    if (state.model !== 'auto' && !isHubModelSelectable(state.models.find((m) => m.id === state.model))) {
       state.model = 'auto'
     }
+    sanitizeComparePick()
     paintModelList()
+    paintCompareBar()
   }
 
   function mergePending(files) {
@@ -1931,10 +2319,11 @@ Prefer rewriting the full updated file contents for each changed path so the liv
     if (state.busy || (!text && !state.pending.length)) return
     const models = state.comparePick.filter((id) => {
       const m = state.models.find((row) => row.id === id)
-      return m && !isHubModelDisabled(m)
+      return m && isHubModelSelectable(m)
     })
     if (models.length < 2) {
-      flashSaveHint('Pick at least 2 models to compare')
+      if (isUnpaidPlan(state.plan)) showUpgradeModal('subscribe')
+      else flashSaveHint('Pick at least 2 models on your plan to compare')
       return
     }
 
@@ -2019,6 +2408,17 @@ Prefer rewriting the full updated file contents for each changed path so the liv
     const box = $('test-hub-input')
     const text = box?.value?.trim() || ''
     if (state.busy || (!text && !state.pending.length)) return
+    if (state.model !== 'auto') {
+      const picked = state.models.find((m) => m.id === state.model)
+      const access = modelAccess(picked || { id: state.model })
+      if (access.tier === 'locked') {
+        showUpgradeModal(access.reason)
+        return
+      }
+    } else if (isUnpaidPlan(state.plan)) {
+      showUpgradeModal('subscribe')
+      return
+    }
     state.messages.push({ role: 'user', content: text, files: state.pending.length ? [...state.pending] : undefined })
     state.pending = []
     if (box) box.value = ''
@@ -2059,7 +2459,31 @@ Prefer rewriting the full updated file contents for each changed path so the liv
       if (isViteProject(state.files)) await maybeViteCheckRun(run)
       await saveBenchmarkRuns([run], { compareMode: false, viteEnabled: isViteProject(state.files) })
     } catch (err) {
-      state.messages.push({ role: 'assistant', content: `Error: ${err?.message || err}` })
+      let msg = err?.message || String(err)
+      if (/never sent|timed out|Could not reach/i.test(msg) && api().testHubChat) {
+        try {
+          const res = await api().testHubChat({
+            model: state.model,
+            messages: buildApiMessages(),
+          })
+          if (!res?.error) {
+            const reply = res?.text || ''
+            state.messages.push({ role: 'assistant', content: reply })
+            state.live = ''
+            rebuildWorkspace(reply)
+            state.busy = false
+            setHubAvatarState('idle')
+            schedulePersist()
+            paint()
+            return
+          }
+          msg = res.error
+        } catch (retryErr) {
+          msg = retryErr?.message || msg
+        }
+      }
+      if (isUpgradeError(msg)) showUpgradeModal(/Subscribe to Start/i.test(msg) ? 'subscribe' : 'pro')
+      else state.messages.push({ role: 'assistant', content: `Error: ${msg}` })
       state.live = ''
     } finally {
       if (offChunk) offChunk()

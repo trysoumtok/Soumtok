@@ -231,14 +231,19 @@ function summarizeToolResult(name, content) {
   return `${n} (${size}, hash ${h}): ${c.slice(0, 280)}`
 }
 
-function todosPath(root) {
-  return path.join(os.homedir(), '.soumtok', 'workspaces', workspaceKey(root), 'todos.json')
+function threadScopeId(threadId) {
+  return String(threadId || 'legacy').replace(/[^\w-]/g, '_').slice(0, 64)
 }
 
-function loadTodos(root) {
+function todosPath(root, threadId) {
+  const id = threadScopeId(threadId)
+  return path.join(os.homedir(), '.soumtok', 'workspaces', workspaceKey(root), `todos-${id}.json`)
+}
+
+function loadTodos(root, threadId) {
   if (!root) return []
   try {
-    const raw = fs.readFileSync(todosPath(root), 'utf8')
+    const raw = fs.readFileSync(todosPath(root, threadId), 'utf8')
     const parsed = JSON.parse(raw)
     return Array.isArray(parsed) ? parsed : Array.isArray(parsed?.todos) ? parsed.todos : []
   } catch {
@@ -246,12 +251,13 @@ function loadTodos(root) {
   }
 }
 
-function saveTodos(root, todos) {
+function saveTodos(root, todos, threadId) {
   if (!root) return
   const list = Array.isArray(todos) ? todos : []
-  const dir = path.dirname(todosPath(root))
+  const file = todosPath(root, threadId)
+  const dir = path.dirname(file)
   fs.mkdirSync(dir, { recursive: true })
-  fs.writeFileSync(todosPath(root), JSON.stringify({ todos: list, at: new Date().toISOString() }, null, 2), 'utf8')
+  fs.writeFileSync(file, JSON.stringify({ todos: list, threadId: threadScopeId(threadId), at: new Date().toISOString() }, null, 2), 'utf8')
 }
 
 const DYNAMIC_SYSTEM_MARKERS = ['SOUMTOK STEER', 'TASK LEDGER', 'SOUMTOK RUN STATE', 'LIVE USER REQUEST']

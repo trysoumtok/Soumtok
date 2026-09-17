@@ -94,10 +94,21 @@ export function CheckoutPage() {
   const [mpesaOn, setMpesaOn] = useState(true)
   const [ready, setReady] = useState(false)
   const [busy, setBusy] = useState(false)
-  const [status, setStatus] = useState(params.get('paypal') === 'cancel' ? 'Checkout was cancelled.' : '')
+  const paypalFlag = params.get('paypal')
+  const [status, setStatus] = useState(
+    paypalFlag === 'cancel'
+      ? 'Checkout was cancelled.'
+      : paypalFlag === 'error'
+        ? 'PayPal could not confirm the payment. Try again or use M-Pesa.'
+        : '',
+  )
   const [paid, setPaid] = useState<PaidReceipt | null>(null)
-  const [homeIn, setHomeIn] = useState(8)
+  const [payProvider, setPayProvider] = useState<'mpesa' | 'paypal' | null>(null)
+  const [receiptEmailed, setReceiptEmailed] = useState(false)
+  const [dashboardIn, setDashboardIn] = useState(8)
+  const [pendingOrderId, setPendingOrderId] = useState<string | null>(null)
   const resumed = useRef(false)
+  const paypalSuccessHandled = useRef(false)
 
   useEffect(() => {
     let cancelled = false
@@ -142,12 +153,12 @@ export function CheckoutPage() {
 
   useEffect(() => {
     if (!paid) return
-    setHomeIn(8)
+    setDashboardIn(8)
     const tick = window.setInterval(() => {
-      setHomeIn((value) => {
+      setDashboardIn((value) => {
         if (value <= 1) {
           window.clearInterval(tick)
-          navigate('/')
+          navigate('/dashboard/spending?paid=1')
           return 0
         }
         return value - 1
@@ -185,16 +196,27 @@ export function CheckoutPage() {
     window.location.href = await startPaypalCheckout(planId, cycle)
   }
 
-  function showPaid(order: {
-    orderId?: string
-    plan?: string
-    amount?: string
-    currency?: string
-    receiptNumber?: string | null
-    receiptUrl?: string | null
-  }) {
+  function showPaid(
+    order: {
+      orderId?: string
+      plan?: string
+      amount?: string
+      currency?: string
+      receiptNumber?: string | null
+      receiptUrl?: string | null
+      receiptEmailed?: boolean
+    },
+    provider: 'mpesa' | 'paypal' = 'mpesa',
+  ) {
     if (!order.orderId) return
-    rememberPayMethod({ kind: 'mpesa', phone: phone.trim() || undefined })
+    if (provider === 'paypal') {
+      rememberPayMethod({ kind: 'paypal', email: email.trim() || undefined })
+    } else {
+      rememberPayMethod({ kind: 'mpesa', phone: phone.trim() || undefined })
+    }
+    setPayProvider(provider)
+    setPendingOrderId(null)
+    setReceiptEmailed(Boolean(order.receiptEmailed))
     setPaid({
       orderId: order.orderId,
       plan: order.plan || planId,
@@ -208,21 +230,49 @@ export function CheckoutPage() {
 
   async function watchOrder(orderId: string) {
     setBusy(true)
+    setPendingOrderId(orderId)
     setStatus('Check your phone and enter your M-Pesa PIN.')
     const startedAt = Date.now()
     try {
-      while (Date.now() - startedAt < 180_000) {
+      while (Date.now() - startedAt < 300_000) {
         const order = await fetchMpesaOrder(orderId)
         if (order.status === 'paid') {
           showPaid({ ...order, orderId })
           return
         }
-        if (order.status === 'failed') throw new Error('M-Pesa payment failed. Try again.')
-        await new Promise((resolve) => setTimeout(resolve, 2000))
+        if (order.status === 'failed') {
+          throw new Error(
+            order.message ||
+              'M-Pesa payment was not confirmed. If you entered your PIN, tap Recheck payment below.',
+          )
+        }
+        if (order.message) setStatus(order.message)
+        await new Promise((resolve) => setTimeout(resolve, 2500))
       }
-      setStatus('Still waiting for M-Pesa. Keep this page open, or try again.')
+      setStatus('Still waiting for M-Pesa. Keep this page open, or tap Recheck payment.')
     } catch (error) {
       setStatus(error instanceof Error ? error.message : 'Checkout failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function recheckMpesa() {
+    if (!pendingOrderId) return
+    setBusy(true)
+    setStatus('Rechecking M-Pesa…')
+    try {
+      const order = await fetchMpesaOrder(pendingOrderId)
+      if (order.status === 'paid') {
+        showPaid({ ...order, orderId: pendingOrderId })
+        return
+      }
+      if (order.status === 'failed') {
+        throw new Error(order.message || 'Payment still not confirmed. Try Subscribe again or contact support.')
+      }
+      setStatus(order.message || 'Still waiting for M-Pesa. Enter your PIN if the STK prompt is open.')
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : 'Could not recheck payment')
     } finally {
       setBusy(false)
     }
@@ -260,7 +310,43 @@ export function CheckoutPage() {
   }
 
   useEffect(() => {
-    if (!ready || resumed.current || paid) return
+    if (!ready || paid) return
+    if (paypalFlag === 'success') {
+      if (paypalSuccessHandled.current) return
+      paypalSuccessHandled.current = true
+      const orderId = params.get('order')
+      fetchBilling()
+        .then((data) => {
+          const orders = data.orders || []
+          const order =
+            (orderId ? orders.find((row) => row.id === orderId) : null) ||
+            orders.find((row) => row.provider === 'paypal' && row.status === 'paid')
+          if (!order?.id) {
+            setStatus('Payment confirmed, but the receipt is still syncing. Open Billing in a moment.')
+            return
+          }
+          showPaid(
+            {
+              orderId: order.id,
+              plan: order.plan,
+              amount: order.amount,
+              currency: order.currency || 'USD',
+              receiptNumber: order.receipt_number,
+              receiptUrl: `/api/billing/receipt/${order.id}`,
+              receiptEmailed: true,
+            },
+            'paypal',
+          )
+          const cleanPlan = paidPlan(order.plan)?.id || planId
+          const cleanCycle = order.cycle === 'annual' ? 'annual' : 'monthly'
+          window.history.replaceState({}, '', checkoutPath(cleanPlan as PaidPlanId, cleanCycle))
+        })
+        .catch(() => {
+          setStatus('Payment confirmed on PayPal, but we could not load your receipt yet. Check Billing.')
+        })
+      return
+    }
+    if (resumed.current) return
     resumed.current = true
     fetchBilling()
       .then((data) => {
@@ -269,6 +355,8 @@ export function CheckoutPage() {
         const age = Date.now() - new Date(recent.created_at).getTime()
         if (age > 45 * 60 * 1000) return
         if (recent.status === 'paid' && recent.receipt_number) {
+          setReceiptEmailed(true)
+          setPayProvider('mpesa')
           setPaid({
             orderId: recent.id,
             plan: recent.plan,
@@ -294,7 +382,7 @@ export function CheckoutPage() {
             <button
               type="button"
               className="grid h-8 w-8 place-items-center text-white/55 hover:text-white"
-              onClick={() => navigate(teamName ? '/team/new' : '/dashboard/spending')}
+              onClick={() => navigate('/dashboard/spending')}
               aria-label="Back"
             >
               ←
@@ -488,11 +576,24 @@ export function CheckoutPage() {
           {status && (
             <p
               className={`mt-3 text-[13px] ${
-                status.toLowerCase().includes('check your phone') ? 'text-[#555]' : 'text-[#c13515]'
+                status.toLowerCase().includes('check your phone') ||
+                status.toLowerCase().includes('waiting for m-pesa')
+                  ? 'text-[#555]'
+                  : 'text-[#c13515]'
               }`}
             >
               {status}
             </p>
+          )}
+          {pendingOrderId && !paid && (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void recheckMpesa()}
+              className="mt-3 w-full rounded-md border border-[#d6d6d6] py-2.5 text-[14px] text-[#333] disabled:opacity-50"
+            >
+              Recheck payment
+            </button>
           )}
 
           <p className="mt-6 text-[11px] leading-5 text-[#888]">
@@ -521,6 +622,17 @@ export function CheckoutPage() {
             <p className="mt-3 text-[14px] leading-6 text-white/55">
               {paid.currency} {paid.amount} · {paid.receiptNumber}
             </p>
+            <p className="mt-2 text-[13px] leading-6 text-white/45">
+              {receiptEmailed
+                ? 'Your plan is active on web and Desktop. We emailed your receipt PDF to your account address.'
+                : 'Your plan is active on web and Desktop. Your receipt PDF is ready below.'}
+            </p>
+            {payProvider === 'paypal' ? (
+              <p className="mt-2 text-[12px] leading-5 text-white/35">
+                PayPal will charge your card or PayPal balance automatically each{' '}
+                {cycle === 'annual' ? 'year' : 'month'} until you cancel in PayPal or Billing.
+              </p>
+            ) : null}
             <button
               type="button"
               onClick={() => void downloadReceipt()}
@@ -530,12 +642,14 @@ export function CheckoutPage() {
             </button>
             <button
               type="button"
-              onClick={() => navigate('/')}
+              onClick={() => navigate('/dashboard/spending?paid=1')}
               className="mt-3 w-full rounded-md border border-white/15 py-2.5 text-[14px] text-white"
             >
-              Back to home
+              Open dashboard
             </button>
-            <p className="mt-4 text-center text-[12px] text-white/40">Taking you home in {homeIn}s</p>
+            <p className="mt-4 text-center text-[12px] text-white/40">
+              Opening your dashboard in {dashboardIn}s
+            </p>
           </div>
         </div>
       ) : null}

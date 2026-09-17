@@ -78,6 +78,20 @@ function parseStillRequest(text) {
   return { prompt: prompt || 'image', aspect }
 }
 
+function stillAspectForImageUse(prompt, pathHint) {
+  const combined = `${String(prompt || '')} ${String(pathHint || '')}`.toLowerCase()
+  const explicit = stillAspectFromText(combined)
+  if (explicit !== DEFAULT_STILL_ASPECT) return explicit
+  if (
+    /\b(hero|banner|cover|header[\s-]?image|landing|og[\s-]?image|wide[\s-]?shot|background[\s-]?image)\b/.test(
+      combined,
+    )
+  ) {
+    return '16:9'
+  }
+  return DEFAULT_STILL_ASPECT
+}
+
 function falImageSize(aspect) {
   const a = normalizeStillAspect(aspect)
   if (a === '1:1') return 'square_hd'
@@ -100,6 +114,7 @@ module.exports = {
   stillAspectFromText,
   stripStillAspectFromPrompt,
   parseStillRequest,
+  stillAspectForImageUse,
   falImageSize,
   stillAspectCss,
 }

@@ -52,7 +52,13 @@ import { prepareDesktopAgentTurn } from '../shared/desktopAgent.ts'
 import { compactConversation, mergeDesktopSystem } from '../shared/agentControlLayer.ts'
 import { shouldForceToolChoice, isHarnessUserText } from '../shared/modelHarness.ts'
 import { analyzeUserRequest } from '../shared/requestAnalyze.ts'
-import { applyRunModeToPrefs, mergeDesktopAgentPrefs, openFilesForAgent } from '../shared/desktopAgentPrefs.ts'
+import {
+  applyRunModeToPrefs,
+  maxToolRoundsForPrefs,
+  mergeDesktopAgentPrefs,
+  openFilesForAgent,
+} from '../shared/desktopAgentPrefs.ts'
+import { parseAgentDriver } from '../shared/soumtokBot.ts'
 import {
   needsVisionWrap,
   stampAttachmentMeta,
@@ -71,6 +77,7 @@ import {
   type NativeToolCall,
 } from '../shared/nativeTools.ts'
 import { createSandboxDir, removeSandboxDir } from './sandbox.ts'
+import { enrichAttachmentsText, extractDocumentText, isExtractableDocument } from './documentExtract.ts'
 import {
   PLAN_CREDIT,
   TOKENS_PER_CREDIT,
@@ -87,6 +94,7 @@ import {
   cheapModelsOnlyPlan,
   isEverydayModel,
   modelUsagePool,
+  modelsForPlan,
   planPoolSummary,
   sumPoolUsageUsd,
 } from '../shared/usagePools.ts'
@@ -202,12 +210,22 @@ async function* sseFrames(body: ReadableStream<Uint8Array>): AsyncGenerator<Stre
 }
 
 /** Pulls the text delta out of a frame, whatever shape the provider uses. */
-function streamDelta(frame: StreamFrame) {
-  const choice = (frame.choices as { delta?: { content?: string; reasoning_content?: string } }[] | undefined)?.[0]
-  if (choice?.delta?.content) return choice.delta.content
-  if (typeof frame.delta === 'string' && frame.type === 'response.output_text.delta') return frame.delta
-  const block = frame.delta as { text?: string; type?: string } | undefined
-  if (block?.text && frame.type === 'content_block_delta') return block.text
+export function streamDelta(frame: StreamFrame) {
+  const choice = (frame.choices as { delta?: { content?: string; reasoning_content?: string; reasoning?: string } }[] | undefined)?.[0]
+  const chatDelta = choice?.delta
+  if (chatDelta?.content) return chatDelta.content
+  // DeepSeek / OpenRouter reasoning models stream chain-of-thought here before `content`.
+  if (chatDelta?.reasoning_content) return chatDelta.reasoning_content
+  if (typeof chatDelta?.reasoning === 'string' && chatDelta.reasoning) return chatDelta.reasoning
+  if (typeof frame.delta === 'string') {
+    const kind = String(frame.type || '')
+    if (kind === 'response.output_text.delta' || /reasoning/i.test(kind)) return frame.delta
+  }
+  if (frame.type === 'content_block_delta') {
+    const block = frame.delta as { type?: string; text?: string; thinking?: string } | undefined
+    if (block?.type === 'thinking_delta' && block.thinking) return block.thinking
+    if (block?.text) return block.text
+  }
   return ''
 }
 
@@ -720,7 +738,15 @@ export function registerStudio(
     const name = safeFileName(uploaded.name)
     const mime = guessMime(name, uploaded.type)
     const bytes = new Uint8Array(await uploaded.arrayBuffer())
-    const text = isTextAttachment(name, mime) ? new TextDecoder().decode(bytes).slice(0, 200_000) : undefined
+    let text = isTextAttachment(name, mime) ? new TextDecoder().decode(bytes).slice(0, 200_000) : undefined
+    if (!text && isExtractableDocument(name, mime)) {
+      try {
+        const extracted = await extractDocumentText(name, mime, Buffer.from(bytes))
+        text = extracted.text || undefined
+      } catch {
+        /* keep text undefined */
+      }
+    }
     const analysis = analyzeAttachment({ name, mime, size: uploaded.size, text })
 
     let fileId: string | undefined
@@ -867,11 +893,7 @@ export function registerStudio(
     const have = new Set(keys.rows.map((row: { provider: string }) => row.provider))
     const profile = await pool.query(`SELECT plan FROM profiles WHERE user_id = $1`, [session.user.id])
     const planId = String(profile.rows[0]?.plan || 'hobby')
-    const base = soumtokPickerModels()
-    const catalog =
-      !openAccessForBuilding() && cheapModelsOnlyPlan(planId)
-        ? base.filter((model) => isEverydayModel(model.id))
-        : base
+    const catalog = modelsForPlan(soumtokPickerModels(), planId)
     return c.json({
       models: sortModelsByPower(catalog).map((model) => {
         const fallback = NATIVE_FALLBACK[model.id]
@@ -1158,13 +1180,17 @@ export function registerStudio(
       agentPrefs?: Record<string, unknown>
       analysisKind?: string
       client?: string
+      runtime?: string
+      contextPrompt?: string
+      hasWorkspaceFiles?: boolean
     }>()
     const usageSource = agentUsageSource(c, body)
 
     const agentPrefs = applyRunModeToPrefs(mergeDesktopAgentPrefs(body.agentPrefs))
     const openFiles = openFilesForAgent(body.openFiles, agentPrefs)
 
-    const stamped = stampAttachmentMeta(Array.isArray(body.files) ? body.files.filter(Boolean) : [])
+    const enrichedFiles = await enrichAttachmentsText(Array.isArray(body.files) ? body.files.filter(Boolean) : [])
+    const stamped = stampAttachmentMeta(enrichedFiles)
     const prepDraft = prepareDesktopAgentTurn({
       messages: body.messages,
       workspaceRoot: body.workspaceRoot,
@@ -1172,10 +1198,12 @@ export function registerStudio(
       branch: body.branch,
       mode: body.mode || 'agent',
       driver: body.driver,
+      runtime: body.runtime || (body.client === 'studio-web' ? 'studio-web' : undefined),
       files: stamped,
       agentPrefs,
       model: body.model,
       analysisKind: body.analysisKind,
+      hasWorkspaceFiles: body.hasWorkspaceFiles,
     })
 
     const runBody = { ...body, files: stamped }
@@ -1199,10 +1227,12 @@ export function registerStudio(
       branch: body.branch,
       mode: body.mode || 'agent',
       driver: body.driver,
+      runtime: body.runtime || (body.client === 'studio-web' ? 'studio-web' : undefined),
       files: wrapped.files,
       agentPrefs,
       model: requestModel,
       analysisKind: body.analysisKind,
+      hasWorkspaceFiles: body.hasWorkspaceFiles,
     })
 
     const work = messages.map((item) => ({ ...item }))
@@ -1227,8 +1257,10 @@ export function registerStudio(
     const sysIdx = work.findIndex((item) => item.role === 'system')
     const prevSys = sysIdx >= 0 ? String(work[sysIdx].content || '') : ''
     const mergedSystem = mergeDesktopSystem(prevSys, prep.systemPrompt, prep.userText)
-    if (sysIdx >= 0) work[sysIdx].content = mergedSystem
-    else work.unshift({ role: 'system', content: mergedSystem })
+    const contextBlock = String(body.contextPrompt || '').trim()
+    const withMemory = contextBlock ? `${mergedSystem}\n\n${contextBlock}` : mergedSystem
+    if (sysIdx >= 0) work[sysIdx].content = withMemory
+    else work.unshift({ role: 'system', content: withMemory })
     const last = work[work.length - 1]
     const lastUser = [...work].reverse().find((item) => item.role === 'user')
     const openToolCalls = Boolean(last?.role === 'assistant' && last.tool_calls?.length)
@@ -1451,9 +1483,12 @@ export function registerStudio(
         maxTokens?: number
       }
 
-  async function platformPoolUsage(userId: string, planId: string) {
-    const profile = await pool!.query(`SELECT plan_started_at FROM profiles WHERE user_id = $1`, [userId])
-    const started = profile.rows[0]?.plan_started_at
+  async function platformPoolUsage(userId: string, planId: string, planStartedAt?: Date | string | null) {
+    let started = planStartedAt
+    if (started === undefined) {
+      const profile = await pool!.query(`SELECT plan_started_at FROM profiles WHERE user_id = $1`, [userId])
+      started = profile.rows[0]?.plan_started_at
+    }
     const since =
       started && !isUnpaidPlan(planId)
         ? new Date(started)
@@ -1467,40 +1502,71 @@ export function registerStudio(
     return sumPoolUsageUsd(rows.rows as { model: string; prompt_tokens?: number; completion_tokens?: number; billed_to?: string }[])
   }
 
+  function workspaceFilesFromBody(body: { files?: unknown; workspaceRoot?: string; hasWorkspaceFiles?: boolean }) {
+    const raw = body.files
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      return raw as Record<string, string>
+    }
+    return null
+  }
+
+  function hasImageInRunBody(body: { files?: unknown }, lastUser?: StudioMessage) {
+    if ((lastUser?.files || []).some((file) => /image\//.test(file.mime || ''))) return true
+    const raw = body.files
+    if (Array.isArray(raw)) {
+      return raw.some((file) => /image\//.test(String((file as ChatFile).mime || '')))
+    }
+    const workspace = workspaceFilesFromBody(body)
+    if (!workspace) return false
+    return Object.entries(workspace).some(
+      ([path, content]) => /\.(png|jpe?g|gif|webp|avif|ico|bmp)$/i.test(path) || /^data:image\//i.test(String(content || '')),
+    )
+  }
+
   async function resolveRun(
     userId: string,
     body: { model?: string; messages?: StudioMessage[]; temperature?: number; maxTokens?: number },
   ): Promise<RunAccess> {
+    const directTestHub = (body as { client?: string; agent?: boolean }).client === 'test-hub' && !(body as { agent?: boolean }).agent
     const raw = messagesForProvider(body.messages ?? [])
-    const messages = await hydrateChatFiles(userId, raw)
+    const needsDocHydrate = raw.some((item) => item.files?.some((file) => file.id && !file.text && !isProviderMediaUrl(file.dataUrl)))
+    const profilePromise = pool!.query(`SELECT plan, plan_started_at FROM profiles WHERE user_id = $1`, [userId])
+    const messages = needsDocHydrate ? await hydrateChatFiles(userId, raw) : (raw as StudioMessage[])
     if (messages.length === 0) return { ok: false, error: 'Write a prompt', status: 400 }
     const lastUser = [...messages].reverse().find(
       (item) => item.role === 'user' && !isHarnessUserText(typeof item.content === 'string' ? item.content : ''),
     )
     const lastText = typeof lastUser?.content === 'string' ? lastUser.content : ''
-    const profile = await pool!.query(`SELECT plan FROM profiles WHERE user_id = $1`, [userId])
-    const planId = String(profile.rows[0]?.plan || 'hobby')
+    const profileRow = (await profilePromise).rows[0] as { plan?: string; plan_started_at?: Date | string | null } | undefined
+    const planId = String(profileRow?.plan || 'hobby')
+    const planStartedAt = profileRow?.plan_started_at
     const desktopRun = (body as { mode?: AgentRunMode; workspaceRoot?: string }).mode
-    const autoCatalog =
-      !openAccessForBuilding() && cheapModelsOnlyPlan(planId)
-        ? soumtokPickerModels().filter((item) => isEverydayModel(item.id))
-        : soumtokPickerModels()
-    const hasFiles = Boolean((body as { workspaceRoot?: string }).workspaceRoot)
-    const hasImage =
-      (lastUser?.files || []).some((file) => /image\//.test(file.mime || '')) ||
-      ((body as { files?: ChatFile[] }).files || []).some((file) => /image\//.test(file.mime || ''))
-    const analysis = analyzeUserRequest(lastText, { hasFiles, hasImage, attachments: Boolean(lastUser?.files?.length) })
-    const intelligence = String((body as { agentPrefs?: { intelligence?: string } }).agentPrefs?.intelligence || '')
+    const autoCatalog = modelsForPlan(soumtokPickerModels(), planId)
+    const workspaceFiles = workspaceFilesFromBody(body as { files?: unknown; workspaceRoot?: string; hasWorkspaceFiles?: boolean })
+    const hasFiles = Boolean(
+      (body as { workspaceRoot?: string; hasWorkspaceFiles?: boolean }).workspaceRoot ||
+      (body as { hasWorkspaceFiles?: boolean }).hasWorkspaceFiles ||
+      (workspaceFiles && Object.keys(workspaceFiles).length > 0),
+    )
+    const hasImage = hasImageInRunBody(body as { files?: unknown }, lastUser)
+    const analysis = directTestHub
+      ? {
+          kind: /\b(build|make|create|design|fix|calc|app|page|site|dashboard|game|3d)\b/i.test(lastText) ? 'build' : 'chat',
+        }
+      : analyzeUserRequest(lastText, { hasFiles, hasImage, attachments: Boolean(lastUser?.files?.length) })
+    const intelligencePref = String((body as { agentPrefs?: { intelligence?: string } }).agentPrefs?.intelligence || '')
+    const intelligence =
+      directTestHub ? 'fast' : intelligencePref === 'fast' || intelligencePref === 'balanced' || intelligencePref === 'max' ? intelligencePref : undefined
     const requested = isAutoModel(body.model)
       ? pickAutoModel({
           models: autoCatalog.map((item) => ({ ...item, ready: true })),
           task: lastText,
           plan: planId,
-          runMode: desktopRun || 'agent',
-          hasFiles,
+          runMode: directTestHub ? 'agent' : desktopRun || 'agent',
+          hasFiles: directTestHub ? Boolean(lastUser?.files?.length) : hasFiles,
           hasImage,
           analysisKind: analysis.kind,
-          intelligence: intelligence === 'fast' || intelligence === 'balanced' || intelligence === 'max' ? intelligence : undefined,
+          intelligence,
         })
       : body.model ?? ''
     const model = modelById(requested)
@@ -1578,7 +1644,7 @@ export function registerStudio(
     }
 
     if (!openAccessForBuilding() && billedTo === 'platform') {
-      const pools = await platformPoolUsage(userId, planId)
+      const pools = await platformPoolUsage(userId, planId, planStartedAt)
       const estTurnUsd = vendorUsdForTokens(model.id, 4000, Math.min(body.maxTokens || 4096, 4096))
       const gate = checkPoolAccess({
         planId,
@@ -1592,7 +1658,10 @@ export function registerStudio(
       }
     }
 
-    return { ok: true, provider, requestModel, apiKey, billedTo, catalogModel: model.id, messages, temperature: body.temperature, maxTokens: body.maxTokens }
+    const maxTokens =
+      body.maxTokens ??
+      (directTestHub ? 12_000 : undefined)
+    return { ok: true, provider, requestModel, apiKey, billedTo, catalogModel: model.id, messages, temperature: body.temperature, maxTokens }
   }
 
   async function recordRun(
@@ -1629,76 +1698,91 @@ export function registerStudio(
   }
 
   app.post('/api/studio/complete', async (c) => {
-    const { session, ready } = await requireReadyUser(c)
-    if (!session || !pool) return c.json({ error: 'Unauthorized' }, 401)
-    if (!ready) return c.json({ error: 'Finish account setup first' }, 403)
+    try {
+      const { session, ready } = await requireReadyUser(c)
+      if (!session || !pool) return c.json({ error: 'Unauthorized' }, 401)
+      if (!ready) return c.json({ error: 'Finish account setup first' }, 403)
 
-    const payload = await c.req.json()
-    const access = await resolveRun(session.user.id, payload)
-    if (!access.ok) return c.json({ error: access.error, keys: access.keys }, access.status)
-    const { provider, requestModel, apiKey, billedTo, messages, temperature, maxTokens, catalogModel } = access
+      const payload = await c.req.json()
+      const access = await resolveRun(session.user.id, payload)
+      if (!access.ok) return c.json({ error: access.error, keys: access.keys }, access.status)
+      const { provider, requestModel, apiKey, billedTo, messages, temperature, maxTokens, catalogModel } = access
 
-    const started = Date.now()
-    const res = await fetch(completionUrl(provider, requestModel), {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-        ...(provider === 'openrouter'
-          ? { 'HTTP-Referer': env.betterAuthUrl, 'X-Title': 'Soumtok' }
-          : {}),
-        ...(provider === 'anthropic' ? anthropicRequestHeaders(apiKey) : {}),
-      },
-        body: JSON.stringify(requestBody(provider, requestModel, messages, { temperature, maxTokens, packModel: catalogModel || requestModel })),
-      signal: AbortSignal.timeout(180_000),
-    })
+      const started = Date.now()
+      const upstream = await fetch(completionUrl(provider, requestModel), {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+          ...(provider === 'openrouter'
+            ? { 'HTTP-Referer': env.betterAuthUrl, 'X-Title': 'Soumtok' }
+            : {}),
+          ...(provider === 'anthropic' ? anthropicRequestHeaders(apiKey) : {}),
+        },
+        body: JSON.stringify(
+          requestBody(provider, requestModel, messages, { temperature, maxTokens, packModel: catalogModel || requestModel }),
+        ),
+        signal: AbortSignal.timeout(180_000),
+      })
 
-    const data = (await res.json()) as {
-      error?: { message?: string } | string
-      message?: string
-      output_text?: string
-      output?: { content?: { text?: string; type?: string }[] }[]
-      choices?: { message?: { content?: string; reasoning_content?: string } }[]
-      content?: { text?: string }[]
-      usage?: {
-        prompt_tokens?: number
-        completion_tokens?: number
-        input_tokens?: number
-        output_tokens?: number
+      const rawBody = await upstream.text().catch(() => '')
+      let data: {
+        error?: { message?: string } | string
+        message?: string
+        output_text?: string
+        output?: { content?: { text?: string; type?: string }[] }[]
+        choices?: { message?: { content?: string; reasoning_content?: string } }[]
+        content?: { text?: string }[]
+        usage?: {
+          prompt_tokens?: number
+          completion_tokens?: number
+          input_tokens?: number
+          output_tokens?: number
+        }
+      } = {}
+      try {
+        data = rawBody.trim() ? (JSON.parse(rawBody) as typeof data) : {}
+      } catch {
+        const hint = rawBody.trim().slice(0, 300) || `Upstream returned ${upstream.status}`
+        return c.json({ error: friendlyStreamError(hint) }, 502)
       }
+
+      if (!upstream.ok) {
+        const raw = extractError(data)
+        const error =
+          /no longer available to new users/i.test(raw)
+            ? 'Google blocked Gemini 2.5 for new API keys. Soumtok uses Gemini 3.1 / 3.5 Flash Lite instead.'
+            : /no credits remaining/i.test(raw)
+              ? 'OpenAI has no credits left. Add billing credit, then GPT-4.1 Mini, Codex, and GPT-6 Astra will run.'
+              : raw
+        return c.json({ error: friendlyStreamError(error) }, 400)
+      }
+
+      const text = extractText(data)
+
+      const promptTokens = data.usage?.prompt_tokens || data.usage?.input_tokens || 0
+      const completionTokens = data.usage?.completion_tokens || data.usage?.output_tokens || 0
+
+      await recordRun(session.user.id, { provider, requestModel, billedTo, catalogModel }, { promptTokens, completionTokens }, started)
+
+      const shownModel = isAutoModel(payload.model) ? 'auto' : modelById(payload.model ?? '').id
+      return c.json({
+        text,
+        model: shownModel,
+        requestModel,
+        provider,
+        billedTo,
+        promptTokens,
+        completionTokens,
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Completion failed'
+      return c.json({ error: friendlyStreamError(message) }, 500)
     }
-
-    if (!res.ok) {
-      const raw = extractError(data)
-      const error =
-        /no longer available to new users/i.test(raw)
-          ? 'Google blocked Gemini 2.5 for new API keys. Soumtok uses Gemini 3.1 / 3.5 Flash Lite instead.'
-          : /no credits remaining/i.test(raw)
-            ? 'OpenAI has no credits left. Add billing credit, then GPT-4.1 Mini, Codex, and GPT-6 Astra will run.'
-            : raw
-      return c.json({ error }, 400)
-    }
-
-    const text = extractText(data)
-
-    const promptTokens = data.usage?.prompt_tokens || data.usage?.input_tokens || 0
-    const completionTokens = data.usage?.completion_tokens || data.usage?.output_tokens || 0
-
-    await recordRun(session.user.id, { provider, requestModel, billedTo, catalogModel }, { promptTokens, completionTokens }, started)
-
-    const shownModel = isAutoModel(payload.model) ? 'auto' : modelById(payload.model ?? '').id
-    return c.json({
-      text,
-      model: shownModel,
-      requestModel,
-      provider,
-      billedTo,
-      promptTokens,
-      completionTokens,
-    })
   })
 
   app.post('/api/studio/complete/stream', async (c) => {
+    try {
     const { session, ready } = await requireReadyUser(c)
     if (!session || !pool) return c.json({ error: 'Unauthorized' }, 401)
     if (!ready) return c.json({ error: 'Finish account setup first' }, 403)
@@ -1715,45 +1799,58 @@ export function registerStudio(
       agentPrefs?: Record<string, unknown>
       workspaceRoot?: string
       openFiles?: string[]
+      client?: string
+      runtime?: string
+      driver?: 'ide' | 'bot'
     }>()
-    const access = await resolveRun(session.user.id, payload)
-    if (!access.ok) return c.json({ error: access.error, keys: access.keys }, access.status)
-    let { provider, requestModel, apiKey, billedTo, messages, temperature, maxTokens, catalogModel } = access
-
-    const started = Date.now()
-    const body = payload
-
-    if (body.agent) {
-      const agentPrefs = applyRunModeToPrefs(mergeDesktopAgentPrefs(body.agentPrefs))
-      const prep = prepareDesktopAgentTurn({
-        messages: body.messages,
-        workspaceRoot: body.workspaceRoot || body.repo || 'studio-sandbox',
-        openFiles: openFilesForAgent(body.openFiles, agentPrefs),
-        mode: body.mode || 'agent',
-        agentPrefs,
-        model: catalogModel || requestModel,
-      })
-      const work = messages.map((item) => ({ ...item }))
-      const sysIdx = work.findIndex((item) => item.role === 'system')
-      if (sysIdx >= 0) work[sysIdx] = { ...work[sysIdx], content: prep.systemPrompt }
-      else work.unshift({ role: 'system', content: prep.systemPrompt })
-      for (let i = work.length - 1; i >= 0; i--) {
-        if (work[i].role === 'user') {
-          work[i] = { ...work[i], content: prep.userText }
-          break
-        }
-      }
-      messages = compactConversation(work)
-      temperature = prep.temperature
-      maxTokens = prep.maxTokens
-    }
-
     const userId = session.user.id
+    const body = payload
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
         const encoder = new TextEncoder()
         const send = (payload: Record<string, unknown>) =>
           controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`))
+
+        send({ ping: true })
+
+        const access = await resolveRun(userId, body)
+        if (!access.ok) {
+          send({ error: access.error, keys: access.keys })
+          controller.close()
+          return
+        }
+        let { provider, requestModel, apiKey, billedTo, messages, temperature, maxTokens, catalogModel } = access
+        send({ connected: true, model: catalogModel || requestModel, provider })
+
+        const started = Date.now()
+        const agentPrefs = applyRunModeToPrefs(mergeDesktopAgentPrefs(body.agentPrefs))
+        let prep: ReturnType<typeof prepareDesktopAgentTurn> | null = null
+
+        if (body.agent) {
+          prep = prepareDesktopAgentTurn({
+            messages: body.messages,
+            workspaceRoot: body.workspaceRoot || body.repo || 'studio-sandbox',
+            openFiles: openFilesForAgent(body.openFiles, agentPrefs),
+            mode: body.mode || 'agent',
+            driver: body.driver,
+            runtime: body.runtime || (body.client === 'test-hub' || body.client === 'studio-web' ? 'studio-web' : undefined),
+            agentPrefs,
+            model: catalogModel || requestModel,
+          })
+          const work = messages.map((item) => ({ ...item }))
+          const sysIdx = work.findIndex((item) => item.role === 'system')
+          if (sysIdx >= 0) work[sysIdx] = { ...work[sysIdx], content: prep.systemPrompt }
+          else work.unshift({ role: 'system', content: prep.systemPrompt })
+          for (let i = work.length - 1; i >= 0; i--) {
+            if (work[i].role === 'user') {
+              work[i] = { ...work[i], content: prep.userText }
+              break
+            }
+          }
+          messages = compactConversation(work)
+          temperature = prep.temperature
+          maxTokens = prep.maxTokens
+        }
 
         let promptTokens = 0
         let completionTokens = 0
@@ -1762,7 +1859,7 @@ export function registerStudio(
         const startStamp = filesStamp(files)
         const work = messages.map((item) => ({ ...item }))
         const sandboxDir = body.agent ? await createSandboxDir() : undefined
-        const maxRounds = body.agent ? 12 : 1
+        const maxRounds = prep ? maxToolRoundsForPrefs(parseAgentDriver(body.driver), prep.agentPrefs) : 1
         let failed = ''
         try {
           for (let round = 0; round < maxRounds; round++) {
@@ -1776,8 +1873,9 @@ export function registerStudio(
                 messages: work,
                 temperature,
                 maxTokens,
-                tools: Boolean(body.agent),
-                timeoutMs: body.agent ? 480_000 : 180_000,
+                tools: Boolean(body.agent && prep?.toolsEnabled),
+                toolNames: prep?.toolNames,
+                timeoutMs: body.agent ? 480_000 : body.client === 'test-hub' ? 120_000 : 180_000,
                 onDelta: (delta) => send({ delta }),
                 onToolProgress: (calls) => send({ progress: calls }),
               })
@@ -1836,7 +1934,11 @@ export function registerStudio(
               break
             }
             send({ tools: tools.map((item) => ({ name: item.name, args: item.args })) })
-            const executed = await runStudioTools(userId, tools, files, { repo: body.repo, sandboxDir })
+            const executed = await runStudioTools(userId, tools, files, {
+              repo: body.repo,
+              sandboxDir,
+              fileDeletionProtection: agentPrefs?.fileDeletionProtection,
+            })
             files = executed.files
             for (const [index, out] of executed.outcomes.entries()) {
               send({
@@ -1897,9 +1999,15 @@ export function registerStudio(
           await removeSandboxDir(sandboxDir)
         }
 
-        await recordRun(userId, { provider, requestModel, billedTo, catalogModel }, { promptTokens, completionTokens }, started).catch(
-          () => undefined,
-        )
+        const usageSource =
+          body.client === 'cli' ? 'cli' : body.client === 'desktop' ? 'desktop' : ('studio' as const)
+        await recordRun(
+          userId,
+          { provider, requestModel, billedTo, catalogModel },
+          { promptTokens, completionTokens },
+          started,
+          usageSource,
+        ).catch(() => undefined)
         if (!failed) {
           send({ done: true, text: lastText, model: requestModel, provider, billedTo, promptTokens, completionTokens, files })
         }
@@ -1915,6 +2023,10 @@ export function registerStudio(
         'X-Accel-Buffering': 'no',
       },
     })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Stream failed'
+      return c.json({ error: friendlyStreamError(message) }, 500)
+    }
   })
 
   app.post('/api/studio/image', async (c) => {

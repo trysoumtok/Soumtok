@@ -16,7 +16,8 @@ const TOOL_BLURBS: Record<string, string> = {
   task: 'task(description, prompt, subagent_type) — explore or generalPurpose subagent',
   delete: 'delete(path) — remove a file or folder (recursive)',
   wipe_workspace: 'wipe_workspace() — delete entire project contents (keeps .git by default)',
-  ask_question: 'ask_question(title, intro, questions) — multiple-choice clarifiers; waits for user',
+  ask_question:
+    'ask_question(title, intro, questions) — use when the user must pick from options (niche, length, style); renders clickable choices. Prefer this over a plain numbered list in chat.',
   switch_mode: 'switch_mode(target_mode_id) — plan ↔ agent ↔ debug',
   todo_write: 'todo_write(todos) — update visible task list',
   write: 'write(path, content) — create or replace a file on disk. Chat XML is not a write.',

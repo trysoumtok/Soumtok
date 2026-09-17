@@ -137,11 +137,14 @@ export function platformBrief(input: {
     bits.push(`USER SKILLS ON FILE: ${input.skills.map((item) => item.name).join(', ')}. If one fits and is not already in context, say so. If they attached one, obey it.`)
   }
   if (input.plugins?.length) {
-    bits.push(
-      `PLUGINS: ${input.plugins
-        .map((item) => `${item.name}${item.skills?.length ? ` skills ${item.skills.map((skill) => skill.label).join(', ')}` : ''}`)
-        .join('; ')}`,
-    )
+    const packs = input.plugins.filter((item) => item.skills?.length)
+    if (packs.length) {
+      bits.push(
+        `INSTALLED SKILL PACKS: ${packs
+          .map((item) => `${item.name} (${(item.skills || []).map((skill) => skill.label).join(', ')})`)
+          .join('; ')}. If the user attached a skill or asks about these integrations, acknowledge the skill and say what you can do with it.`,
+      )
+    }
   }
   const live = (input.connectors || []).filter((item) => item.connected !== false)
   if (live.length) {

@@ -1,7 +1,8 @@
 import { ensureFolder } from './capabilities.ts'
 import { wantsBrandAsset } from './brandLogo.ts'
 import { applyNavCollisionFix, navCollisionNeedsFix } from './navLayout.ts'
-import { inlineAssets, looksTruncatedSource } from './preview.ts'
+import { inlineAssets, isBinaryWorkspaceFile, isImageDataUrl, isImageFilePath, looksTruncatedSource } from './preview.ts'
+import { buildPreviewHtml } from './testHub.ts'
 import { filesForModel, isSecretPath, redactSecrets, sanitizeAgentFiles } from './secretsGuard.ts'
 
 export type AgentMode = 'research' | 'app' | 'build' | 'code' | 'fix' | 'write' | 'data' | 'chat' | 'ask' | 'plan'
@@ -46,6 +47,7 @@ export type AgentEvent =
       url: string
       code?: string
       connectorId?: string
+      logo?: string | null
       detail?: string
       connected?: boolean
     }
@@ -694,6 +696,14 @@ export function applyAskAnswers(workspace: AgentWorkspace, answers: Record<strin
     return { ...event, answers }
   })
   return { ...workspace, events }
+}
+
+/** Remove answered clarify cards from the thread (Desktop + Studio). */
+export function dismissResolvedAskEvents(workspace: AgentWorkspace): AgentWorkspace {
+  return {
+    ...workspace,
+    events: workspace.events.filter((event) => !(event.kind === 'ask' && event.answers)),
+  }
 }
 
 export function applyPlanApproval(workspace: AgentWorkspace): AgentWorkspace {
@@ -1545,7 +1555,8 @@ function eventInProgress(tail: string): AgentEvent | null {
       match = pattern.exec(body)
     }
     if (lines.length === 0) return { kind: 'tool', name: 'write', args: { path: unescape(path) } }
-    return { kind: 'diff', path: unescape(path), added: lines.length, removed: 0, lines, hidden: 0 }
+    const diff = { kind: 'diff' as const, path: unescape(path), added: lines.length, removed: 0, lines, hidden: 0 }
+    return isBinaryDiffEvent(diff) ? sanitizeBinaryDiffEvent(diff) : diff
   }
   if (kind === 'thought' || kind === 'action') {
     const text = read('text') || 'Thinking'
@@ -1886,6 +1897,31 @@ function stripMarkup(text: string) {
     .slice(0, 80)
 }
 
+function isBinaryDiffEvent(event: Extract<AgentEvent, { kind: 'diff' }>) {
+  if (isImageFilePath(event.path)) {
+    return event.lines.some((line) => line.text.length > 800 || isImageDataUrl(line.text))
+  }
+  return event.lines.some((line) => isImageDataUrl(line.text))
+}
+
+function sanitizeBinaryDiffEvent(
+  event: Extract<AgentEvent, { kind: 'diff' }>,
+  content?: string,
+): Extract<AgentEvent, { kind: 'diff' }> {
+  const blob = event.lines.find((line) => isImageDataUrl(line.text))?.text || content || ''
+  const kb = Math.max(1, Math.round((blob.length * 0.75) / 1024))
+  const removed = event.lines.some((line) => line.kind === 'del') ? Math.max(1, event.removed || 0) : event.removed || 0
+  return {
+    kind: 'diff',
+    path: event.path,
+    added: 1,
+    removed,
+    lines: [{ kind: 'add', text: `Generated image · ~${kb} KB` }],
+    hidden: 0,
+    previous: event.previous || '',
+  }
+}
+
 export function fileChangeDiff(
   path: string,
   previous: string | undefined,
@@ -1893,6 +1929,18 @@ export function fileChangeDiff(
 ): Extract<AgentEvent, { kind: 'diff' }> | null {
   if (!next?.trim() || isSecretPath(path)) return null
   if (previous === next) return null
+  if (isBinaryWorkspaceFile(path, next)) {
+    const kb = Math.max(1, Math.round((next.length * 0.75) / 1024))
+    return {
+      kind: 'diff',
+      path,
+      added: 1,
+      removed: 0,
+      lines: [{ kind: 'add', text: `Generated image · ~${kb} KB` }],
+      hidden: 0,
+      previous: previous || '',
+    }
+  }
   if (!previous) {
     const { lines, hidden, added } = diffLinesFor(next)
     return { kind: 'diff', path, added, removed: 0, lines, hidden, previous: '' }
@@ -1922,7 +1970,22 @@ export function withChangeDiffs(
     const prev = previous[event.path]
     if (next != null && prev === next) continue
     used.add(event.path)
+    if (next != null && isBinaryWorkspaceFile(event.path, next)) {
+      mapped.push(fileChangeDiff(event.path, prev, next)!)
+      continue
+    }
+    if (isBinaryDiffEvent(event)) {
+      mapped.push(sanitizeBinaryDiffEvent(event, next ?? prev))
+      continue
+    }
     if (next == null || !prev) {
+      if (next != null) {
+        const computed = fileChangeDiff(event.path, prev, next)
+        if (computed) {
+          mapped.push(computed)
+          continue
+        }
+      }
       mapped.push(prev ? { ...event, previous: event.previous ?? prev } : event)
       continue
     }
@@ -2290,8 +2353,34 @@ export function finishChatReply(text: string, events: AgentEvent[] = []) {
   return chatReplyFromRun(text, events) || 'Hi — what do you want to work on?'
 }
 
+/** Rich closing copy from attempt_completion — same source Desktop uses for the final agent bubble. */
+export function completionTextFromEvents(events: AgentEvent[]) {
+  const hit = [...events]
+    .reverse()
+    .find(
+      (item): item is Extract<AgentEvent, { kind: 'result' }> =>
+        item.kind === 'result' &&
+        /^attempt_completion|finish$/i.test(String(item.name || '')) &&
+        item.ok &&
+        Boolean(String(item.text || '').trim()),
+    )
+  if (!hit) return ''
+  const text = String(hit.text || '').trim()
+  if (!text || looksLikeJsonDump(text) || /^(task marked complete|done)\.?$/i.test(text)) return ''
+  return text
+}
+
+function previewNextStep(staged: AgentWorkspace, body: string) {
+  if (!staged.previewHtml) return body
+  if (/preview|open live|try it|what to change/i.test(body)) return body
+  return `${body}\n\nOpen **Preview** to try the live page, or tell me what to change.`
+}
+
 /** Assistant-visible closing line when the model summary is missing or too thin. */
 export function spokenRecap(staged: AgentWorkspace) {
+  const fromCompletion = completionTextFromEvents(staged.events)
+  if (fromCompletion) return previewNextStep(staged, fromCompletion)
+
   const summary = staged.events.find((item): item is Extract<AgentEvent, { kind: 'summary' }> => item.kind === 'summary')
   const spoken = summary?.text?.trim() || ''
   const diffs = staged.events.filter((item): item is Extract<AgentEvent, { kind: 'diff' }> => item.kind === 'diff')
@@ -2706,6 +2795,8 @@ function filesFromFences(text: string) {
 }
 
 export function previewFromFiles(files: Record<string, string>, html = '') {
+  const built = buildPreviewHtml(files)
+  if (built.trim()) return built
   const page = decodeSource(files['index.html'] || files['public/index.html'] || files['src/index.html'] || html)
   if (!page.trim()) return ''
   return inlineAssets(page, files)

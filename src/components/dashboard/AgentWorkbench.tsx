@@ -1,7 +1,9 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
-import type { AgentEvent, AgentWorkspace } from '../../../shared/agent'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { previewFromFiles, type AgentEvent, type AgentWorkspace } from '../../../shared/agent'
 import { checkoutPath, planLabel } from '../../../shared/plans'
 import { navigate } from '../../lib/nav'
+import { downloadProjectZip, saveProjectToFolder } from '../../lib/saveProjectFolder'
+import { isImageDataUrl, isImageFilePath } from '../../../shared/preview'
 import { CodeEditor } from './CodeEditor'
 import { StudioDesktop } from './StudioDesktop'
 
@@ -61,6 +63,10 @@ export function AgentWorkbench({
   onPasteFiles?: (files: File[]) => void
 }) {
   const files = workspace.files
+  const previewHtml = useMemo(
+    () => previewFromFiles(files, workspace.previewHtml || ''),
+    [files, workspace.previewHtml],
+  )
   const title = workspace.previewTitle || workspace.mode || 'Workspace'
   const url = typeof window !== 'undefined' ? window.location.origin : ''
   const diffs = workspace.events.filter((item): item is Extract<AgentEvent, { kind: 'diff' }> => item.kind === 'diff')
@@ -115,17 +121,24 @@ export function AgentWorkbench({
 
   return (
     <section className="relative flex min-h-0 min-w-0 flex-1 flex-col border-l border-white/[0.06] bg-[#0c0c0b]">
-      <header className="relative flex shrink-0 items-center gap-1 border-b border-white/[0.06] px-3 py-2">
+      <header className="bench-tab-row relative flex shrink-0 items-center gap-1 border-b border-white/[0.06] px-3 py-2">
         {TABS.map((item) => (
           <button
             key={item.id}
             type="button"
             onClick={() => pickTab(item.id)}
-            className={`rounded-md px-2.5 py-1 text-[13px] ${
+            className={`shrink-0 rounded-md px-2.5 py-1 text-[13px] ${
               tab === item.id ? 'bg-white text-[#111110]' : 'text-white/45 hover:text-white'
             }`}
           >
-            {item.label}
+            {item.id === 'billing' ? (
+              <>
+                <span className="hidden sm:inline">{item.label}</span>
+                <span className="sm:hidden">Plan</span>
+              </>
+            ) : (
+              item.label
+            )}
           </button>
         ))}
         <span className="px-1 text-white/25">+</span>
@@ -245,7 +258,7 @@ export function AgentWorkbench({
       {tab === 'desktop' && (
         <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
           <StudioDesktop
-            html={workspace.previewHtml || ''}
+            html={previewHtml}
             files={files}
             title={title}
             url={url}
@@ -307,6 +320,7 @@ function FilesPane({
   onSaveFile: (path: string, content: string) => void
 }) {
   const paths = Object.keys(files).sort()
+  const [folderNote, setFolderNote] = useState('')
   const artifactPaths = artifacts
     .filter((item): item is Extract<AgentEvent, { kind: 'artifact' }> => item.kind === 'artifact')
     .map((item) => item.path)
@@ -319,6 +333,12 @@ function FilesPane({
   const dirty = openPath ? draft !== (files[openPath] || '') : false
   const lines = (draft || '').split('\n')
   const focusedBody = focusPath ? files[focusPath] : undefined
+  const imageSrc =
+    openPath && (isImageDataUrl(draft) || (isImageFilePath(openPath) && draft.startsWith('/api/studio/images/')))
+      ? draft.startsWith('/api/studio/images/')
+        ? `${typeof window !== 'undefined' ? window.location.origin : ''}${draft}`
+        : draft
+      : ''
 
   useEffect(() => {
     if (!focusPath || focusedBody === undefined) return
@@ -334,8 +354,35 @@ function FilesPane({
   }
 
   return (
-    <div className="flex min-h-0 flex-1 overflow-hidden bg-[#0c0c0b]">
-      <aside className="flex w-[220px] shrink-0 flex-col border-r border-white/[0.06]">
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#0c0c0b] md:flex-row">
+      <aside className="flex max-h-[38vh] w-full shrink-0 flex-col border-b border-white/[0.06] md:max-h-none md:w-[220px] md:border-b-0 md:border-r">
+        {paths.length > 0 && (
+          <div className="space-y-1 border-b border-white/[0.06] px-2 py-2">
+            <button
+              type="button"
+              onClick={async () => {
+                setFolderNote('')
+                const saved = await saveProjectToFolder(files)
+                if (saved.ok) setFolderNote(`Saved ${saved.count} files to folder`)
+                else if (saved.error) setFolderNote(saved.error)
+              }}
+              className="w-full rounded-md bg-white/[0.08] px-2 py-1.5 text-[11px] text-white hover:bg-white/[0.12]"
+            >
+              Save to folder
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                downloadProjectZip(files)
+                setFolderNote('Download started')
+              }}
+              className="w-full rounded-md px-2 py-1 text-[11px] text-white/45 hover:text-white/70"
+            >
+              Download all
+            </button>
+            {folderNote && <p className="text-[10px] leading-4 text-white/40">{folderNote}</p>}
+          </div>
+        )}
         <div className="flex gap-1 px-2 pt-2">
           {(['files', 'artifacts'] as const).map((item) => (
             <button
@@ -408,14 +455,20 @@ function FilesPane({
                 Save
               </button>
             </div>
-            <div className="thin-scroll flex min-h-0 flex-1 overflow-auto">
-              <div className="shrink-0 select-none py-3 pr-3 text-right font-mono text-[12px] leading-5 text-white/25">
-                {lines.map((_, index) => (
-                  <div key={index}>{index + 1}</div>
-                ))}
+            {imageSrc ? (
+              <div className="thin-scroll flex min-h-0 flex-1 items-center justify-center overflow-auto bg-[#0a0a0a] p-4">
+                <img src={imageSrc} alt="" className="max-h-full max-w-full object-contain" />
               </div>
-              <CodeEditor path={openPath} value={draft} onChange={setDraft} />
-            </div>
+            ) : (
+              <div className="thin-scroll flex min-h-0 flex-1 overflow-auto">
+                <div className="shrink-0 select-none py-3 pr-3 text-right font-mono text-[12px] leading-5 text-white/25">
+                  {lines.map((_, index) => (
+                    <div key={index}>{index + 1}</div>
+                  ))}
+                </div>
+                <CodeEditor path={openPath} value={draft} onChange={setDraft} />
+              </div>
+            )}
           </>
         ) : (
           <p className="grid flex-1 place-items-center text-[13px] text-white/35">Pick a file</p>
@@ -716,12 +769,39 @@ function GitPane({
                   {view === 'review' && <span className="ml-1 text-white/30">New</span>}
                 </span>
               </div>
-              <pre className="overflow-x-hidden border-t border-white/6 p-3 font-mono text-[11px] leading-5 text-[#aff5b4] whitespace-pre-wrap break-all">
-                {diff.lines
-                  .filter((line) => line.kind !== 'del')
-                  .map((line) => line.text)
-                  .join('\n') || files[diff.path] || ''}
-              </pre>
+              {(() => {
+                const source = files[diff.path] || ''
+                const blob = diff.lines.find((line) => /^data:image\//i.test(line.text))?.text
+                const imageSrc = /^data:image\//i.test(source)
+                  ? source
+                  : blob ||
+                    (/\.(png|jpe?g|gif|webp|ico|bmp|avif)$/i.test(diff.path) && source.startsWith('/api/studio/images/')
+                      ? `${typeof window !== 'undefined' ? window.location.origin : ''}${source}`
+                      : '')
+                if (imageSrc) {
+                  return (
+                    <img
+                      src={imageSrc}
+                      alt=""
+                      className="block max-h-56 w-full border-t border-white/6 bg-[#0a0a0a] object-contain object-center"
+                    />
+                  )
+                }
+                const body =
+                  diff.lines
+                    .filter((line) => line.kind !== 'del')
+                    .map((line) =>
+                      /^data:image\//i.test(line.text) || (line.text.length > 800 && /\.(png|jpe?g|gif|webp)$/i.test(diff.path))
+                        ? `Generated image · ~${Math.max(1, Math.round((line.text.length * 0.75) / 1024))} KB`
+                        : line.text,
+                    )
+                    .join('\n') || source
+                return (
+                  <pre className="overflow-x-hidden border-t border-white/6 p-3 font-mono text-[11px] leading-5 text-[#aff5b4] whitespace-pre-wrap break-all">
+                    {body}
+                  </pre>
+                )
+              })()}
               {onAcceptDiff && diff.accepted === undefined && (
                 <div className="flex items-center justify-end gap-2 border-t border-white/8 px-3 py-2">
                   <button

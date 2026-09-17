@@ -2,6 +2,21 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { analyzeUserRequest, analysisPipelineEvents, formatAnalyzedRequest, repairUserText } from './requestAnalyze.ts'
 
+test('follow-up with sign in page stays an edit, not Soumtok product chat', async () => {
+  const raw = 'add more pages mak eit so cleaand powerful ada sign in page'
+  const files = {
+    'index.html': '<html><head><title>Clinic</title></head><body><nav><a href="index.html">Home</a></nav></body></html>',
+    'style.css': 'body { margin: 0; }',
+  }
+  const analysis = analyzeUserRequest(raw, { hasFiles: true, files })
+  assert.equal(analysis.kind, 'edit')
+  assert.match(analysis.meaning, /sign in page/i)
+  const { classifyFollowUp, inferPlan } = await import('./agent.ts')
+  assert.equal(classifyFollowUp(raw, true), 'task')
+  const plan = inferPlan(raw, true, { hasPreview: true, analysis })
+  assert.notEqual(plan.mode, 'chat')
+})
+
 test('a request to add a real logo and more pages is an edit, not an inventory', async () => {
   const raw = 'can you ad tehreal svg real logo of kfc and ad any page inmy webioste'
   const repaired = repairUserText(raw)

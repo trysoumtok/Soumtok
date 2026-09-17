@@ -8,6 +8,7 @@ import {
   resolveGithubGrantReposUrl,
   type GithubGrantReposKind,
 } from '../shared/githubApp.ts'
+import { isBinaryWorkspaceFile, isImageDataUrl, isImageFilePath } from '../shared/preview.ts'
 import { isSecretPath } from '../shared/secretsGuard.ts'
 import { pool } from './db.ts'
 import { env } from './env.ts'
@@ -227,15 +228,51 @@ export function normalizeRepoName(fullName: string) {
 
 export function gitTreeFromFiles(files: Record<string, string>) {
   return Object.entries(files)
-    .filter(([path, content]) => typeof content === 'string' && path && !isSecretPath(path) && !SKIP_DIR.test(path) && !SKIP_FILE.test(path))
+    .filter(([path, content]) => {
+      if (typeof content !== 'string' || !path || isSecretPath(path) || SKIP_DIR.test(path)) return false
+      const body = String(content)
+      if (isImageDataUrl(body) || /^\/api\/studio\/images\//.test(body.trim())) return true
+      return !SKIP_FILE.test(path)
+    })
     .slice(0, 200)
-    .map(([path, content]) => ({
-      path: path.replace(/\\/g, '/').replace(/^\/+/, ''),
-      mode: '100644' as const,
-      type: 'blob' as const,
-      content: content.slice(0, 120_000),
-    }))
-    .filter((item) => item.path && !item.path.split('/').includes('..'))
+    .flatMap(([path, content]) => {
+      const normPath = path.replace(/\\/g, '/').replace(/^\/+/, '')
+      if (!normPath || normPath.split('/').includes('..')) return []
+      const body = String(content)
+      if (/^\/api\/studio\/images\//.test(body.trim())) {
+        return [
+          {
+            path: normPath,
+            mode: '100644' as const,
+            type: 'blob' as const,
+            content: `# Soumtok-hosted image\n\nThis asset lives on Soumtok (${body.trim()}). Open Preview in Studio to export it, or regenerate the image in your repo.\n`,
+          },
+        ]
+      }
+      if (isImageDataUrl(body) && isImageFilePath(normPath)) {
+        const match = /^data:[^;]+;base64,(.+)$/i.exec(body.trim())
+        if (match?.[1]) {
+          return [
+            {
+              path: normPath,
+              mode: '100644' as const,
+              type: 'blob' as const,
+              content: match[1].replace(/\s+/g, ''),
+              encoding: 'base64' as const,
+            },
+          ]
+        }
+      }
+      if (isBinaryWorkspaceFile(normPath, body)) return []
+      return [
+        {
+          path: normPath,
+          mode: '100644' as const,
+          type: 'blob' as const,
+          content: body.slice(0, 120_000),
+        },
+      ]
+    })
 }
 
 async function commitEmptyRepoFiles(

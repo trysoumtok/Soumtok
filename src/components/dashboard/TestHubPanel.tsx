@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import type { ChatFile } from '../../../shared/chatMedia'
 import {
   CODING_MODELS,
-  DESKTOP_MODEL_PROVIDERS,
   hubTierTagClass,
   partitionHubPickerModels,
   type CodingModel,
@@ -24,16 +23,20 @@ import {
   buildPreviewHtml,
   buildTestHubApiMessages,
   extractBuildArtifacts,
+  mergeArtifactFiles,
+  workspaceDisplayFiles,
+  listArtifactPaths,
   fileGlyph,
   formatProseHtml,
   highlightCode,
   parseSegments,
 } from '../../../shared/testHub'
-import { looksLikeViteProject, scoreCompareRun } from '../../../shared/testHubBenchmark'
-import { fetchDocuments, fetchModels, streamStudio } from '../../lib/api'
+import { looksLikeViteProject } from '../../../shared/testHubBenchmark'
+import { previewStamp } from '../../../shared/preview'
+import { fetchDocuments, fetchModels, streamTestHub } from '../../lib/api'
 import { filesFromDrop, readChatFiles } from '../../lib/chatFiles'
-
-const DEFAULT_COMPARE_PICK = ['deepseek-v4-flash', 'deepseek-chat']
+import { modelsForPlan, planPoolSummary } from '../../../shared/usagePools'
+import { sortModelsByPower } from '../../../shared/models'
 
 type PreviewLogRow = {
   level: string
@@ -42,7 +45,7 @@ type PreviewLogRow = {
   line: number
 }
 
-type CompareRunRow = {
+type BenchmarkRunRow = {
   streamId: string
   model: string
   modelName: string
@@ -73,8 +76,16 @@ type HubModel = {
   strength?: string
 }
 
-function hubModelPriceLine(m: HubModel) {
-  if (m.id === 'auto') return 'Included pool first · $2.00 / 1M on-demand'
+function hubAutoPriceLine(planId: string) {
+  const pools = planPoolSummary(planId)
+  if (pools.cheapOnly) {
+    return `Everyday models · $${pools.cheapDisplayUsd.toFixed(2)}/mo included · $2.00/1M on-demand after`
+  }
+  return `$${pools.cheapDisplayUsd.toFixed(2)} everyday + $${pools.premiumDisplayUsd.toFixed(2)} additional/mo · $2.00/1M on-demand after`
+}
+
+function hubModelPriceLine(m: HubModel, planId = 'hobby') {
+  if (m.id === 'auto') return hubAutoPriceLine(planId)
   const catalog = CODING_MODELS.find((row) => row.id === m.id)
   const pricing = resolveModelPricing({
     id: m.id,
@@ -93,38 +104,25 @@ function isGoogleHubModel(m: { id?: string; provider?: string }) {
 }
 
 function isHubModelDisabled(m: HubModel) {
-  return isGoogleHubModel(m)
+  return !m.ready || isGoogleHubModel(m)
 }
 
-function mergeHubModels(apiModels: HubModel[]) {
-  const byId = new Map<string, HubModel>()
-  for (const m of CODING_MODELS) {
-    if (!DESKTOP_MODEL_PROVIDERS.includes(m.provider)) continue
-    if (m.id === 'soumtok-agent') continue
-    byId.set(m.id, {
-      id: m.id,
-      name: m.name,
-      cost: m.cost,
-      ready: true,
-      tags: m.tags,
-      provider: m.provider,
-      strength: m.strength,
-    })
+function enrichHubModel(m: HubModel): HubModel {
+  const catalog = CODING_MODELS.find((row) => row.id === m.id)
+  return {
+    id: m.id,
+    name: catalog?.name || m.name || m.id,
+    cost: catalog?.cost || m.cost || '',
+    tags: catalog?.tags ?? m.tags,
+    provider: catalog?.provider ?? m.provider,
+    strength: catalog?.strength || m.strength,
+    ready: Boolean(m.ready) && !isGoogleHubModel({ id: m.id, provider: catalog?.provider ?? m.provider }),
   }
-  for (const m of apiModels) {
-    const base = byId.get(m.id)
-    const merged: HubModel = {
-      id: m.id,
-      name: base?.name || m.name || m.id,
-      cost: m.cost || base?.cost || '',
-      tags: base?.tags ?? m.tags,
-      provider: base?.provider ?? m.provider,
-      strength: base?.strength,
-      ready: !isGoogleHubModel({ id: m.id, provider: base?.provider ?? m.provider }),
-    }
-    byId.set(m.id, merged)
-  }
-  return [...byId.values()]
+}
+
+function hubModelsForPlan(apiModels: HubModel[], planId: string) {
+  const enriched = apiModels.map(enrichHubModel)
+  return sortModelsByPower(modelsForPlan(enriched, planId).filter((m) => m.ready))
 }
 
 type HubMsg = {
@@ -140,7 +138,7 @@ type HubWorkspace = {
   model: string
   messages: HubMsg[]
   activeFile: string
-  outputTab: 'preview' | 'code' | 'compare'
+  outputTab: 'preview' | 'code'
   fileEdits?: Record<string, string>
 }
 
@@ -224,23 +222,13 @@ const SESSION_KEY = 'soumtok-test-hub-session'
 const ARCHIVES_KEY = 'soumtok-test-hub-archives'
 
 function mergeArtifacts(messages: HubMsg[], live: string) {
-  const files: Record<string, string> = {}
+  const chunks: string[] = []
   for (const msg of messages) {
-    if (msg.role === 'assistant') Object.assign(files, extractBuildArtifacts(msg.content))
+    if (msg.role === 'assistant' && msg.content?.trim()) chunks.push(msg.content)
   }
-  if (live) Object.assign(files, extractBuildArtifacts(live))
-  return files
-}
-
-function sortFilePaths(paths: string[]) {
-  const rank = (p: string) => {
-    if (p === 'index.html') return 0
-    if (/\.html?$/i.test(p)) return 1
-    if (/\.css$/i.test(p)) return 2
-    if (/\.(js|jsx|ts|tsx)$/i.test(p)) return 3
-    return 4
-  }
-  return [...paths].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b))
+  if (live?.trim()) chunks.push(live)
+  if (!chunks.length) return {}
+  return mergeArtifactFiles(chunks)
 }
 
 function downloadBlob(name: string, blob: Blob) {
@@ -284,7 +272,8 @@ async function saveProjectToFolder(files: Record<string, string>) {
   }
 }
 
-export function TestHubPanel() {
+export function TestHubPanel({ plan }: { plan?: string }) {
+  const billingPlan = plan || 'hobby'
   const initialId = useMemo(() => uid(), [])
   const [models, setModels] = useState<HubModel[]>([])
   const [model, setModel] = useState('auto')
@@ -293,12 +282,19 @@ export function TestHubPanel() {
   const [prompt, setPrompt] = useState('')
   const [pending, setPending] = useState<ChatFile[]>([])
   const [busy, setBusy] = useState(false)
+  const [hubPhase, setHubPhase] = useState<'idle' | 'connecting' | 'model' | 'streaming'>('idle')
   const [error, setError] = useState('')
   const [live, setLive] = useState('')
-  const [outputTab, setOutputTab] = useState<'preview' | 'code' | 'compare'>('preview')
-  const [compareMode, setCompareMode] = useState(false)
-  const [comparePick, setComparePick] = useState<string[]>([])
-  const [compareRuns, setCompareRuns] = useState<CompareRunRow[]>([])
+  const [outputTab, setOutputTab] = useState<'preview' | 'code'>('preview')
+  const [mobilePane, setMobilePane] = useState<'chat' | 'preview' | 'code'>('chat')
+  const pickOutputTab = useCallback((tab: 'preview' | 'code') => {
+    setOutputTab(tab)
+    setMobilePane(tab)
+  }, [])
+  const showMobilePane = useCallback((pane: 'chat' | 'preview' | 'code') => {
+    setMobilePane(pane)
+    if (pane !== 'chat') setOutputTab(pane)
+  }, [])
   const [previewLogs, setPreviewLogs] = useState<PreviewLogRow[]>([])
   const [scoresOpen, setScoresOpen] = useState(false)
   const [scoreRows, setScoreRows] = useState<BenchmarkSummaryRow[]>([])
@@ -338,10 +334,14 @@ export function TestHubPanel() {
   const bootRef = useRef(false)
   const baseArtifactsRef = useRef<Record<string, string>>({})
 
-  const baseArtifacts = useMemo(() => mergeArtifacts(messages, live), [messages, live])
-  const artifacts = useMemo(() => ({ ...baseArtifacts, ...fileEdits }), [baseArtifacts, fileEdits])
+  const baseArtifacts = useMemo(() => workspaceDisplayFiles(mergeArtifacts(messages, live)), [messages, live])
+  const artifacts = useMemo(
+    () => (busy ? baseArtifacts : { ...baseArtifacts, ...fileEdits }),
+    [baseArtifacts, fileEdits, busy],
+  )
   const previewHtml = useMemo(() => buildPreviewHtml(artifacts), [artifacts])
-  const artifactPaths = useMemo(() => sortFilePaths(Object.keys(artifacts)), [artifacts])
+  const previewFrameKey = useMemo(() => previewStamp(previewHtml, artifacts), [previewHtml, artifacts])
+  const artifactPaths = useMemo(() => listArtifactPaths(artifacts), [artifacts])
 
   useEffect(() => {
     const prev = baseArtifactsRef.current
@@ -360,8 +360,26 @@ export function TestHubPanel() {
   }, [baseArtifacts])
 
   useEffect(() => {
-    if (previewHtml && outputTab !== 'compare') setOutputTab('preview')
-  }, [previewHtml, outputTab])
+    if (!busy || !artifactPaths.length) return
+    const label = artifactPaths.slice(0, 5).join(', ') + (artifactPaths.length > 5 ? '…' : '')
+    setStatus(`Building · ${artifactPaths.length} file${artifactPaths.length === 1 ? '' : 's'} (${label})`)
+  }, [artifactPaths, busy])
+
+  useEffect(() => {
+    if (busy && artifactPaths.length) setOutputTab('code')
+  }, [busy, artifactPaths.length, outputTab])
+
+  const hubRunBusy = useRef(false)
+  useEffect(() => {
+    if (busy) {
+      hubRunBusy.current = true
+      return
+    }
+    if (!hubRunBusy.current || !previewHtml) return
+    hubRunBusy.current = false
+    if (typeof window === 'undefined' || !window.matchMedia('(max-width: 1023px)').matches) return
+    setMobilePane((pane) => (pane === 'chat' ? 'preview' : pane))
+  }, [busy, previewHtml])
 
   useEffect(() => {
     const handler = (event: MessageEvent) => {
@@ -410,18 +428,24 @@ export function TestHubPanel() {
         title?: string
       }
       if (Array.isArray(saved.workspaces) && saved.workspaces.length) {
-        setWorkspaces(saved.workspaces)
+        setWorkspaces(
+          saved.workspaces.map((w) => ({
+            ...w,
+            outputTab: w.outputTab === 'code' ? 'code' : 'preview',
+          })),
+        )
         const active = saved.workspaces.find((w) => w.id === saved.activeId) || saved.workspaces[0]
         setActiveId(active.id)
         setMessages(active.messages || [])
         setModel(active.model || 'auto')
-        setOutputTab(active.outputTab === 'code' ? 'code' : active.outputTab === 'compare' ? 'compare' : 'preview')
+        setOutputTab(active.outputTab === 'code' ? 'code' : 'preview')
         setActiveFile(active.activeFile || '')
         setFileEdits(active.fileEdits && typeof active.fileEdits === 'object' ? active.fileEdits : {})
       } else {
         if (saved.messages?.length) setMessages(saved.messages)
         if (saved.model) setModel(saved.model)
-        if (saved.outputTab) setOutputTab(saved.outputTab)
+        if (saved.outputTab === 'code') setOutputTab('code')
+        else setOutputTab('preview')
         if (saved.activeFile) setActiveFile(saved.activeFile)
         const id = uid()
         setWorkspaces([
@@ -489,12 +513,19 @@ export function TestHubPanel() {
 
   useEffect(() => {
     void fetchModels()
-      .then((rows) => setModels(mergeHubModels(rows.models)))
+      .then((rows) => {
+        const eligible = hubModelsForPlan(rows.models, billingPlan)
+        setModels(eligible)
+        setModel((current) => {
+          if (current === 'auto') return current
+          return eligible.some((item) => item.id === current) ? current : 'auto'
+        })
+      })
       .catch(() => setError('Could not load models'))
     void fetchDocuments()
       .then((rows) => setDocs(rows.map((d) => ({ id: d.id, title: d.title || 'Untitled' }))))
       .catch(() => {})
-  }, [])
+  }, [billingPlan])
 
   useEffect(() => {
     feedRef.current?.scrollTo({ top: feedRef.current.scrollHeight, behavior: 'smooth' })
@@ -502,11 +533,6 @@ export function TestHubPanel() {
 
   const selected = models.find((m) => m.id === model)
   const enabledModels = useMemo(() => models.filter((m) => !isHubModelDisabled(m)), [models])
-  const comparePool = useMemo(() => {
-    const { top } = partitionHubPickerModels(enabledModels)
-    return top.length ? top : enabledModels.slice(0, 8)
-  }, [enabledModels])
-
   const modelNameById = useCallback(
     (id: string) => models.find((m) => m.id === id)?.name || id,
     [models],
@@ -520,7 +546,7 @@ export function TestHubPanel() {
   }, [messages])
 
   const saveBenchmarkRuns = useCallback(
-    async (runs: CompareRunRow[], opts: { compareMode?: boolean; viteEnabled?: boolean }) => {
+    async (runs: BenchmarkRunRow[], opts: { viteEnabled?: boolean }) => {
       if (!runs.length) return
       try {
         const res = await fetch('/api/test-hub/benchmarks', {
@@ -529,7 +555,7 @@ export function TestHubPanel() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             prompt: lastUserPrompt(),
-            compareMode: Boolean(opts.compareMode),
+            compareMode: false,
             viteEnabled: Boolean(opts.viteEnabled),
             runs: runs.map((run) => ({
               model: run.model,
@@ -569,37 +595,6 @@ export function TestHubPanel() {
     }
   }, [])
 
-  const toggleCompareMode = useCallback(() => {
-    setCompareMode((on) => {
-      const next = !on
-      if (next && comparePick.length < 2) {
-        const pick = comparePool
-          .slice(0, 2)
-          .map((m) => m.id)
-          .filter(Boolean)
-        setComparePick(pick.length >= 2 ? pick : [...DEFAULT_COMPARE_PICK])
-      }
-      return next
-    })
-  }, [comparePick.length, comparePool])
-
-  const toggleComparePick = useCallback(
-    (id: string) => {
-      const m = models.find((row) => row.id === id)
-      if (!m || isHubModelDisabled(m)) return
-      setComparePick((pick) => {
-        const idx = pick.indexOf(id)
-        if (idx >= 0) {
-          if (pick.length <= 2) return pick
-          return pick.filter((item) => item !== id)
-        }
-        if (pick.length >= 3) return pick
-        return [...pick, id]
-      })
-    },
-    [models],
-  )
-
   const attachFiles = useCallback(async (list: File[]) => {
     setError('')
     try {
@@ -611,99 +606,6 @@ export function TestHubPanel() {
     }
   }, [])
 
-  const applyCompareWinner = useCallback(
-    (idx: number) => {
-      const run = compareRuns[idx]
-      if (!run?.text) return
-      setModel(run.model)
-      setMessages((cur) => [...cur, { id: uid(), role: 'assistant', content: run.text }])
-      setCompareRuns([])
-      setOutputTab('preview')
-      setStatus(`Using ${run.modelName}`)
-    },
-    [compareRuns],
-  )
-
-  async function onSendCompare() {
-    const text = prompt.trim()
-    if (busy || (!text && !pending.length)) return
-    const modelIds = comparePick.filter((id) => {
-      const m = models.find((row) => row.id === id)
-      return m && !isHubModelDisabled(m)
-    })
-    if (modelIds.length < 2) {
-      setError('Pick at least 2 models to compare')
-      return
-    }
-    setError('')
-    const userMsg: HubMsg = { id: uid(), role: 'user', content: text, files: pending.length ? pending : undefined }
-    const next = [...messages, userMsg]
-    setMessages(next)
-    setPrompt('')
-    setPending([])
-    setBusy(true)
-    setLive('')
-    setOutputTab('compare')
-    const stamp = Date.now()
-    const initialRuns: CompareRunRow[] = modelIds.map((id) => ({
-      streamId: `compare-${id}-${stamp}-${Math.random().toString(36).slice(2, 8)}`,
-      model: id,
-      modelName: modelNameById(id),
-      text: '',
-      status: 'running',
-      ms: 0,
-      error: '',
-    }))
-    setCompareRuns(initialRuns)
-    abortRef.current?.abort()
-    abortRef.current = new AbortController()
-    const signal = abortRef.current.signal
-    try {
-      const apiMessages = buildTestHubApiMessages(next, { files: artifacts })
-      const finished = await Promise.all(
-        initialRuns.map(async (run) => {
-          const t0 = performance.now()
-          try {
-            let assistant = ''
-            await streamStudio(
-              run.model,
-              apiMessages,
-              (chunk) => {
-                assistant = chunk
-                setCompareRuns((rows) =>
-                  rows.map((row) => (row.streamId === run.streamId ? { ...row, text: chunk } : row)),
-                )
-              },
-              signal,
-              { agent: false },
-            )
-            const done: CompareRunRow = {
-              ...run,
-              text: assistant,
-              status: 'done',
-              ms: Math.round(performance.now() - t0),
-              previewErrors: previewLogs.length,
-            }
-            return done
-          } catch (err) {
-            if (signal.aborted) return run
-            return {
-              ...run,
-              status: 'error' as const,
-              error: err instanceof Error ? err.message : 'Request failed',
-              ms: Math.round(performance.now() - t0),
-            }
-          }
-        }),
-      )
-      setCompareRuns(finished)
-      const viteAny = finished.some((run) => looksLikeViteProject(extractBuildArtifacts(run.text || '')))
-      await saveBenchmarkRuns(finished, { compareMode: true, viteEnabled: viteAny })
-    } finally {
-      setBusy(false)
-    }
-  }
-
   async function onSendSingle() {
     const text = prompt.trim()
     if (busy || (!text && !pending.length)) return
@@ -714,26 +616,46 @@ export function TestHubPanel() {
     setPrompt('')
     setPending([])
     setBusy(true)
+    setHubPhase('connecting')
     setLive('')
+    setPreviewLogs([])
     abortRef.current?.abort()
     abortRef.current = new AbortController()
     const t0 = performance.now()
+    let toolFiles = { ...artifacts }
     try {
-      const apiMessages = buildTestHubApiMessages(next, { files: artifacts })
+      const apiMessages = buildTestHubApiMessages(next, { files: toolFiles })
       let assistant = ''
-      await streamStudio(
+      const run = await streamTestHub(
         model,
         apiMessages,
         (chunk) => {
           assistant = chunk
+          if (chunk) setHubPhase('streaming')
           setLive(chunk)
         },
         abortRef.current.signal,
-        { agent: false },
+        {
+          onPing: () => setHubPhase('model'),
+          onConnected: () => setHubPhase('model'),
+        },
       )
-      setMessages((cur) => [...cur, { id: uid(), role: 'assistant', content: assistant || live }])
+      assistant = run.text || assistant
+      const parsed = extractBuildArtifacts(assistant)
+      toolFiles = { ...toolFiles, ...(run.files || {}), ...parsed }
+      if (Object.keys(toolFiles).length) {
+        setFileEdits({})
+        setOutputTab('preview')
+        setActiveFile((cur) => {
+          const paths = listArtifactPaths(toolFiles)
+          if (!paths.length) return cur
+          return cur && toolFiles[cur] ? cur : paths[0]
+        })
+      }
+      const tokens = (run.promptTokens || 0) + (run.completionTokens || 0)
+      setMessages((cur) => [...cur, { id: uid(), role: 'assistant', content: assistant || 'Done.' }])
       setLive('')
-      const run: CompareRunRow = {
+      const bench: BenchmarkRunRow = {
         streamId: uid(),
         model,
         modelName: modelNameById(model),
@@ -742,23 +664,28 @@ export function TestHubPanel() {
         ms: Math.round(performance.now() - t0),
         error: '',
         previewErrors: previewLogs.length,
-        viteBuildOk: looksLikeViteProject(extractBuildArtifacts(assistant)) ? null : undefined,
+        viteBuildOk: looksLikeViteProject(toolFiles) ? null : undefined,
       }
-      await saveBenchmarkRuns([run], {
-        compareMode: false,
-        viteEnabled: looksLikeViteProject(extractBuildArtifacts(assistant)),
+      await saveBenchmarkRuns([bench], {
+        viteEnabled: looksLikeViteProject(toolFiles),
       })
+      if (tokens > 0) {
+        setStatus(`Used ${tokens.toLocaleString()} tokens · counts toward your plan usage`)
+      }
     } catch (err) {
       if (abortRef.current?.signal.aborted) return
-      setError(err instanceof Error ? err.message : 'Request failed')
+      const msg = err instanceof Error ? err.message : 'Request failed'
+      setError(msg)
+      setMessages((cur) => [...cur, { id: uid(), role: 'assistant', content: `Error: ${msg}` }])
+      setLive('')
     } finally {
       setBusy(false)
+      setHubPhase('idle')
     }
   }
 
   function onSend() {
-    if (compareMode) void onSendCompare()
-    else void onSendSingle()
+    void onSendSingle()
   }
 
   function fixPreviewErrors() {
@@ -921,19 +848,19 @@ export function TestHubPanel() {
   }, [shareBusy, canShare, artifacts, shareSlug, shareTitle, shareTtlMinutes, activeId, messages, workspaces])
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col bg-[#0e0e0d]">
-      <header className="flex shrink-0 flex-wrap items-center gap-0 border-b border-white/[0.08] bg-[linear-gradient(180deg,#252526_0%,#1f1f1f_100%)]">
-        <div className="flex min-w-0 flex-1 items-center gap-2.5 px-4 py-3 md:px-5">
+    <div className="test-hub-panel flex min-h-0 flex-1 flex-col">
+      <header className="th-chrome-header flex shrink-0 flex-wrap items-center gap-0 border-b border-white/[0.08]">
+        <div className="th-chrome-title-row flex min-w-0 flex-1 items-center gap-2.5 px-4 py-3 md:px-5">
           <SoumtokGlobeAvatar color="#2f6fed" size={30} state={busy ? 'working' : 'idle'} />
           <div className="min-w-0">
-            <h1 className="text-[14px] font-semibold tracking-[-0.01em] text-[#f3f3f3]">Test Hub</h1>
-            <p className="truncate text-[11px] text-white/40">
+            <h1 className="th-chrome-title text-[14px] font-semibold tracking-[-0.01em]">Test Hub</h1>
+            <p className="th-subtitle hidden truncate text-[11px] text-white/40 sm:block">
               Direct model chat — preview updates live as the model builds.
             </p>
           </div>
         </div>
         <div className="mx-0 hidden h-8 w-px self-center bg-white/10 sm:block" aria-hidden="true" />
-        <div className="flex items-center gap-2 px-3 py-2">
+        <div className="th-project-actions flex items-center gap-2 px-3 py-2">
           <button
             type="button"
             className="rounded-lg border border-white/10 bg-white/[0.04] px-2.5 py-1.5 text-[11px] font-medium text-white/65 hover:bg-white/[0.08] hover:text-white"
@@ -959,7 +886,8 @@ export function TestHubPanel() {
               )
             }}
           >
-            Clear project
+            <span className="hidden sm:inline">Clear project</span>
+            <span className="sm:hidden">Clear</span>
           </button>
           <button
             type="button"
@@ -999,43 +927,38 @@ export function TestHubPanel() {
               setArchivesOpen(false)
             }}
           >
-            New project
+            <span className="hidden sm:inline">New project</span>
+            <span className="sm:hidden">New</span>
           </button>
         </div>
         <div className="mx-0 hidden h-8 w-px self-center bg-white/10 lg:block" aria-hidden="true" />
         <div className="hidden items-center gap-2 px-3 py-2 lg:flex">
           <div className="inline-flex rounded-[10px] border border-white/[0.08] bg-black/30 p-1">
-            <OutTab active={outputTab === 'preview'} onClick={() => setOutputTab('preview')}>
+            <OutTab active={outputTab === 'preview'} onClick={() => pickOutputTab('preview')}>
               Preview
             </OutTab>
-            <OutTab active={outputTab === 'code'} onClick={() => setOutputTab('code')}>
+            <OutTab active={outputTab === 'code'} onClick={() => pickOutputTab('code')}>
               Code
             </OutTab>
-            {(compareMode || compareRuns.length > 0) && (
-              <OutTab active={outputTab === 'compare'} onClick={() => setOutputTab('compare')}>
-                Compare
-              </OutTab>
-            )}
           </div>
           <div className="h-8 w-px bg-white/10" aria-hidden="true" />
-          {!compareMode ? (
-            <ModelPicker
-              model={model}
-              selected={selected}
-              models={models}
-              open={modelOpen}
-              onToggle={() => setModelOpen((o) => !o)}
-              onClose={() => setModelOpen(false)}
-              onBrief={(m) => {
-                setModelOpen(false)
-                setBriefModel(CODING_MODELS.find((c) => c.id === m.id) ?? null)
-              }}
-              onPick={(id) => {
-                setModel(id)
-                setModelOpen(false)
-              }}
-            />
-          ) : null}
+          <ModelPicker
+            model={model}
+            selected={selected}
+            models={models}
+            planId={billingPlan}
+            open={modelOpen}
+            onToggle={() => setModelOpen((o) => !o)}
+            onClose={() => setModelOpen(false)}
+            onBrief={(m) => {
+              setModelOpen(false)
+              setBriefModel(CODING_MODELS.find((c) => c.id === m.id) ?? null)
+            }}
+            onPick={(id) => {
+              setModel(id)
+              setModelOpen(false)
+            }}
+          />
         </div>
         <div className="ml-auto flex items-center gap-2 px-3 py-2 lg:hidden">
           <div className="relative">
@@ -1043,6 +966,7 @@ export function TestHubPanel() {
               model={model}
               selected={selected}
               models={models}
+              planId={billingPlan}
               open={modelOpen}
               onToggle={() => setModelOpen((o) => !o)}
               onClose={() => setModelOpen(false)}
@@ -1058,7 +982,7 @@ export function TestHubPanel() {
           </div>
         </div>
       </header>
-      <div className="flex shrink-0 items-center gap-2 overflow-x-auto border-b border-white/[0.08] bg-[#1a1a1a] px-3 py-1.5">
+      <div className="th-workspace-tabs flex shrink-0 items-center gap-2 overflow-x-auto border-b border-white/[0.08] px-3 py-1.5">
         {workspaces.map((w) => {
           const title = w.id === activeId ? workspaceTitle(messages, w.title || 'Project') : w.title || 'Project'
           const on = w.id === activeId
@@ -1147,15 +1071,32 @@ export function TestHubPanel() {
           )
         })}
       </div>
+      <div className="th-mobile-view-tabs flex shrink-0 items-center gap-1 border-b border-white/[0.08] px-3 py-2 lg:hidden">
+        <OutTab active={mobilePane === 'chat'} onClick={() => showMobilePane('chat')}>
+          Chat
+        </OutTab>
+        <OutTab active={mobilePane === 'preview'} onClick={() => showMobilePane('preview')}>
+          Preview
+        </OutTab>
+        <OutTab active={mobilePane === 'code'} onClick={() => showMobilePane('code')}>
+          Code
+        </OutTab>
+      </div>
       {briefModel && <ModelBriefSheet model={briefModel} onClose={() => setBriefModel(null)} />}
 
       <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[minmax(0,1fr)_minmax(280px,42%)]">
-        <section className="flex min-h-0 min-w-0 flex-col border-white/[0.06] lg:border-r">
+        <section
+          className={`th-chat-pane flex min-h-0 min-w-0 flex-col border-white/[0.06] lg:border-r ${
+            mobilePane === 'chat' ? 'flex' : 'hidden lg:flex'
+          }`}
+        >
           <div ref={feedRef} className="thin-scroll min-h-0 flex-1 overflow-y-auto px-4 py-6 md:px-6">
             <div className="mx-auto max-w-[720px] space-y-4">
               {messages.length === 0 && !live && !busy && (
                 <div className="rounded-xl border border-white/[0.08] bg-[#141413] px-4 py-8 text-center">
-                  <p className="text-[14px] text-white/75">Ask the model to build or explain anything.</p>
+                  <p className="text-[14px] text-white/75">
+                    Ask the agent to build or explain — it writes files with tools; preview updates live on the right.
+                  </p>
                   <p className="mt-2 text-[12px] text-white/40">
                     Attach files, folders, or docs — preview and code appear on the right.
                   </p>
@@ -1165,50 +1106,17 @@ export function TestHubPanel() {
                 <Bubble key={msg.id} role={msg.role} files={msg.files} content={msg.content} />
               ))}
               {live && <Bubble role="assistant" content={live} />}
-              {busy && !live && <p className="text-[12px] text-white/40">Thinking…</p>}
+              {busy && !live && (
+                <p className="text-[12px] text-white/40">
+                  {hubPhase === 'connecting' ? 'Connecting…' : hubPhase === 'model' ? 'Waiting for model…' : 'Streaming…'}
+                </p>
+              )}
             </div>
           </div>
 
           <div className="shrink-0 border-t border-white/[0.06] px-4 py-3 md:px-6">
             <div className="mx-auto max-w-[720px]">
               {error && <p className="mb-2 text-[12px] text-[#f48771]">{error}</p>}
-              {compareMode && (
-                <div className="mb-2 rounded-lg border border-white/[0.08] bg-[#141413] px-3 py-2">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <span className="text-[11px] text-white/45">Same prompt → parallel builds · pick 2–3</span>
-                    <button
-                      type="button"
-                      className={`rounded-md px-2 py-1 text-[11px] font-medium ${
-                        compareMode ? 'bg-[#007acc]/20 text-[#9fd0ff]' : 'text-white/50 hover:bg-white/[0.05]'
-                      }`}
-                      aria-pressed={compareMode}
-                      onClick={toggleCompareMode}
-                    >
-                      Compare
-                    </button>
-                  </div>
-                  <div className="mt-2 flex flex-wrap gap-1.5" role="group" aria-label="Models to compare">
-                    {comparePool.slice(0, 8).map((m) => {
-                      const on = comparePick.includes(m.id)
-                      return (
-                        <button
-                          key={m.id}
-                          type="button"
-                          disabled={isHubModelDisabled(m)}
-                          className={`rounded-full border px-2.5 py-1 text-[11px] ${
-                            on
-                              ? 'border-[#007acc]/50 bg-[#007acc]/15 text-[#d6ebff]'
-                              : 'border-white/10 text-white/55 hover:border-white/20 hover:text-white/80'
-                          } disabled:opacity-40`}
-                          onClick={() => toggleComparePick(m.id)}
-                        >
-                          {m.name}
-                        </button>
-                      )
-                    })}
-                  </div>
-                </div>
-              )}
               {pending.length > 0 && (
                 <div className="mb-2 flex flex-wrap gap-2">
                   {pending.map((f) => (
@@ -1252,23 +1160,20 @@ export function TestHubPanel() {
                     <ToolBtn onClick={() => fileRef.current?.click()}>Files</ToolBtn>
                     <ToolBtn onClick={() => folderRef.current?.click()}>Folder</ToolBtn>
                     {docs.length > 0 && <ToolBtn onClick={() => setDocsOpen((o) => !o)}>Docs</ToolBtn>}
-                    {!compareMode && (
-                      <ToolBtn
-                        onClick={() => {
-                          toggleCompareMode()
-                        }}
-                      >
-                        Compare
-                      </ToolBtn>
-                    )}
                   </div>
                   <button
                     type="button"
-                    disabled={busy || (compareMode && comparePick.length < 2)}
+                    disabled={busy}
                     onClick={() => void onSend()}
                     className="rounded-lg bg-[#007acc] px-4 py-1.5 text-[13px] font-medium text-white disabled:opacity-40"
                   >
-                    {busy ? 'Sending…' : compareMode ? 'Compare' : 'Send'}
+                    {busy
+                      ? hubPhase === 'connecting'
+                        ? 'Connecting…'
+                        : hubPhase === 'model'
+                          ? 'Waiting…'
+                          : 'Streaming…'
+                      : 'Send'}
                   </button>
                 </div>
               </div>
@@ -1302,18 +1207,12 @@ export function TestHubPanel() {
           </div>
         </section>
 
-        <aside className="hidden min-h-0 flex-col overflow-hidden bg-[#0c0c0b] lg:flex">
-          <div className="flex gap-1 border-b border-white/[0.06] px-3 py-2 lg:hidden">
-            <OutTab active={outputTab === 'preview'} onClick={() => setOutputTab('preview')}>
-              Preview
-            </OutTab>
-            <OutTab active={outputTab === 'code'} onClick={() => setOutputTab('code')}>
-              Code
-            </OutTab>
-          </div>
-          {outputTab === 'compare' ? (
-            <CompareOutputPane runs={compareRuns} onUse={applyCompareWinner} />
-          ) : outputTab === 'preview' ? (
+        <aside
+          className={`flex min-h-0 flex-1 flex-col overflow-hidden bg-[#0c0c0b] ${
+            mobilePane === 'chat' ? 'hidden lg:flex' : 'flex'
+          } lg:flex`}
+        >
+          {outputTab === 'preview' ? (
             <div className="relative flex min-h-0 flex-1 flex-col bg-white">
               {canShare ? (
                 <div className="shrink-0 border-b border-black/10 bg-[#eef0f3] px-3 py-2">
@@ -1350,6 +1249,7 @@ export function TestHubPanel() {
                 </p>
               ) : (
                 <iframe
+                  key={previewFrameKey}
                   ref={previewFrameRef}
                   title="Test Hub preview"
                   sandbox="allow-scripts allow-same-origin"
@@ -1638,76 +1538,6 @@ export function TestHubPanel() {
   )
 }
 
-function CompareOutputPane({
-  runs,
-  onUse,
-}: {
-  runs: CompareRunRow[]
-  onUse: (idx: number) => void
-}) {
-  if (!runs.length) {
-    return (
-      <p className="flex flex-1 items-center justify-center px-6 text-center text-[13px] text-white/35">
-        Turn on Compare, pick 2–3 models, then send a prompt.
-      </p>
-    )
-  }
-  return (
-    <div className="thin-scroll grid min-h-0 flex-1 auto-rows-min grid-cols-1 gap-3 overflow-y-auto p-3 xl:grid-cols-2">
-      {runs.map((run, idx) => {
-        const files = extractBuildArtifacts(run.text || '')
-        const preview = buildPreviewHtml(files)
-        const autoScore = run.status === 'done' ? scoreCompareRun(run) : null
-        const ms = run.ms ? `${(run.ms / 1000).toFixed(1)}s` : run.status === 'running' ? '…' : '—'
-        const status =
-          run.status === 'error'
-            ? run.error || 'Error'
-            : run.status === 'running'
-              ? 'Building…'
-              : `${Object.keys(files).length} file${Object.keys(files).length === 1 ? '' : 's'}${
-                  autoScore != null ? ` · ${autoScore}/100` : ''
-                }${run.viteBuildOk === true ? ' · vite ✓' : run.viteBuildOk === false ? ' · vite ✗' : ''}`
-        return (
-          <article
-            key={run.streamId}
-            className={`flex min-h-[220px] flex-col overflow-hidden rounded-lg border border-white/[0.08] bg-[#141413] ${
-              run.status === 'running' ? 'ring-1 ring-[#007acc]/40' : ''
-            }`}
-          >
-            <header className="flex items-start justify-between gap-2 border-b border-white/[0.06] px-3 py-2">
-              <span className="text-[12px] font-medium text-white/90">{run.modelName}</span>
-              <span className="text-[10px] text-white/40">
-                {ms} · {status}
-              </span>
-            </header>
-            {preview ? (
-              <iframe
-                title={`Preview ${run.modelName}`}
-                sandbox="allow-scripts allow-same-origin"
-                srcDoc={preview}
-                className="min-h-[160px] flex-1 w-full border-0 bg-white"
-              />
-            ) : (
-              <div className="grid flex-1 place-items-center px-4 text-[12px] text-white/35">No preview yet</div>
-            )}
-            {run.status === 'done' && run.text ? (
-              <div className="border-t border-white/[0.06] p-2">
-                <button
-                  type="button"
-                  className="w-full rounded-md border border-[#007acc]/35 bg-[#007acc]/10 px-2 py-1.5 text-[11px] font-medium text-[#9fd0ff] hover:bg-[#007acc]/18"
-                  onClick={() => onUse(idx)}
-                >
-                  Use this build
-                </button>
-              </div>
-            ) : null}
-          </article>
-        )
-      })}
-    </div>
-  )
-}
-
 function CodeWorkspace({
   paths,
   files,
@@ -1782,7 +1612,7 @@ function CodeWorkspace({
   const body = activeFile ? files[activeFile] : ''
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+    <div className="th-code-pane keep-dark flex min-h-0 flex-1 flex-col overflow-hidden">
       <div className="flex shrink-0 items-center justify-between gap-2 border-b border-[#333] bg-[#252526] px-3 py-2">
         <div className="min-w-0">
           <span className="text-[12px] font-medium text-white/90">Project files</span>
@@ -1818,7 +1648,7 @@ function CodeWorkspace({
               <p className="py-2 text-[11px] text-white/35">Loading scores…</p>
             ) : !scoreRows.length ? (
               <p className="py-2 text-[11px] text-white/35">
-                No benchmark runs yet. Send a build or run Compare — scores save when you are signed in.
+                No benchmark runs yet. Send a build — scores save when you are signed in.
               </p>
             ) : (
               <table className="w-full text-left text-[11px] text-white/75">
@@ -1889,8 +1719,8 @@ function CodeWorkspace({
           </div>
         </div>
       )}
-      <div className="grid min-h-0 flex-1 grid-cols-[minmax(120px,34%)_minmax(0,1fr)]">
-        <nav className="thin-scroll overflow-y-auto border-r border-[#333] bg-[#252526] p-2">
+      <div className="grid min-h-0 flex-1 grid-cols-1 md:grid-cols-[minmax(120px,34%)_minmax(0,1fr)]">
+        <nav className="thin-scroll max-h-[38vh] overflow-y-auto border-b border-[#333] bg-[#252526] p-2 md:max-h-none md:border-b-0 md:border-r">
           {paths.map((path) => {
             const glyph = fileGlyph(path)
             return (
@@ -2006,7 +1836,7 @@ function OutTab({ active, onClick, children }: { active: boolean; onClick: () =>
       type="button"
       onClick={onClick}
       aria-selected={active}
-      className={`min-w-[72px] rounded-[7px] px-3.5 py-1.5 text-[12px] font-medium ${
+      className={`min-w-[56px] rounded-[7px] px-2.5 py-1.5 text-[11px] font-medium sm:min-w-[72px] sm:px-3.5 sm:text-[12px] ${
         active
           ? 'bg-[#007acc]/28 text-white shadow-[inset_0_0_0_1px_rgba(0,122,204,0.35)]'
           : 'text-white/50 hover:bg-white/[0.04] hover:text-white/85'
@@ -2021,6 +1851,7 @@ function ModelPicker({
   model,
   selected,
   models,
+  planId = 'hobby',
   open,
   onToggle,
   onClose,
@@ -2030,6 +1861,7 @@ function ModelPicker({
   model: string
   selected?: HubModel
   models: HubModel[]
+  planId?: string
   open: boolean
   onToggle: () => void
   onClose: () => void
@@ -2052,6 +1884,7 @@ function ModelPicker({
   const search = query.trim().toLowerCase()
   const showAuto = !search || 'auto'.includes(search)
   const visible = models.filter((m) => {
+    if (!m.ready) return false
     if (!search) return true
     return `${m.name} ${m.id} ${m.cost} ${m.strength || ''} ${(m.tags || []).join(' ')}`.toLowerCase().includes(search)
   })
@@ -2112,9 +1945,7 @@ function ModelPicker({
                   </HubTagGroup>
                 </span>
                 <span className="mt-0.5 block text-[11px] leading-snug text-white/42">Routes to the best ready model for your prompt.</span>
-                <span className="mt-1 block font-mono text-[10px] tabular-nums text-white/40">
-                  Included pool first · $2.00 / 1M on-demand
-                </span>
+                <span className="mt-1 block font-mono text-[10px] tabular-nums text-white/40">{hubAutoPriceLine(planId)}</span>
               </button>
             )}
             {grouped ? (
@@ -2125,7 +1956,7 @@ function ModelPicker({
                       Top models
                     </p>
                     {grouped.top.map((m) => (
-                      <HubModelRow key={m.id} m={m} model={model} onPick={onPick} onBrief={onBrief} />
+                      <HubModelRow key={m.id} m={m} model={model} planId={planId} onPick={onPick} onBrief={onBrief} />
                     ))}
                   </>
                 )}
@@ -2135,16 +1966,20 @@ function ModelPicker({
                       All models
                     </p>
                     {grouped.rest.map((m) => (
-                      <HubModelRow key={m.id} m={m} model={model} onPick={onPick} onBrief={onBrief} />
+                      <HubModelRow key={m.id} m={m} model={model} planId={planId} onPick={onPick} onBrief={onBrief} />
                     ))}
                   </>
                 )}
               </>
             ) : (
-              visible.map((m) => <HubModelRow key={m.id} m={m} model={model} onPick={onPick} onBrief={onBrief} />)
+              visible.map((m) => <HubModelRow key={m.id} m={m} model={model} planId={planId} onPick={onPick} onBrief={onBrief} />)
             )}
             {!showAuto && !visible.length && (
-              <p className="px-3 py-3 text-[12px] text-white/40">No models match “{query.trim()}”.</p>
+              <p className="px-3 py-3 text-[12px] leading-5 text-white/40">
+                {query.trim()
+                  ? `No models match “${query.trim()}”.`
+                  : 'No models on your plan are ready. Upgrade in Billing or add API keys.'}
+              </p>
             )}
           </div>
         </div>
@@ -2182,15 +2017,17 @@ function HubTagGroup({ children }: { children: ReactNode }) {
 function HubModelRow({
   m,
   model,
+  planId = 'hobby',
   onPick,
   onBrief,
 }: {
   m: HubModel
   model: string
+  planId?: string
   onPick: (id: string) => void
   onBrief: (model: HubModel) => void
 }) {
-  const price = hubModelPriceLine(m)
+  const price = hubModelPriceLine(m, planId)
   const selected = model === m.id
   return (
     <div className="group flex items-stretch">

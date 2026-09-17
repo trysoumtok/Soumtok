@@ -10,10 +10,12 @@ import { fileURLToPath } from 'node:url'
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
 const port = Number(process.env.VITE_PORT || 5173)
 const clean = process.argv.includes('--clean')
+const viteCache = path.join(root, 'node_modules', '.vite')
 
-if (clean) {
-  fs.rmSync(path.join(root, 'node_modules', '.vite'), { recursive: true, force: true })
-  console.log('Cleared node_modules/.vite')
+// Windows Chrome often hits ERR_CACHE_READ_FAILURE on stale Vite module cache.
+if (clean || !process.env.SOUMTOK_KEEP_VITE_CACHE) {
+  fs.rmSync(viteCache, { recursive: true, force: true })
+  console.log(clean ? 'Cleared node_modules/.vite' : 'Refreshed Vite cache (use --clean or SOUMTOK_KEEP_VITE_CACHE=1 to skip)')
 }
 
 function freePortWin() {
@@ -36,11 +38,17 @@ async function main() {
   if (process.platform === 'win32') await freePortWin()
   const args = ['vite', '--port', String(port), '--strictPort']
   if (clean) args.push('--force')
+  const localAuthUrl = `http://localhost:${port}`
   const child = spawn('npx', args, {
     stdio: 'inherit',
     cwd: root,
     shell: true,
-    env: { ...process.env, VITE_CONFIG_NATIVE_IGNORE_WARNING: 'true' },
+    env: {
+      ...process.env,
+      VITE_CONFIG_NATIVE_IGNORE_WARNING: 'true',
+      // .env often has production BETTER_AUTH_URL (Railway sync) — keep OAuth on localhost in dev.
+      BETTER_AUTH_URL: localAuthUrl,
+    },
   })
   child.on('exit', (code) => process.exit(code ?? 0))
 }

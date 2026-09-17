@@ -5,6 +5,7 @@ import {
   falImageSize,
   normalizeStillAspect,
   parseStillRequest,
+  stillAspectForImageUse,
   stillAspectFromText,
   stripStillAspectFromPrompt,
 } from './stillAspect.ts'
@@ -38,4 +39,10 @@ test('fal image size maps 1:1 to square', () => {
   assert.equal(falImageSize('1:1'), 'square_hd')
   assert.equal(falImageSize('16:9'), 'landscape_16_9')
   assert.equal(falImageSize('9:16'), 'portrait_16_9')
+})
+
+test('hero and banner paths default to 16:9 when aspect omitted', () => {
+  assert.equal(stillAspectForImageUse('latte on a wooden table', 'assets/generated/hero-coffee.png'), '16:9')
+  assert.equal(stillAspectForImageUse('wide banner photo of espresso', ''), '16:9')
+  assert.equal(stillAspectForImageUse('product icon', 'assets/icons/app.png'), '1:1')
 })

@@ -73,3 +73,56 @@ export function defaultAuthMode(needsAuth: boolean): ConnectorAuthMode {
 export function connectorSignupUrl(pluginId: string) {
   return catalogPlugin(pluginId)?.signupUrl || ''
 }
+
+export type McpConnectorRef = {
+  id?: string
+  name?: string
+  plugin_id?: string | null
+  pluginId?: string | null
+  slug?: string | null
+  connected?: boolean
+  mcpUrl?: string | null
+  tools?: { name?: string; description?: string }[]
+}
+
+export function normalizeConnectorKey(value: string) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+}
+
+function connectorKeys(c: McpConnectorRef) {
+  return [c.id, c.name, c.plugin_id, c.pluginId, c.slug]
+    .map((k) => normalizeConnectorKey(String(k || '')))
+    .filter(Boolean)
+}
+
+function scoreConnectorMatch(c: McpConnectorRef, want: string) {
+  const keys = connectorKeys(c)
+  if (!keys.length || !want) return 0
+  let score = 0
+  for (const key of keys) {
+    if (key === want) score = Math.max(score, 100)
+    else if (key.includes(want) || want.includes(key)) score = Math.max(score, 70)
+    else {
+      const parts = want.split(/[\s/_-]+/).filter((p) => p.length > 2)
+      if (parts.some((part) => key.includes(part))) score = Math.max(score, 45)
+    }
+  }
+  return score
+}
+
+/** Match mcp({ server }) by id, display name, or catalog plugin_id (e.g. "figma" → Figma). */
+export function resolveMcpConnector(
+  connectors: McpConnectorRef[] | null | undefined,
+  server: string,
+): McpConnectorRef | null {
+  const want = normalizeConnectorKey(server)
+  if (!want || !Array.isArray(connectors)) return null
+  const ranked = connectors
+    .map((c) => ({ c, score: scoreConnectorMatch(c, want) }))
+    .filter((row) => row.score > 0)
+    .sort((a, b) => b.score - a.score)
+  return ranked[0]?.c || null
+}

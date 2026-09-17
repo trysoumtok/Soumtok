@@ -97,6 +97,9 @@ export function attachmentContextBlock(files: ChatFile[]) {
   lines.push(
     'If Kind is image and analysis says screenshot-of-app or ui-mock, this is about their codebase — grep/read the matching area before editing.',
   )
+  lines.push(
+    'If Extracted text is present for any attachment, that IS the file contents — read and follow it. Never tell the user you cannot open attached files when extracted text is here.',
+  )
   return lines.join('\n')
 }
 

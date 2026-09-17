@@ -99,6 +99,23 @@ export type SandboxCtx = {
 }
 
 export async function runSandboxed(command: string, files: Record<string, string>, ctx: SandboxCtx = {}) {
+  const trimmed = command.trim().slice(0, 400)
+  if (trimmed.includes(';')) {
+    const segments = trimmed.split(/\s*;\s*/).map((part) => part.trim()).filter(Boolean)
+    if (segments.length > 1 && segments.every((part) => parseSandboxCommand(part))) {
+      const outputs: string[] = []
+      let ok = true
+      let persistDir = ctx.persistDir
+      for (const segment of segments) {
+        const ran = await runSandboxed(segment, files, { persistDir })
+        ok = ok && ran.ok
+        if (ran.text) outputs.push(ran.text)
+        if (ran.persistDir) persistDir = ran.persistDir
+      }
+      return { ok, text: outputs.join('\n').trim() || '(empty)', persistDir }
+    }
+  }
+
   const parsed = parseSandboxCommand(command)
   if (!parsed) {
     if (isGitPushCommand(command)) {

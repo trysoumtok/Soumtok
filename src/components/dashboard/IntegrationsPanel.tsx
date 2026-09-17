@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react'
+import { GITHUB_APP_INSTALL_URL } from '../../../shared/githubApp.ts'
 import { fetchGithubRepos, fetchHealth, type GithubRepo } from '../../lib/api'
 import { GithubIcon } from './icons'
 import { PluginLogo } from './PluginLogos'
@@ -64,7 +65,7 @@ export function IntegrationsPanel({
 }) {
   const [login, setLogin] = useState<string | null>(null)
   const [repos, setRepos] = useState<GithubRepo[]>([])
-  const [installUrl, setInstallUrl] = useState('https://github.com/apps/soumtok/installations/new')
+  const [installUrl, setInstallUrl] = useState(GITHUB_APP_INSTALL_URL)
   const [status, setStatus] = useState('')
   const [githubReady, setGithubReady] = useState(true)
 
@@ -84,7 +85,13 @@ export function IntegrationsPanel({
         setInstallUrl(data.installUrl)
         if (data.expired) setStatus('GitHub access expired. Connect again to list your projects.')
         else if (!data.connected) setStatus('')
-        else if (data.repos.length === 0) setStatus('No projects yet. Grant Soumtok access to your repositories.')
+        else if (data.repos.length === 0) {
+          setStatus(
+            data.grantReposKind === 'oauth'
+              ? 'No projects yet. Open Manage and confirm Soumtok can access your repositories on GitHub.'
+              : 'No projects yet. Grant Soumtok access to your repositories.',
+          )
+        }
         else setStatus('')
       })
       .catch((error) => {

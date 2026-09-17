@@ -264,13 +264,23 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms))
 }
 
-async function waitForLogGrowth(cwd, { waitMs = 15_000, minChars = 40, pollMs = 500 } = {}) {
+const DEV_READY_PATTERNS = [
+  /https?:\/\/(?:localhost|127\.0\.0\.1):\d+/i,
+  /\bready in\b/i,
+  /\bLocal:\s*https?:\/\//i,
+  /\bVITE v[\d.]+/i,
+  /\blistening on port\b/i,
+  /started server on/i,
+]
+
+async function waitForLogGrowth(cwd, { waitMs = 15_000, minChars = 40, pollMs = 350 } = {}) {
   const startLen = readLogsForCwd(cwd, 200_000).length
   const deadline = Date.now() + Math.min(Math.max(waitMs, 2000), 60_000)
   while (Date.now() < deadline) {
     await sleep(pollMs)
-    const nowLen = readLogsForCwd(cwd, 200_000).length
-    if (nowLen - startLen >= minChars) break
+    const log = readLogsForCwd(cwd, 200_000)
+    if (DEV_READY_PATTERNS.some((re) => re.test(log))) break
+    if (log.length - startLen >= minChars) break
   }
   return readLogsForCwd(cwd, 16_000)
 }

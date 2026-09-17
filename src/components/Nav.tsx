@@ -59,7 +59,7 @@ export function Nav({
 
   return (
     <header className="sticky top-0 z-40 border-b border-white/5 bg-[#0b0b0a]">
-      <div className="page-wrap flex h-[64px] items-center justify-between">
+      <div className="page-wrap flex h-14 min-w-0 items-center justify-between gap-3 sm:h-[64px]">
         <Logo href={logoHref} />
 
         <nav className="hidden items-center gap-7 lg:flex">

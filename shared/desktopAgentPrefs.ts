@@ -99,7 +99,7 @@ export const DEFAULT_DESKTOP_AGENT_PREFS: DesktopAgentPrefs = {
   autoFormatOnFinish: true,
   legacyTerminal: false,
   toolbarOnSelection: true,
-  intelligence: 'max',
+  intelligence: 'balanced',
   thinkFirst: true,
   browserVerify: true,
   skillsEnabled: true,

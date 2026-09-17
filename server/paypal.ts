@@ -147,6 +147,26 @@ export async function getPaypalSubscription(subscriptionId: string) {
   return paypalFetch(`/v1/billing/subscriptions/${subscriptionId}`)
 }
 
+const PAYPAL_ACTIVE = new Set(['ACTIVE', 'APPROVED'])
+const PAYPAL_TERMINAL_BAD = new Set(['CANCELLED', 'SUSPENDED', 'EXPIRED', 'CANCELED'])
+
+/** PayPal may still show APPROVAL_PENDING on the return URL — poll until ACTIVE or timeout. */
+export async function waitForActivePaypalSubscription(subscriptionId: string, timeoutMs = 45_000) {
+  const started = Date.now()
+  let last: Record<string, unknown> = {}
+  while (Date.now() - started < timeoutMs) {
+    last = await getPaypalSubscription(subscriptionId)
+    const status = String(last.status || '').toUpperCase()
+    if (PAYPAL_ACTIVE.has(status)) return { ok: true as const, status, sub: last }
+    if (PAYPAL_TERMINAL_BAD.has(status)) return { ok: false as const, status, sub: last }
+    await new Promise((resolve) => setTimeout(resolve, 2000))
+  }
+  const status = String(last.status || '').toUpperCase()
+  // User finished PayPal UI; webhook may activate a moment later — still fulfill once.
+  if (status === 'APPROVAL_PENDING') return { ok: true as const, status, sub: last, pending: true }
+  return { ok: PAYPAL_ACTIVE.has(status), status, sub: last }
+}
+
 export async function verifyPaypalWebhook(headers: Headers, event: Record<string, unknown>) {
   if (!env.paypalWebhookId) return true
 

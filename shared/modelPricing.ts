@@ -1,5 +1,5 @@
-import type { CodingModel } from './models.ts'
-import { PLAN_CREDIT, TOKENS_PER_CREDIT, TRIAL_TOKEN_QUOTA } from './plans.ts'
+import { catalogModelId, modelById, type CodingModel } from './models.ts'
+import { modelUsagePool } from './usagePools.ts'
 
 /** Soumtok on-demand rate when included pool is exhausted (USD per 1M total tokens). */
 export const SOUMTOK_ON_DEMAND_USD_PER_M = 2
@@ -43,7 +43,7 @@ function fmtUsd(n: number) {
   return `$${n.toFixed(2)}`
 }
 
-function vendorTotal(inTok: number, outTok: number, v: VendorPrice) {
+export function vendorTotal(inTok: number, outTok: number, v: VendorPrice) {
   return (inTok / 1_000_000) * v.inputPerM + (outTok / 1_000_000) * v.outputPerM
 }
 
@@ -76,7 +76,7 @@ function tierVendor(cost: string): VendorPrice | null {
   }
 }
 
-function vendorForModel(model: CodingModel): VendorPrice | null {
+export function vendorForModel(model: CodingModel): VendorPrice | null {
   const id = model.id.toLowerCase()
   if (model.cost === 'Included' || id === 'soumtok-agent') return null
 
@@ -122,18 +122,16 @@ function vendorForModel(model: CodingModel): VendorPrice | null {
 }
 
 function billingPaths(model: CodingModel): BillingPath[] {
-  const proPool = (PLAN_CREDIT.pro * TOKENS_PER_CREDIT).toLocaleString()
-  const trialNote =
-    model.id === 'deepseek-v4-flash' || model.cost === 'Included'
-      ? 'Trial includes ~12K tokens on DeepSeek V4.1 Flash (and Gemma on web Studio). Counts as included — no per-token charge until the pool is gone.'
-      : 'Trial only routes a small included pool on DeepSeek V4.1 Flash / Gemma. Other models need Pro+ or your own key.'
+  const poolNote = modelUsagePool(model.id) === 'cheap'
+    ? 'Everyday models draw from your Everyday pool (Start $5, Pro $10/mo, Pro Plus $24/mo).'
+    : 'Additional models draw from your Additional pool on Pro and Pro Plus — not from Everyday.'
 
   return [
     {
       path: 'Soumtok included',
       whoPays: 'Your plan pool',
-      rate: 'No extra per-token charge while inside the pool',
-      detail: `${trialNote} Pro includes ~${proPool} tokens per billing cycle (plan start → renew). Ultra and Team include more. Usage is counted in Dashboard → Usage and Spending.`,
+      rate: 'Included while your pool has balance',
+      detail: `${poolNote} Pools reset each billing cycle. See Dashboard → Spending for live meters.`,
     },
     {
       path: 'Your API key (BYOK)',
@@ -186,13 +184,19 @@ function tipsFor(model: CodingModel, vendor: VendorPrice | null): string[] {
   if (/gpt-6-astra/.test(model.id)) {
     tips.push('Astra doubles input price above 272K prompt tokens on OpenAI’s Standard tier.')
   }
-  if (model.id === 'deepseek-v4-flash') {
-    tips.push(`Trial default: ~${TRIAL_TOKEN_QUOTA.toLocaleString()} included tokens — spend them here before upgrading or adding keys.`)
-  }
-  if (model.cost === 'Included') {
-    tips.push('Soumtok Agent uses platform routing on the cheap-strong default — not a separate SKU price.')
+  if (model.id === 'deepseek-v4-flash' || model.id === 'deepseek-v4-pro' || model.id === 'gpt-4.1-mini') {
+    tips.push('Everyday model — included on Start ($5) and counts toward your Everyday pool on Pro.')
   }
   return tips
+}
+
+/** Vendor API cost for a completed run (Soumtok's COGS on platform routing). */
+export function vendorUsdForTokens(modelId: string, promptTokens: number, completionTokens: number) {
+  const model = modelById(catalogModelId(modelId))
+  const vendor =
+    vendorForModel(model) ??
+    ({ inputPerM: 0.14, outputPerM: 0.28, note: 'Soumtok Agent / included row → DeepSeek Flash pricing.' } satisfies VendorPrice)
+  return vendorTotal(Math.max(0, promptTokens), Math.max(0, completionTokens), vendor)
 }
 
 export function resolveModelPricing(model: CodingModel): ModelPricing {

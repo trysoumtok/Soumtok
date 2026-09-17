@@ -13,6 +13,7 @@ import type { RequestAnalysis } from './requestAnalyze.ts'
 import { SOUMTOK_PRODUCT_GUIDE } from './soumtokProductGuide.ts'
 import type { DesktopAgentPrefs } from './desktopAgentPrefs.ts'
 import { parseAgentDriver, soumtokBotDesktopExtra, type AgentDriver } from './soumtokBot.ts'
+import { STUDIO_WEB_AGENT_RULES, type AgentRuntime } from './studioWeb.ts'
 
 /**
  * The desktop harness already caps each tool result at 12k chars, so the newest
@@ -366,6 +367,7 @@ export function compactControlSystem(input: {
   branch?: string
   mode?: DesktopAgentMode
   driver?: AgentDriver
+  runtime?: AgentRuntime
   files?: ChatFile[]
   plan: AgentPlan
   analysis: RequestAnalysis
@@ -384,9 +386,23 @@ export function compactControlSystem(input: {
   const job = pin || input.plan.goal || input.analysis.meaning
   const doLines = (input.analysis.do || []).slice(0, 4).map((d) => `- ${d}`).join('\n')
   const dontLines = (input.analysis.dont || []).slice(0, 4).map((d) => `- ${d}`).join('\n')
-  const stepLine = (input.plan.steps || []).filter(Boolean).slice(0, 6).join(' → ')
-  const doneWhen = (input.plan.deliverables || []).filter(Boolean).slice(0, 4).join('; ')
-  const mustLine = (input.plan.mustHave || []).filter(Boolean).slice(0, 4).join('; ')
+  const stepLine = (input.plan.steps || []).filter(Boolean).slice(0, 8).join(' → ')
+  const deliverables = (input.plan.deliverables || []).filter(Boolean)
+  const mustHaves = (input.plan.mustHave || []).filter(Boolean)
+  const doneWhen = deliverables.slice(0, 12).join('; ')
+  const mustLine = mustHaves.slice(0, 12).join('; ')
+  const deliverablesBlock =
+    deliverables.length > 12
+      ? `\nDeliverables (${deliverables.length}):\n${deliverables.map((d) => `- ${d}`).join('\n')}`
+      : deliverables.length
+        ? `\nDeliverables:\n${deliverables.map((d) => `- ${d}`).join('\n')}`
+        : ''
+  const mustBlock =
+    mustHaves.length > 12
+      ? `\nMust have (${mustHaves.length}):\n${mustHaves.map((m) => `- ${m}`).join('\n')}`
+      : mustHaves.length
+        ? `\nMust have:\n${mustHaves.map((m) => `- ${m}`).join('\n')}`
+        : ''
   const modeLine =
     uiMode === 'ask'
       ? 'MODE: ask — read only unless they ask to apply.'
@@ -401,6 +417,7 @@ export function compactControlSystem(input: {
   const driver = parseAgentDriver(input.driver)
   const bot = soumtokBotDesktopExtra(driver)
   const git = compactGitSnapshot(input.gitSnapshot)
+  const studioWeb = input.runtime === 'studio-web' ? STUDIO_WEB_AGENT_RULES : ''
 
   const body = [
     'You are Soumtok Agent. Do the USER ASKED job in this WORKSPACE with JSON tools.',
@@ -421,14 +438,17 @@ export function compactControlSystem(input: {
     `Job: ${job}`,
     input.analysis.where ? `Where: ${input.analysis.where}` : '',
     stepLine ? `Steps: ${stepLine}` : '',
-    doneWhen ? `Done when: ${doneWhen}` : '',
-    mustLine ? `Must: ${mustLine}` : '',
+    doneWhen ? `Done when (summary): ${doneWhen}` : '',
+    mustLine && mustHaves.length <= 12 ? `Must (summary): ${mustLine}` : '',
+    deliverablesBlock,
+    mustBlock,
     doLines ? `Do:\n${doLines}` : '',
     dontLines ? `Don't:\n${dontLines}` : '',
     git ? `GIT:\n${git}` : '',
     input.knownFiles ? input.knownFiles : '',
     'RULES: JSON function tools only. Chat/XML code is not a file. Stay in WORKSPACE. Windows PowerShell: ; not &&. Misspellings still count — follow ANALYZED REQUEST and call the matching tool. After tool results, either call the next tool or answer the user — do not wait for permission or a hidden harness message. After you finish, tell the user what happened (paths, URL). Never say sandboxed.',
     familyHint(input.model),
+    studioWeb,
     bot,
     product,
     attach,
@@ -441,7 +461,7 @@ export function compactControlSystem(input: {
 }
 
 const DESKTOP_HARNESS_MARKERS = [
-  'PROJECT BRIEF',
+  'INSTALLED EXTENSIONS',
   'PROJECT RULES (from this repo',
   'SOUMTOK PLATFORM CONTEXT',
   'SOUMTOK DO WORK NOW',

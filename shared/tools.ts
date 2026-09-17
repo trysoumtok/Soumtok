@@ -23,6 +23,10 @@ export type StudioToolName =
   | 'codebase_search'
   | 'browser'
   | 'read_skill'
+  | 'ask_question'
+  | 'attempt_completion'
+  | 'read_terminal'
+  | 'wipe_workspace'
 
 export type StudioTool = Extract<AgentEvent, { kind: 'tool' }>
 
@@ -31,6 +35,7 @@ export type ToolOutcome = {
   ok: boolean
   text: string
   files?: Record<string, string>
+  deleted?: string[]
 }
 
 const INSPECT = new Set<string>([
@@ -332,7 +337,85 @@ function globWorkspace(files: Record<string, string>, pattern: string, limit = 2
   return hits.length ? hits.join('\n') : 'No matches.'
 }
 
-export function runLocalTool(tool: StudioTool, files: Record<string, string>): ToolOutcome {
+function deleteWorkspacePaths(files: Record<string, string>, rel: string) {
+  const path = rel.replace(/^\/+/, '').replace(/\\/g, '/')
+  if (!path) return { ok: false as const, text: 'delete needs path' }
+  const deleted = Object.keys(files).filter((key) => key === path || key.startsWith(`${path}/`))
+  if (!deleted.length) return { ok: false as const, text: `No file at ${path}` }
+  return { ok: true as const, path, deleted }
+}
+
+function wipeWorkspaceFiles(files: Record<string, string>, keepGit = true) {
+  const deleted = Object.keys(files).filter((key) => !(keepGit && (key === '.git' || key.startsWith('.git/'))))
+  return { deleted }
+}
+
+function readLintsInMemory(files: Record<string, string>, pathArg: string) {
+  const path = pathArg.replace(/^\/+/, '')
+  const targets = path
+    ? Object.entries(files).filter(([key]) => key === path || key.startsWith(`${path}/`))
+    : Object.entries(files)
+  const issues: string[] = []
+  for (const [filePath, body] of targets.slice(0, 40)) {
+    if (!/\.(tsx?|jsx?|json|css|html|vue|svelte)$/i.test(filePath)) continue
+    const lines = body.split('\n')
+    let braces = 0
+    let parens = 0
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i]
+      for (const ch of line) {
+        if (ch === '{') braces++
+        if (ch === '}') braces--
+        if (ch === '(') parens++
+        if (ch === ')') parens--
+      }
+      if (braces < 0) issues.push(`${filePath}:${i + 1}: unmatched '}'`)
+      if (parens < 0) issues.push(`${filePath}:${i + 1}: unmatched ')'`)
+    }
+    if (braces !== 0) issues.push(`${filePath}: unbalanced braces (${braces > 0 ? '+' : ''}${braces})`)
+    if (parens !== 0) issues.push(`${filePath}: unbalanced parentheses (${parens > 0 ? '+' : ''}${parens})`)
+    if (/console\.log\(/.test(body) && /\.(tsx?|jsx?)$/i.test(filePath)) {
+      issues.push(`${filePath}: contains console.log (review before ship)`)
+    }
+  }
+  return issues.length ? issues.slice(0, 40).join('\n') : 'No issues found.'
+}
+
+export function searchCodebaseInMemory(files: Record<string, string>, query: string, limit = 40) {
+  const q = query.trim()
+  if (!q) return 'codebase_search needs query'
+  const tokens = q
+    .toLowerCase()
+    .split(/[^\w.-]+/)
+    .filter((item) => item.length > 2)
+  if (!tokens.length) return 'codebase_search needs a longer query'
+  const scored: { path: string; score: number; line: string }[] = []
+  for (const [path, content] of Object.entries(files)) {
+    const lowerPath = path.toLowerCase()
+    const lower = content.toLowerCase()
+    let score = 0
+    for (const token of tokens) {
+      if (lowerPath.includes(token)) score += 4
+      if (lower.includes(token)) score += 1
+    }
+    if (!score) continue
+    const hitLine =
+      content.split('\n').find((line) => tokens.some((token) => line.toLowerCase().includes(token))) || ''
+    scored.push({ path, score, line: hitLine.slice(0, 200) })
+  }
+  scored.sort((a, b) => b.score - a.score)
+  if (!scored.length) return 'No semantic matches.'
+  return scored
+    .slice(0, limit)
+    .map((item) => `${item.path} (${item.score})\n  ${item.line}`)
+    .join('\n\n')
+}
+
+export function runLocalTool(
+  tool: StudioTool,
+  files: Record<string, string>,
+  opts?: { fileDeletionProtection?: boolean },
+): ToolOutcome {
   const name = tool.name
   const args = tool.args || {}
   if (name === 'read') {
@@ -376,6 +459,44 @@ export function runLocalTool(tool: StudioTool, files: Record<string, string>): T
     const edited = applyWorkspaceEdit(files, args, name)
     if (!edited.ok) return { name, ok: false, text: edited.text }
     return { name, ok: true, text: edited.text, files: { [edited.path]: edited.content } }
+  }
+  if (name === 'delete') {
+    if (opts?.fileDeletionProtection) {
+      return {
+        name,
+        ok: false,
+        text: 'File deletion blocked — set Run mode to Run everything or disable file-deletion protection.',
+      }
+    }
+    const rel = String(args.path || args.file || '').replace(/^\/+/, '')
+    const removed = deleteWorkspacePaths(files, rel)
+    if (!removed.ok) return { name, ok: false, text: removed.text }
+    return { name, ok: true, text: `Deleted ${removed.path}`, deleted: removed.deleted }
+  }
+  if (name === 'wipe_workspace' || name === 'clear_workspace') {
+    if (opts?.fileDeletionProtection) {
+      return {
+        name,
+        ok: false,
+        text: 'Workspace wipe blocked — set Run mode to Run everything or ask again with "delete everything in this project".',
+      }
+    }
+    const keepGit = args.keep_git !== 'false' && args.keepGit !== 'false'
+    const { deleted } = wipeWorkspaceFiles(files, keepGit)
+    return {
+      name,
+      ok: true,
+      text: `Wiped workspace: removed ${deleted.length} path(s)${keepGit ? ' (kept .git)' : ''}.`,
+      deleted,
+    }
+  }
+  if (name === 'read_lints' || name === 'readlints') {
+    const path = String(args.path || args.file || '')
+    return { name, ok: true, text: readLintsInMemory(files, path) }
+  }
+  if (name === 'codebase_search' || name === 'codebasesearch' || name === 'semantic_search') {
+    const query = String(args.query || args.q || args.pattern || '').trim()
+    return { name, ok: true, text: searchCodebaseInMemory(files, query, Number(args.limit) || 40) }
   }
   return { name, ok: false, text: `${name} runs on the server` }
 }

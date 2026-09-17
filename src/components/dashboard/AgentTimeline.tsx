@@ -1,8 +1,9 @@
 import { useState } from 'react'
 import { decodeSource, type AgentEvent } from '../../../shared/agent'
+import { isImageDataUrl, isImageFilePath } from '../../../shared/preview'
 import { highlight } from '../../lib/highlight'
-import { AskCard, PlanCard, PromptChips, CapabilityLine, SecurityCard, ConnectCard } from './AskCards'
-import { toolFeedLabel, toolFeedLine } from '../../../shared/toolFeed'
+import { AskCard, PlanCard, PromptChips, CapabilityLine, SecurityCard, ConnectCard, TodoList } from './AskCards'
+import { shortenAgentStatus, toolFeedLabel, toolFeedLine } from '../../../shared/toolFeed'
 
 export function AgentTimeline({
   events,
@@ -136,6 +137,7 @@ function AgentEventRow({
   if (event.kind === 'explore') return <ExploreBlock items={event.items} startOpen={!collapsed} />
   if (event.kind === 'note') return <NoteBlock title={event.title} text={event.text} startOpen={!collapsed} />
   if (event.kind === 'ask') {
+    if (event.answers) return null
     return (
       <AskCard event={event} locked={!interactive} onSubmit={onAsk} onSkip={onSkipAsk} />
     )
@@ -152,7 +154,7 @@ function AgentEventRow({
       />
     )
   }
-  if (event.kind === 'todo') return null
+  if (event.kind === 'todo') return <TodoList event={event} />
   if (event.kind === 'fetch') {
     return <CapabilityLine label={event.ok === false ? 'Fetch failed' : 'Fetched'} text={event.title || event.url} />
   }
@@ -193,6 +195,24 @@ function AgentEventRow({
     return line
   }
   if (event.kind === 'result') {
+    if (event.name === 'generate_image' && event.ok) {
+      const path = event.text.match(/Saved still to ([^\s(]+)/i)?.[1] || event.text.match(/assets\/[^\s,)]+/)?.[0] || ''
+      const fileBody = path ? files[path] : ''
+      const src =
+        fileBody && (fileBody.startsWith('data:') || fileBody.startsWith('/api/studio/images/'))
+          ? fileBody.startsWith('/api/studio/images/')
+            ? `${typeof window !== 'undefined' ? window.location.origin : ''}${fileBody}`
+            : fileBody
+          : null
+      if (src && path) {
+        return (
+          <div className="max-w-[320px] overflow-hidden rounded-xl border border-white/10 bg-[#141413]">
+            <img src={src} alt="" className="block max-h-56 w-full object-cover object-top" />
+            <p className="px-3 py-2 font-mono text-[11px] text-white/45">{path}</p>
+          </div>
+        )
+      }
+    }
     const verb =
       event.name === 'read'
         ? 'Read'
@@ -200,9 +220,11 @@ function AgentEventRow({
           ? 'Wrote'
           : event.name === 'diff'
             ? 'Edited'
-            : event.ok
-              ? 'Done'
-              : 'Failed'
+            : event.name === 'generate_image'
+              ? 'Generated'
+              : event.ok
+                ? 'Done'
+                : 'Failed'
     return (
       <p className="max-w-[560px] truncate text-[13px] text-white/40">
         {event.ok ? verb : 'Failed'} <span className="font-mono">{event.text}</span>
@@ -306,8 +328,11 @@ function CommandBlock({ command, output, ok }: { command: string; output?: strin
 function ThoughtBlock({ seconds, text, live, lead }: { seconds: number; text: string; live?: boolean; lead?: boolean }) {
   const [touched, setTouched] = useState(false)
   const [open, setOpen] = useState(false)
+  const short = shortenAgentStatus(text)
+  const hideBody = /→|GROUND TRUTH|CODE SHAPE|VERIFY:/i.test(text) || text.length > 120
   if (lead) {
-    return <p className="whitespace-pre-wrap text-[14px] leading-6 text-white/80">{text}</p>
+    if (hideBody) return null
+    return <p className="whitespace-pre-wrap text-[14px] leading-6 text-white/80">{short}</p>
   }
   const shown = touched ? open : Boolean(live)
   const label = live ? 'Thinking' : seconds === 1 ? 'Thought for 1 second' : `Thought for ${seconds} seconds`
@@ -316,14 +341,15 @@ function ThoughtBlock({ seconds, text, live, lead }: { seconds: number; text: st
       <button
         type="button"
         onClick={() => {
+          if (hideBody) return
           setTouched(true)
           setOpen(!shown)
         }}
         className="text-[13px] text-white/38 hover:text-white/60"
       >
-        {label} {shown ? '⌄' : '>'}
+        {label} {!hideBody && (shown ? '⌄' : '>')}
       </button>
-      {shown && text && <p className="mt-1.5 text-[13px] leading-5 text-white/55">{text}</p>}
+      {shown && short && !hideBody && <p className="mt-1.5 text-[13px] leading-5 text-white/55">{short}</p>}
     </div>
   )
 }
@@ -394,6 +420,23 @@ function DiffBlock({
   const canExpand = hidden > 0 && Boolean(source)
   const peeking = !open && !collapsed && lines.length > 0
   const visible = open ? lines : peeking ? lines.slice(0, 12) : []
+  const blobFromLines = event.lines.find((line) => isImageDataUrl(line.text))?.text
+  const imageSrc = isImageDataUrl(source)
+    ? source
+    : blobFromLines
+      ? blobFromLines
+      : isImageFilePath(event.path) && source.startsWith('/api/studio/images/')
+        ? `${typeof window !== 'undefined' ? window.location.origin : ''}${source}`
+        : ''
+
+  if (imageSrc) {
+    return (
+      <div className="overflow-hidden rounded-xl border border-white/10 bg-[#0d0d0c]">
+        <img src={imageSrc} alt="" className="block max-h-64 w-full bg-[#0a0a0a] object-contain object-center" />
+        <p className="truncate px-3 py-2 font-mono text-[11px] text-white/45">{event.path}</p>
+      </div>
+    )
+  }
 
   return (
     <div className="overflow-hidden rounded-xl border border-white/10 bg-[#0d0d0c]">
@@ -453,7 +496,13 @@ function DiffBlock({
                 </span>
                 <span className="min-w-0 flex-1 whitespace-pre-wrap break-all text-white/80">
                   {line.kind === 'del' ? (
-                    <span className="text-[#ffb1af]">{line.text}</span>
+                    <span className="text-[#ffb1af]">
+                      {isImageDataUrl(line.text) || (isImageFilePath(event.path) && line.text.length > 800)
+                        ? `Generated image · ~${Math.max(1, Math.round((line.text.length * 0.75) / 1024))} KB`
+                        : line.text}
+                    </span>
+                  ) : isImageDataUrl(line.text) || (isImageFilePath(event.path) && line.text.length > 800) ? (
+                    `Generated image · ~${Math.max(1, Math.round((line.text.length * 0.75) / 1024))} KB`
                   ) : (
                     highlight(line.text, event.path)
                   )}

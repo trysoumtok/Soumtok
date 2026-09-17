@@ -1,12 +1,27 @@
 import type { ReactNode } from 'react'
+import { brandMarkSrc, brandLockupSrc } from '../../shared/brandAssets.ts'
 import { navigate } from '../lib/nav'
+import { useBrandTheme } from '../lib/useBrandTheme'
 
 export function BrandMark({ className = 'h-5 w-auto' }: { className?: string }) {
+  const theme = useBrandTheme()
   return (
     <img
-      src="/images/soumtok-mark.png"
+      src={brandMarkSrc(theme)}
       alt=""
       className={`brand-logo select-none ${className}`}
+      draggable={false}
+    />
+  )
+}
+
+export function BrandLockup({ className = 'h-5 w-auto max-w-[140px]' }: { className?: string }) {
+  const theme = useBrandTheme()
+  return (
+    <img
+      src={brandLockupSrc(theme)}
+      alt="Soumtok"
+      className={`brand-logo w-auto select-none ${className}`}
       draggable={false}
     />
   )
@@ -28,6 +43,8 @@ export function Logo({
   href?: string
   size?: keyof typeof logoHeight
 }) {
+  const theme = useBrandTheme()
+  const src = compact ? brandMarkSrc(theme) : brandLockupSrc(theme)
   return (
     <a
       href={href}
@@ -39,7 +56,7 @@ export function Logo({
       }}
     >
       <img
-        src={compact ? '/images/soumtok-mark.png' : '/images/soumtok-lockup.png'}
+        src={src}
         alt="Soumtok"
         className={`brand-logo w-auto max-w-[min(100%,220px)] select-none ${logoHeight[size]}`}
         draggable={false}

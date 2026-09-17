@@ -98,10 +98,24 @@ export function liveStepLabel(event: LiveStepEvent): string {
 }
 
 export function normalizeLiveStep(step: string) {
-  const text = step.trim()
+  const text = shortenAgentStatus(step)
   if (!text) return 'Working'
   if (/^(read|write|grep|terminal|fetch|github|mcp|tool|diff) ok$/i.test(text)) return 'Working'
   if (/^passed to the model$/i.test(text)) return 'Passed to the model'
   if (/^analyzing (your request|and understanding)$/i.test(text)) return 'Analyzing and understanding'
   return text
+}
+
+/** User-facing status line — never dump harness doctrine or long plan blobs. */
+export function shortenAgentStatus(text: string) {
+  const t = String(text || '').trim()
+  if (!t) return ''
+  const planMatch = t.match(/^Plan · (\d+) steps/i)
+  if (planMatch) return `Planning · ${planMatch[1]} steps`
+  if (t.length > 80 || /→|GROUND TRUTH|CODE SHAPE|VERIFY:/i.test(t)) {
+    if (/plan/i.test(t)) return 'Planning…'
+    if (/think/i.test(t)) return 'Thinking…'
+    return 'Working…'
+  }
+  return t
 }

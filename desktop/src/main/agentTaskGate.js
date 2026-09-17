@@ -236,6 +236,13 @@ function classifyUserTask(text, hint) {
     return 'fix'
   }
   if (
+    /\b(what can you do|what can u do|what do you do|what are you able|how can you help|what can you help|what can you do with|capabilities)\b/.test(
+      t,
+    )
+  ) {
+    return 'chat'
+  }
+  if (
     (/\b(what|how|why|explain|describe|summarize|overview|tell me about)\b/.test(t) &&
       !/\b(fix|build|run|delete|implement|change)\b/.test(t) &&
       /\b(project|repo|codebase|workspace|folder|this app|my code)\b/.test(t)) ||
@@ -545,6 +552,7 @@ function buildEditClarificationAsk(userText) {
       {
         id: 'scope',
         prompt: 'What are you trying to do?',
+        allowCustom: true,
         options: [
           { id: 'fix-bug', label: 'Fix a specific bug' },
           { id: 'feature', label: 'Add a feature' },
@@ -555,6 +563,33 @@ function buildEditClarificationAsk(userText) {
       },
     ],
   }
+}
+
+const IMAGE_COUNT_WORDS = {
+  one: 1,
+  two: 2,
+  three: 3,
+  four: 4,
+  five: 5,
+  six: 6,
+}
+
+/** How many stills the user asked for this turn (default 1). */
+function imageCountFromUser(text) {
+  const t = String(text || '').toLowerCase().replace(/\s+/g, ' ')
+  const digit = t.match(/\b(\d+)\s+(?:images?|pictures?|photos?|stills?)\b/)
+  if (digit) return Math.min(6, Math.max(1, Number(digit[1]) || 1))
+  const word = t.match(/\b(one|two|three|four|five|six)\s+(?:images?|pictures?|photos?|stills?)\b/)
+  if (word) return IMAGE_COUNT_WORDS[word[1]] || 1
+  const gen = t.match(/\bgenerate\s+(\d+)\b/)
+  if (gen && /\b(image|picture|photo|still)\b/.test(t)) return Math.min(6, Math.max(1, Number(gen[1]) || 1))
+  return 1
+}
+
+function countGeneratedImagesInScope(scope) {
+  return (scope || []).filter(
+    (m) => m.role === 'tool' && /^generate_image$/i.test(String(m.name || '')) && m.ok !== false,
+  ).length
 }
 
 function adaptiveSteering(taskKind, work, runState) {
@@ -633,6 +668,8 @@ module.exports = {
   signalIntent,
   needsVagueEditClarification,
   buildEditClarificationAsk,
+  imageCountFromUser,
+  countGeneratedImagesInScope,
   toolOutputShowsLocalhost,
   workHasReadTerminal,
   workHasDevServerTerminal,

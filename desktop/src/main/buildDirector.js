@@ -3,26 +3,32 @@
  */
 const fs = require('fs')
 const path = require('path')
+const { loadStarterTemplate, starterExists } = require('../../../shared/templateLoader.cjs')
+const { detectBuildTemplate, composeTemplateBrief, getTemplateById, resolveStarterPath } = require('./knowledgeBase')
+const { composeDesignDoctrineBrief, resolveDoctrineKey } = require('../../../shared/buildDesignDoctrine.cjs')
 
 function parseBuildIntent(userText) {
   const raw = String(userText || '').trim()
   const t = raw.toLowerCase()
-  let kind = 'node-cli'
+  const libraryTpl = detectBuildTemplate(raw)
+  let kind = libraryTpl?.scaffoldKind || 'node-cli'
   const wantsBrowser3d =
     /\b(3d|three\.?js|webgl|canvas|simulator|simulation|rubik|rubik'?s|cube)\b/.test(t) &&
     !/\b(cli|console app|terminal game)\b/.test(t)
-  if (
-    wantsBrowser3d ||
-    /\b(next\.?js|react|website|web app|landing|dashboard|tailwind|vite|homepage|portfolio|saas|browser)\b/.test(t)
-  ) {
-    kind = 'web-vite'
-  } else if (/\b(express|fastify|api|rest|backend|graphql)\b/.test(t)) kind = 'node-api'
-  else if (/\b(electron|desktop app)\b/.test(t)) kind = 'electron'
-  else if (/\b(python|pygame|flask|django|typer|click)\b/.test(t)) kind = 'python-cli'
-  else if (/\b(puzzle|snake|tetris|game)\b/.test(t) && !/\b(web|browser|3d)\b/.test(t)) kind = 'console-game'
-  else if (/\b(cli|console|terminal|command line|stdin)\b/.test(t)) kind = 'node-cli'
+  if (!libraryTpl?.scaffoldKind) {
+    if (
+      wantsBrowser3d ||
+      /\b(next\.?js|react|website|web app|landing|dashboard|tailwind|vite|homepage|portfolio|saas|browser)\b/.test(t)
+    ) {
+      kind = 'web-vite'
+    } else if (/\b(express|fastify|api|rest|backend|graphql)\b/.test(t)) kind = 'node-api'
+    else if (/\b(electron|desktop app)\b/.test(t)) kind = 'electron'
+    else if (/\b(python|pygame|flask|django|typer|click)\b/.test(t)) kind = 'python-cli'
+    else if (/\b(puzzle|snake|tetris|game)\b/.test(t) && !/\b(web|browser|3d)\b/.test(t)) kind = 'console-game'
+    else if (/\b(cli|console|terminal|command line|stdin)\b/.test(t)) kind = 'node-cli'
+  }
 
-  const title = raw.split(/[.!?\n]/)[0].slice(0, 120) || 'New project'
+  const title = libraryTpl?.title || raw.split(/[.!?\n]/)[0].slice(0, 120) || 'New project'
   const features = []
   const acceptance = []
 
@@ -31,7 +37,7 @@ function parseBuildIntent(userText) {
     if (wantsBrowser3d) {
       features.push('3D in the browser with three.js — orbit, the simulation the USER asked for (not a 2D CSS fake).')
     } else {
-      features.push('UI the USER asked for (landing, dashboard, etc. — not a canned template).')
+      features.push('Extend the proven starter on disk — customize for the USER (keep working structure).')
     }
     features.push('npm run dev on port 5173 (easiest localhost).')
     acceptance.push('terminal("npm install") then terminal("npm run dev") → read_terminal shows http://localhost:5173')
@@ -53,7 +59,47 @@ function parseBuildIntent(userText) {
     features.push('Interactive session (not one-shot print-only unless user asked)')
   }
 
-  return { raw, title, kind, features, acceptance, wantsBrowser3d }
+  return {
+    raw,
+    title,
+    kind,
+    features,
+    acceptance,
+    wantsBrowser3d,
+    templateId: libraryTpl?.id || null,
+  }
+}
+
+function buildTemplateVars(intent) {
+  const title = String(intent?.title || 'App').replace(/["<>]/g, '').slice(0, 60)
+  const brand = title.split(/[—–\-:|]/)[0].trim().slice(0, 40) || 'App'
+  const initial = (brand[0] || 'S').toUpperCase()
+  return { title, brand, initial }
+}
+
+const SCAFFOLD_FALLBACK = {
+  'web-vite': 'vite-vanilla-ts',
+  'node-api': 'node-express-api',
+  'python-cli': 'python-cli',
+  'node-cli': 'node-cli',
+  'console-game': 'console-game',
+}
+
+function resolveIntentTemplate(intent) {
+  if (intent?.templateId) return getTemplateById(intent.templateId)
+  return detectBuildTemplate(intent?.raw || '')
+}
+
+function loadProvenStarterFiles(intent) {
+  const tpl = resolveIntentTemplate(intent)
+  const starterPath =
+    resolveStarterPath(tpl) ||
+    (intent?.kind && SCAFFOLD_FALLBACK[intent.kind] && starterExists(SCAFFOLD_FALLBACK[intent.kind])
+      ? SCAFFOLD_FALLBACK[intent.kind]
+      : null)
+  if (!starterPath) return null
+  const files = loadStarterTemplate(starterPath, buildTemplateVars(intent))
+  return files?.length ? { files, starterPath, tpl } : null
 }
 
 function isPreviewableBuildKind(kind) {
@@ -135,6 +181,29 @@ function listScratchDiagnosticFiles(folder) {
   }
 }
 
+function scaffoldMismatchForIntent(folder, userText) {
+  if (!folder) return false
+  const tpl = detectBuildTemplate(String(userText || ''))
+  const starterPath = resolveStarterPath(tpl)
+  if (!starterPath || !['cafe-restaurant', 'landing-marketing', 'multi-page-site'].includes(starterPath)) {
+    return false
+  }
+  try {
+    const hasSections = fs.existsSync(path.join(folder, 'src/sections/hero.ts'))
+    const hasMpaLayout = fs.existsSync(path.join(folder, 'src/shared/layout.ts'))
+    const hasAbout = fs.existsSync(path.join(folder, 'about.html'))
+    const hasCalc = fs.existsSync(path.join(folder, 'src/utils/calc.ts'))
+    const indexPath = path.join(folder, 'index.html')
+    const indexHuge = fs.existsSync(indexPath) && fs.statSync(indexPath).size > 9000
+    if (starterPath === 'multi-page-site') {
+      return indexHuge && !hasMpaLayout && !hasAbout
+    }
+    return (hasCalc || indexHuge) && !hasSections
+  } catch {
+    return false
+  }
+}
+
 function workspaceLooksMessy(folder, workspaceScan) {
   if (!folder) return false
   const scratch = listScratchDiagnosticFiles(folder)
@@ -211,6 +280,30 @@ function projectDeliversInBrowser(intent, folder) {
   return Boolean(s.dev || s.preview || s.serve || (s.start && /vite|next|webpack|nuxt|astro/i.test(String(s.start))))
 }
 
+function inferDevServerPort(folder) {
+  if (!folder) return 5173
+  try {
+    for (const name of ['vite.config.ts', 'vite.config.js', 'vite.config.mjs']) {
+      const full = path.join(folder, name)
+      if (!fs.existsSync(full)) continue
+      const src = fs.readFileSync(full, 'utf8')
+      const m = src.match(/port\s*:\s*(\d{2,5})/)
+      if (m) return Number(m[1])
+    }
+  } catch {
+    /* ignore */
+  }
+  const pkg = readPackageJson(folder)
+  const dev = String(pkg?.scripts?.dev || pkg?.scripts?.start || '')
+  const fromFlag = dev.match(/--port(?:=|\s+)(\d{2,5})/)
+  if (fromFlag) return Number(fromFlag[1])
+  return 5173
+}
+
+function inferDevServerUrl(folder) {
+  return `http://localhost:${inferDevServerPort(folder)}`
+}
+
 function composeMessyRecoveryBrief(userText, folder, workspaceScan, intent) {
   const scratch = listScratchDiagnosticFiles(folder)
   const scratchLine = scratch.length ? scratch.join(', ') : '(any _*.js one-off scripts)'
@@ -245,12 +338,44 @@ Workspace scan snapshot:
 ${String(workspaceScan || '').slice(0, 4000)}`
 }
 
+/** Compact steer when proven starter files are already on disk (fast path). */
+function composeScaffoldFastBrief(userText, folder, wroteFiles) {
+  const intent = inferIntentForFolder(folder, userText)
+  const runCmd = pickRunCommandFromFolder(folder)
+  const files = (wroteFiles || []).slice(0, 12).join(', ')
+  return `SOUMTOK FAST BUILD (proven starter on disk — do not recreate the tree):
+
+USER REQUEST: "${String(userText || '').replace(/"/g, "'").slice(0, 200)}"
+
+STARTER FILES (harness wrote these — customize content, especially under src/):
+${files}${wroteFiles?.length > 12 ? '…' : ''}
+
+EXECUTE NOW (tools only — no planning essay):
+1. diff/write only what the user asked — keep package.json, vite.config, tsconfig unless broken.
+2. Hero photo: generate_image({ prompt, path: "assets/generated/hero-coffee.png", aspect: "16:9" }) — never 1:1 for hero/banner.
+3. terminal("npm install") if node_modules missing.
+4. terminal("${runCmd}") → read_terminal({ wait_ms: 8000 }).
+5. Reply with http://localhost:PORT and what you built.
+
+FORBIDDEN: list_dir spam, rewriting the whole scaffold, stopping at a plan, asking permission, square hero crops.
+Shape: ${intent.kind} · ${intent.title}`
+}
+
 function composeBuildDirectorBrief(userText, folder, workspaceScan) {
   const intent = inferIntentForFolder(folder, userText)
   const greenfield = !workspaceScan || /GREENFIELD|\(empty\)/i.test(String(workspaceScan))
-  const messy = workspaceLooksMessy(folder, workspaceScan)
+  const mismatch = scaffoldMismatchForIntent(folder, userText)
+  const messy = workspaceLooksMessy(folder, workspaceScan) || mismatch
   if (messy) {
-    return composeMessyRecoveryBrief(userText, folder, workspaceScan, intent)
+    const base = composeMessyRecoveryBrief(userText, folder, workspaceScan, intent)
+    if (!mismatch) return base
+    const starterPath = resolveStarterPath(detectBuildTemplate(userText))
+    return `${base}
+
+SCAFFOLD MISMATCH (harness):
+- User asked for ${starterPath || 'a landing/cafe site'} but this folder still looks like a different app (calculator leftovers or monolithic index.html).
+- Prefer templates/${starterPath}/ layout: src/main.ts + src/sections/* + src/style.css — not a 300-line index.html dump.
+- Hero image MUST be generate_image(..., aspect: "16:9", path: "assets/generated/hero-coffee.png").`
   }
   const files = filesPlanForIntent(intent, greenfield)
   const fileLines = files.map((f, i) => `${i + 1}. write("${f.path}") — ${f.purpose}${f.notes ? ` (${f.notes})` : ''}`).join('\n')
@@ -274,7 +399,17 @@ function composeBuildDirectorBrief(userText, folder, workspaceScan) {
     : `LAYOUT:
 - Conventional tree for ${intent.kind}. Put implementation in src/ when it is an app. Do not dump unrelated files at repo root.`
 
-  return `SOUMTOK BUILD DIRECTOR (harness — follow exactly; do not ignore):
+  const doctrine = composeDesignDoctrineBrief(
+    resolveDoctrineKey({
+      category: intent.kind === 'node-api' ? 'backend' : intent.kind === 'python-cli' || intent.kind === 'node-cli' ? 'cli' : intent.kind,
+      userText: intent.raw,
+    }),
+    { userText: intent.raw },
+  )
+
+  return `${doctrine}
+
+SOUMTOK BUILD DIRECTOR (harness — follow exactly; do not ignore):
 
 USER REQUEST (ground truth — build THIS, not a generic substitute):
 "${intent.raw.replace(/"/g, "'")}"
@@ -317,7 +452,9 @@ ANTI-PATTERNS (forbidden):
 - Creating cube.js, server.js, web/, or test.js at repo root for a browser/Vite app — put code in src/.
 - Asking the user to choose between fix options — just fix and run.
 
-Workspace folder: ${folder || '(unknown)'}`
+Workspace folder: ${folder || '(unknown)'}
+
+${composeTemplateBrief(userText) || ''}`
 }
 
 function workspaceIsGreenfield(folder) {
@@ -337,6 +474,12 @@ function contentsForPlan(intent) {
   const cubeish = Boolean(intent?.wantsBrowser3d && /\b(rubik|cube)\b/i.test(intent.raw || ''))
   const three = Boolean(intent?.wantsBrowser3d)
   const title = String(intent?.title || 'App').replace(/["<>]/g, '').slice(0, 60)
+
+  if (!three) {
+    const proven = loadProvenStarterFiles(intent)
+    if (proven?.files?.length) return proven.files
+  }
+
   if (kind === 'web-vite') {
     const deps = three
       ? `    "three": "^0.170.0"`
@@ -382,11 +525,16 @@ export default defineConfig({ server: { port: 5173, host: true } })
 `,
       },
       {
+        path: 'public/favicon.svg',
+        content: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="8" fill="#141414"/><text x="16" y="21" text-anchor="middle" fill="#fff" font-size="14" font-family="system-ui,sans-serif">${title.slice(0, 1).toUpperCase() || 'S'}</text></svg>`,
+      },
+      {
         path: 'index.html',
         content: `<!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>${title}</title>
   </head>
@@ -621,6 +769,7 @@ function applyGreenfieldScaffold(folder, userText) {
 
 module.exports = {
   parseBuildIntent,
+  composeScaffoldFastBrief,
   composeBuildDirectorBrief,
   filesPlanForIntent,
   contentsForPlan,
@@ -632,5 +781,7 @@ module.exports = {
   inferIntentForFolder,
   pickRunCommandFromFolder,
   projectDeliversInBrowser,
+  inferDevServerPort,
+  inferDevServerUrl,
   readPackageJson,
 }

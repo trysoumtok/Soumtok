@@ -103,6 +103,23 @@ if (missingRel.rel !== 'test-out.txt' || /src[/\\]test-out/.test(missingRel.rel)
   process.exit(1)
 }
 
+const tmpSrc = fs.mkdtempSync(path.join(require('os').tmpdir(), 'soumtok-locate-'))
+const onlyEffects = path.join(tmpSrc, 'src')
+fs.mkdirSync(onlyEffects, { recursive: true })
+fs.writeFileSync(path.join(onlyEffects, 'effects.ts'), 'export {}\n')
+const explicitMissing = locateWorkspaceFile(tmpSrc, 'src/main.ts', { workspaceBoundary: true })
+if (explicitMissing.rel !== 'src/main.ts' || explicitMissing.file.endsWith('effects.ts')) {
+  console.error('FAIL: explicit src/main.ts must not fuzzy-match another file', explicitMissing)
+  process.exit(1)
+}
+fs.rmSync(tmpSrc, { recursive: true, force: true })
+
+const psNorm = normalizeTerminalCommand("Get-ChildItem -Name src")
+if (!psNorm.ok || psNorm.shell !== 'powershell') {
+  console.error('FAIL: Get-ChildItem should route to powershell', psNorm)
+  process.exit(1)
+}
+
 const termSrc = fs.readFileSync(path.join(desktopRoot, 'src/renderer/terminalPanel.js'), 'utf8')
 if (/return `cmd \/d \/s \/c/.test(termSrc)) {
   console.error('FAIL: PowerShell PTY still wraps commands in cmd /d /s /c')

@@ -13,6 +13,7 @@ import {
   followUpFindThought,
   formatAskReply,
   formatSkipAsk,
+  completionTextFromEvents,
   finishChatReply,
   inferPlan,
   isAskReply,
@@ -517,6 +518,32 @@ test('follow-up edits do not invent a read-everything checklist', async () => {
   assert.match(prompt, /Past tense/)
 })
 
+test('binary image diffs never dump base64 into the feed', async () => {
+  const { attachChangeDiffs, withChangeDiffs } = await import('./agent.ts')
+  const blob = `data:image/jpeg;base64,${'A'.repeat(4000)}`
+  const events = [
+    {
+      kind: 'diff' as const,
+      path: 'assets/hero-clinic.jpg',
+      added: 1,
+      removed: 1,
+      hidden: 0,
+      lines: [
+        { kind: 'del' as const, text: blob },
+        { kind: 'add' as const, text: blob },
+      ],
+    },
+  ]
+  const files = { 'assets/hero-clinic.jpg': blob }
+  const cleaned = withChangeDiffs(events, files, {})
+  assert.equal(cleaned.length, 1)
+  assert.match(cleaned[0].kind === 'diff' ? cleaned[0].lines[0]?.text || '' : '', /Generated image/i)
+  assert.doesNotMatch(JSON.stringify(cleaned), /base64/)
+  const merged = attachChangeDiffs({}, { files, events: [] }, 0)
+  assert.match(JSON.stringify(merged.events), /Generated image/i)
+  assert.doesNotMatch(JSON.stringify(merged.events), /base64/)
+})
+
 test('follow-up kickoff is silent when the analysis pipeline already ran', () => {
   const plan = inferPlan('add a light dark theme switch', true, { hasPreview: true })
   const seed = kickoffEvents(plan, { pipeline: true })
@@ -727,6 +754,33 @@ test('a let-me-read thought is not the closing reply', () => {
   })
   assert.doesNotMatch(recap, /Let me read/)
   assert.doesNotMatch(recap, /I'll add a theme/)
+})
+
+test('attempt_completion result becomes the detailed web studio conclusion', () => {
+  const detail =
+    'Built **Wellspring Family Clinic** — a responsive landing page with hero, services, team, and contact sections. Hero image is in assets/hero-clinic.jpg. Open Preview to walk through the page.'
+  const events = [
+    { kind: 'result' as const, name: 'attempt_completion', ok: true, text: detail },
+    {
+      kind: 'diff' as const,
+      path: 'index.html',
+      added: 40,
+      removed: 0,
+      lines: [{ kind: 'add' as const, text: '<section>Hero</section>' }],
+      hidden: 0,
+      previous: '',
+    },
+  ]
+  assert.equal(completionTextFromEvents(events), detail)
+  const recap = spokenRecap({
+    files: { 'index.html': '<html></html>' },
+    events,
+    previewHtml: '<html></html>',
+    previewTitle: 'Wellspring Family Clinic',
+  })
+  assert.match(recap, /Wellspring Family Clinic/)
+  assert.match(recap, /hero-clinic\.jpg/)
+  assert.doesNotMatch(recap, /^Preview is ready\. Wrote/)
 })
 
 test('Done after reads is not treated as a finished edit', () => {

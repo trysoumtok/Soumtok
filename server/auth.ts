@@ -8,12 +8,15 @@ import { SESSION_MAX_SECONDS } from '../shared/session.ts'
 import {
   authBaseURLConfig,
   authCrossSubDomainCookies,
+  canonicalAuthHost,
   env,
   hasDatabase,
   hasGithub,
   hasGoogle,
+  isProductionHost,
   trustedOrigins,
 } from './env.ts'
+import { ensureProfile, syncLinkedAccounts } from './account-sync.ts'
 import { BLOCKED_EMAIL_MESSAGE, isBlockedEmail } from './blocked-emails.ts'
 import { pool } from './db.ts'
 
@@ -23,6 +26,13 @@ function authHost() {
   } catch {
     return 'localhost'
   }
+}
+
+function passkeyRpId() {
+  const host = authHost()
+  if (host === '127.0.0.1' || host === 'localhost') return 'localhost'
+  if (isProductionHost(host) || host === canonicalAuthHost()) return canonicalAuthHost()
+  return host
 }
 
 function createAuth() {
@@ -35,12 +45,17 @@ function createAuth() {
 
   const crossSubDomainCookies = authCrossSubDomainCookies()
 
+  const loginErrorUrl = `${env.betterAuthUrl.replace(/\/$/, '')}/login`
+
   return betterAuth({
     appName: 'Soumtok',
     baseURL: authBaseURLConfig(),
     secret: env.betterAuthSecret,
     database: pool,
     trustedOrigins,
+    onAPIError: {
+      errorURL: loginErrorUrl,
+    },
     advanced: {
       trustedProxyHeaders: true,
       cookiePrefix: 'soumtok',
@@ -62,11 +77,7 @@ function createAuth() {
           },
           after: async (user) => {
             if (!pool) return
-            await pool.query(
-              `INSERT INTO profiles (user_id, updated_at) VALUES ($1, NOW())
-               ON CONFLICT (user_id) DO NOTHING`,
-              [user.id],
-            )
+            await ensureProfile(user.id)
             try {
               const mail = welcomeEmail({
                 name: user.name,
@@ -83,14 +94,14 @@ function createAuth() {
       account: {
         create: {
           after: async (account) => {
-            if (account.providerId !== 'github' || !pool) return
-            await pool.query(
-              `INSERT INTO profiles (user_id, github_id, updated_at)
-               VALUES ($1, $2, NOW())
-               ON CONFLICT (user_id) DO UPDATE
-               SET github_id = EXCLUDED.github_id, updated_at = NOW()`,
-              [account.userId, account.accountId],
-            )
+            await syncLinkedAccounts(account.userId)
+          },
+        },
+      },
+      session: {
+        create: {
+          after: async (session) => {
+            await syncLinkedAccounts(session.userId)
           },
         },
       },
@@ -125,7 +136,7 @@ function createAuth() {
         allowPasswordless: true,
       }),
       passkey({
-        rpID: authHost() === '127.0.0.1' ? 'localhost' : authHost(),
+        rpID: passkeyRpId(),
         rpName: 'Soumtok',
       }),
       magicLink({

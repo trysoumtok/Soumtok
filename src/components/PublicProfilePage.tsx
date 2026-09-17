@@ -1,10 +1,13 @@
 import { useEffect, useState } from 'react'
 import { fetchPublicProfile } from '../lib/api'
+import { brandMarkSrc } from '../../shared/brandAssets.ts'
+import { useBrandTheme } from '../lib/useBrandTheme'
 import { BrandMark } from './ui'
 import { navigate } from '../lib/nav'
 import { NotFoundPage } from './NotFoundPage'
 
 export function PublicProfilePage({ username }: { username: string }) {
+  const theme = useBrandTheme()
   const [state, setState] = useState<
     | { status: 'loading' }
     | { status: 'private' }
@@ -71,7 +74,7 @@ export function PublicProfilePage({ username }: { username: string }) {
         {state.status === 'ready' && (
           <>
             <img
-              src={state.hasAvatar ? `/api/u/${encodeURIComponent(state.username)}/photo` : '/images/soumtok-mark.png'}
+              src={state.hasAvatar ? `/api/u/${encodeURIComponent(state.username)}/photo` : brandMarkSrc(theme)}
               alt=""
               className="mx-auto h-20 w-20 rounded-full bg-white/5 object-cover"
             />

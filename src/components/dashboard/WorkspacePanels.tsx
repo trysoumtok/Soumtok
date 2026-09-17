@@ -5,12 +5,16 @@ import {
   BILLING_PLANS,
   PLAN_CREDIT,
   TOKENS_PER_CREDIT,
-  TRIAL_TOKEN_QUOTA,
   checkoutPath,
+  isUnpaidPlan,
+  planById,
   planLabel,
   planPriceLine,
   type PaidPlanId,
 } from '../../../shared/plans'
+import { ADDITIONAL_MODEL_ROWS, EVERYDAY_MODEL_ROWS } from '../../../shared/planAchievements'
+import { modelById } from '../../../shared/models'
+import { planPoolSummary, sumPoolUsageUsd } from '../../../shared/usagePools'
 import { CycleToggle, PlanGrid } from '../PlanPicker'
 import { PaymentPayouts } from '../pay/PaymentPayouts'
 import { commitPendingPayMethod } from '../../lib/pay-wallet'
@@ -34,10 +38,10 @@ function daysLeft(until: Date) {
 
 function SharpBar({ value, max = 100, tone = 'white' }: { value: number; max?: number; tone?: 'white' | 'soft' | 'accent' }) {
   const pct = max <= 0 ? 0 : Math.min(100, Math.max(0, (value / max) * 100))
-  const fill = tone === 'accent' ? 'bg-[#f54e00]' : tone === 'soft' ? 'bg-white/35' : 'bg-white/75'
+  const fill = tone === 'accent' ? 'bg-[#f54e00]' : tone === 'soft' ? 'bg-white/40' : 'bg-white/80'
   return (
-    <div className="h-1.5 w-full bg-white/10">
-      <div className={`h-full ${fill}`} style={{ width: `${pct}%` }} />
+    <div className="h-2 w-full overflow-hidden rounded-full bg-white/[0.08]">
+      <div className={`h-full rounded-full transition-[width] duration-300 ${fill}`} style={{ width: `${pct}%` }} />
     </div>
   )
 }
@@ -51,9 +55,9 @@ function SpendCard({
   compact?: boolean
   onClick?: () => void
 }) {
-  const cls = `flex h-full flex-col rounded-xl border border-white/12 bg-[#141413] text-left ${
-    compact ? 'p-4' : 'min-h-[168px] p-5'
-  } ${onClick ? 'transition hover:bg-white/[0.03]' : ''}`
+  const cls = `flex h-full flex-col gap-5 rounded-2xl border border-white/[0.07] bg-[#141413] text-left ${
+    compact ? 'p-6' : 'p-7'
+  } ${onClick ? 'transition hover:border-white/[0.12] hover:bg-[#171716]' : ''}`
 
   if (onClick) {
     return (
@@ -66,27 +70,131 @@ function SpendCard({
   return <div className={cls}>{children}</div>
 }
 
+function ModelChip({ name, locked }: { name: string; locked?: boolean }) {
+  return (
+    <span
+      className={`inline-flex items-center rounded-full border px-3 py-1 text-[12px] leading-none ${
+        locked
+          ? 'border-white/[0.08] bg-white/[0.02] text-white/40'
+          : 'border-white/[0.12] bg-white/[0.05] text-white/85'
+      }`}
+    >
+      {locked ? <span className="mr-1.5 text-[10px] uppercase tracking-wide text-white/30">Locked</span> : null}
+      {name}
+    </span>
+  )
+}
+
+function ModelPoolBlock({
+  title,
+  subtitle,
+  models,
+  locked,
+  usageLabel,
+  usagePct,
+  footnote,
+  onUpgrade,
+}: {
+  title: string
+  subtitle: string
+  models: { id: string; tagline: string }[]
+  locked?: boolean
+  usageLabel?: string
+  usagePct?: number
+  footnote: string
+  onUpgrade?: () => void
+}) {
+  return (
+    <article
+      className={`rounded-2xl border p-6 sm:p-7 ${
+        locked
+          ? 'border-dashed border-white/[0.09] bg-white/[0.012]'
+          : 'border-white/[0.07] bg-[#141413]'
+      }`}
+    >
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-8">
+        <div className="min-w-0 space-y-1.5">
+          <h3 className="text-[15px] font-medium tracking-[-0.01em] text-white/95">{title}</h3>
+          <p className="max-w-md text-[13px] leading-relaxed text-white/42">{subtitle}</p>
+        </div>
+        {usageLabel ? (
+          <p className="shrink-0 text-[12px] font-medium tabular-nums text-white/48 sm:pt-0.5 sm:text-right">{usageLabel}</p>
+        ) : null}
+      </div>
+
+      {typeof usagePct === 'number' ? (
+        <div className="mt-6">
+          <SharpBar value={usagePct} tone={locked ? 'soft' : usagePct > 85 ? 'accent' : 'white'} />
+        </div>
+      ) : null}
+
+      <ul className="mt-6 space-y-2.5">
+        {models.map((row) => {
+          const name = modelById(row.id).name
+          return (
+            <li
+              key={row.id}
+              className={`rounded-xl border px-4 py-3.5 ${
+                locked
+                  ? 'border-white/[0.05] bg-black/15'
+                  : 'border-white/[0.05] bg-white/[0.02]'
+              }`}
+            >
+              <p className={`text-[13px] font-medium ${locked ? 'text-white/42' : 'text-white/86'}`}>{name}</p>
+              <p className="mt-1.5 text-[12px] leading-relaxed text-white/38">{row.tagline}</p>
+            </li>
+          )
+        })}
+      </ul>
+
+      <p className="mt-6 text-[13px] leading-relaxed text-white/35">{footnote}</p>
+
+      {locked && onUpgrade ? (
+        <button
+          type="button"
+          onClick={onUpgrade}
+          className="mt-6 rounded-lg bg-[#f54e00] px-4 py-2.5 text-[13px] font-medium text-white transition hover:bg-[#ff6420]"
+        >
+          Upgrade to Pro — unlock Additional models
+        </button>
+      ) : null}
+    </article>
+  )
+}
+
 export function SpendingPanel({ plan }: { plan?: string }) {
   const [currentId, setCurrentId] = useState(plan === 'teams' ? 'team' : plan || 'hobby')
-  const isTrial = currentId === 'hobby'
-  const credit = PLAN_CREDIT[currentId] || PLAN_CREDIT.hobby
-  const currentPlan = BILLING_PLANS.find((item) => item.id === currentId) || BILLING_PLANS[0]
+  const isUnpaid = isUnpaidPlan(currentId)
+  const credit = PLAN_CREDIT[currentId] || 0
+  const currentPlan = planById(currentId)
   const [cycleStart, setCycleStart] = useState<Date | null>(null)
   const [cycleEnd, setCycleEnd] = useState<Date>(() => monthEnd())
   const reset = cycleEnd
   const left = daysLeft(reset)
   const [includedTokens, setIncludedTokens] = useState(0)
   const [byokTokens, setByokTokens] = useState(0)
+  const [cheapUsedUsd, setCheapUsedUsd] = useState(0)
+  const [premiumUsedUsd, setPremiumUsedUsd] = useState(0)
   const [busy, setBusy] = useState(false)
+  const [usageReady, setUsageReady] = useState(false)
   const [status, setStatus] = useState('')
-  const [limitMode, setLimitMode] = useState<'fixed' | 'unlimited'>(() => {
-    return localStorage.getItem('soumtok-spend-mode') === 'unlimited' ? 'unlimited' : 'fixed'
-  })
-  const [limit, setLimit] = useState(() => Number(localStorage.getItem('soumtok-spend-limit') || 50))
+  useEffect(() => {
+    if (plan) setCurrentId(plan === 'teams' ? 'team' : plan)
+  }, [plan])
 
   useEffect(() => {
-    setCurrentId(plan === 'teams' ? 'team' : plan || 'hobby')
+    const paidFlag = new URLSearchParams(window.location.search).get('paid')
+    if (paidFlag === '1') {
+      setStatus(
+        'Payment confirmed. Your plan is active on web and Desktop — receipt emailed to you.',
+      )
+    }
+  }, [])
+
+  useEffect(() => {
     let cancelled = false
+    setUsageReady(false)
+
     fetchBilling()
       .then((data) => {
         if (cancelled) return
@@ -95,7 +203,11 @@ export function SpendingPanel({ plan }: { plan?: string }) {
         const paid = (data.orders || []).find((order) => order.status === 'paid')
         const started = data.planStartedAt || paid?.paid_at || paid?.period_start || null
         const renews = data.planRenewsAt || paid?.period_end || null
-        const startDate = started ? new Date(started) : nextId === 'hobby' ? new Date(new Date().getFullYear(), new Date().getMonth(), 1) : new Date()
+        const startDate = started
+          ? new Date(started)
+          : nextId === 'hobby'
+            ? new Date(new Date().getFullYear(), new Date().getMonth(), 1)
+            : new Date()
         const endDate = renews
           ? new Date(renews)
           : nextId === 'hobby'
@@ -104,6 +216,10 @@ export function SpendingPanel({ plan }: { plan?: string }) {
         if (!renews && nextId !== 'hobby') endDate.setMonth(endDate.getMonth() + 1)
         setCycleStart(startDate)
         setCycleEnd(endDate)
+        if (isUnpaidPlan(nextId)) {
+          setUsageReady(true)
+          return undefined
+        }
         return fetchAnalytics({ from: startDate.toISOString(), to: new Date().toISOString() })
       })
       .then((data) => {
@@ -117,114 +233,135 @@ export function SpendingPanel({ plan }: { plan?: string }) {
         }
         setIncludedTokens(included)
         setByokTokens(byok)
+        const pools = sumPoolUsageUsd(
+          (data.usage || []).map((row) => ({
+            model: row.model,
+            prompt_tokens: row.prompt_tokens,
+            completion_tokens: row.completion_tokens,
+            billed_to: row.billed_to,
+          })),
+        )
+        setCheapUsedUsd(pools.cheap)
+        setPremiumUsedUsd(pools.premium)
+        setUsageReady(true)
       })
-      .catch(() => undefined)
+      .catch(() => {
+        if (!cancelled) setUsageReady(true)
+      })
+
     return () => {
       cancelled = true
     }
   }, [plan])
 
-  const quota = isTrial ? TRIAL_TOKEN_QUOTA : credit * TOKENS_PER_CREDIT
-  const usedPct = Math.min(100, Math.round((includedTokens / Math.max(quota, 1)) * 100))
+  const quota = credit * TOKENS_PER_CREDIT
   const byokPct = Math.min(100, Math.round((byokTokens / Math.max(quota, 1)) * 100))
-  const overTokens = Math.max(0, includedTokens + byokTokens - quota)
-  const onDemand = (overTokens / 1_000_000) * 2
+  const poolMeta = planPoolSummary(currentId)
+  const cheapPct = Math.min(100, Math.round((cheapUsedUsd / Math.max(poolMeta.cheapBudgetUsd, 0.0001)) * 100))
+  const premiumPct = poolMeta.premiumBudgetUsd
+    ? Math.min(100, Math.round((premiumUsedUsd / poolMeta.premiumBudgetUsd) * 100))
+    : 0
   const resetLabel = reset.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
 
   function upgrade(next: PaidPlanId) {
     navigate(checkoutPath(next))
   }
 
-  function saveLimit() {
-    localStorage.setItem('soumtok-spend-mode', limitMode)
-    localStorage.setItem('soumtok-spend-limit', String(limit))
-    setStatus('Monthly limit saved.')
-  }
-
   const upgradeId: PaidPlanId | null =
-    currentId === 'hobby'
-      ? 'pro'
-      : currentId === 'pro'
-        ? 'pro_plus'
-        : currentId === 'pro_plus'
-          ? 'ultra'
-          : currentId === 'ultra'
-            ? 'team'
-            : null
+    isUnpaidPlan(currentId)
+      ? 'start'
+      : currentId === 'start'
+        ? 'pro'
+        : currentId === 'pro'
+          ? 'pro_plus'
+          : null
   const upgradePlan = upgradeId ? BILLING_PLANS.find((item) => item.id === upgradeId) : null
 
   return (
-    <div className="space-y-8">
-      {isTrial ? (
-        <div className="grid gap-3 md:grid-cols-2">
-          <SpendCard compact onClick={() => upgrade('pro')}>
-            <p className="text-[11px] text-white/40">Usage</p>
-            <p className="mt-1.5 text-[16px] font-medium">{usedPct}% used</p>
-            <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-white/10">
-              <div
-                className={`h-full ${usedPct >= 100 ? 'bg-[#f54e00]' : 'bg-white/75'}`}
-                style={{ width: `${usedPct}%` }}
-              />
+    <div className="mx-auto w-full max-w-[880px] space-y-14">
+      {isUnpaid ? (
+        <div className="grid gap-5 md:grid-cols-2">
+          <SpendCard compact>
+            <div>
+              <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-white/35">Current status</p>
+              <p className="mt-2 text-[18px] font-medium tracking-[-0.02em]">No active plan</p>
+              <p className="mt-2 text-[13px] leading-relaxed text-white/45">
+                Subscribe to use Soumtok models in Studio and Desktop — or add your own API keys.
+              </p>
             </div>
-            {usedPct >= 100 && (
-              <p className="mt-2 text-[12px] text-[#f54e00]">Free trial ended — upgrade to keep coding.</p>
-            )}
-            <p className="mt-2 text-[11px] text-white/35">Resets monthly · {resetLabel}</p>
           </SpendCard>
           <SpendCard compact>
-            <p className="text-[14px] font-medium">Pro {planPriceLine(BILLING_PLANS.find((item) => item.id === 'pro')!)}</p>
+            <div>
+              <p className="text-[18px] font-medium tracking-[-0.02em]">
+                Start {planPriceLine(BILLING_PLANS.find((item) => item.id === 'start')!)}
+              </p>
+              <p className="mt-2 text-[13px] leading-relaxed text-white/45">
+                $5/mo Everyday pool — DeepSeek Flash, DeepSeek Pro, GPT-4.1 Mini
+              </p>
+            </div>
             <button
               type="button"
               disabled={busy}
-              onClick={() => upgrade('pro')}
-              className="mt-3 self-start rounded-md bg-white px-3 py-1.5 text-[12px] font-medium text-black disabled:opacity-50"
+              onClick={() => upgrade('start')}
+              className="self-start rounded-lg bg-[#f54e00] px-4 py-2.5 text-[13px] font-medium text-white transition hover:bg-[#ff6420] disabled:opacity-50"
             >
-              {busy ? 'Opening…' : 'Upgrade to Pro'}
+              {busy ? 'Opening…' : 'Subscribe — $5/mo'}
             </button>
           </SpendCard>
         </div>
       ) : (
-        <div className="grid gap-4 md:grid-cols-2">
+        <div className="grid gap-5 lg:grid-cols-2">
           <SpendCard>
-            <p className="text-[11px] uppercase tracking-[0.08em] text-white/35">Current plan</p>
-            <p className="mt-2 text-[20px] font-medium">
-              {currentPlan.name} {currentId === 'hobby' ? '' : planPriceLine(currentPlan)}
-            </p>
-            <p className="mt-2 text-[13px] text-white/45">
-              {cycleStart
-                ? `Started ${cycleStart.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' })}`
-                : 'New plan'}
-            </p>
-            <p className="mt-1 text-[13px] text-white/45">
-              Expires {reset.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })} ({left}{' '}
-              {left === 1 ? 'day' : 'days'} left)
-            </p>
+            <div className="space-y-2">
+              <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-white/35">Current plan</p>
+              <p className="text-[22px] font-medium tracking-[-0.03em] text-white">
+                {currentPlan.name} {currentId === 'hobby' ? '' : planPriceLine(currentPlan)}
+              </p>
+              <p className="text-[13px] leading-relaxed text-white/45">
+                {cycleStart
+                  ? `Started ${cycleStart.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' })}`
+                  : 'New plan'}
+              </p>
+              <p className="text-[13px] text-white/45">
+                Renews {reset.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })} ·{' '}
+                {left} {left === 1 ? 'day' : 'days'} left
+              </p>
+            </div>
             <button
               type="button"
               onClick={() => navigate('/dashboard/billing')}
-              className="mt-auto self-start rounded-lg border border-white/18 px-3 py-1.5 text-[13px] text-white/80 hover:bg-white/[0.04]"
+              className="mt-auto self-start rounded-lg border border-white/[0.14] px-4 py-2 text-[13px] text-white/80 transition hover:border-white/25 hover:bg-white/[0.04]"
             >
               Adjust Plan
             </button>
           </SpendCard>
           {upgradePlan && upgradeId && (
             <SpendCard>
-              <p className="text-[11px] uppercase tracking-[0.08em] text-white/35">Upgrade available</p>
-              <p className="mt-2 text-[20px] font-medium">
-                {upgradePlan.name} {planPriceLine(upgradePlan)}
-              </p>
-              <p className="mt-2 text-[13px] text-white/45">
-                {upgradeId === 'pro_plus'
-                  ? 'Unlock more usage on Agent and frontier models.'
-                  : upgradeId === 'ultra'
-                    ? '10x Pro usage, highest throughput, and earliest access.'
-                    : 'Shared rules, usage analytics, and Team seats.'}
-              </p>
+              <div className="space-y-2">
+                <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-white/35">Upgrade available</p>
+                <p className="text-[22px] font-medium tracking-[-0.03em] text-white">
+                  {upgradePlan.name} {planPriceLine(upgradePlan)}
+                </p>
+                <p className="text-[13px] leading-relaxed text-white/45">
+                  {upgradeId === 'pro_plus'
+                    ? '3× Pro capacity — $24 Everyday + $24 Additional each month.'
+                    : upgradeId === 'pro'
+                      ? 'Unlock a second pool for frontier models — separate from Everyday.'
+                      : '$5/mo Everyday models to start coding.'}
+                </p>
+              </div>
+              {upgradeId === 'pro' && (
+                <div className="flex flex-wrap gap-2">
+                  {ADDITIONAL_MODEL_ROWS.map((row) => (
+                    <ModelChip key={row.id} name={modelById(row.id).name} locked />
+                  ))}
+                </div>
+              )}
               <button
                 type="button"
                 disabled={busy}
                 onClick={() => upgrade(upgradeId)}
-                className="mt-auto self-start rounded-lg bg-white px-4 py-2 text-[13px] font-medium text-black disabled:opacity-50"
+                className="mt-auto self-start rounded-lg bg-[#f54e00] px-4 py-2.5 text-[13px] font-medium text-white transition hover:bg-[#ff6420] disabled:opacity-50"
               >
                 {busy ? 'Opening…' : 'Upgrade'}
               </button>
@@ -233,83 +370,78 @@ export function SpendingPanel({ plan }: { plan?: string }) {
         </div>
       )}
 
-      {!isTrial && (
-        <>
-          <div>
-            <p className="mb-3 text-[13px] text-white/40">Included in {currentPlan.name}</p>
-            <div className="space-y-6">
-              <div>
-                <div className="mb-2 flex items-center justify-between text-[13px]">
-                  <span>Soumtok models · DeepSeek, Gemini, Claude, Grok, and GPT</span>
-                  <span className="text-white/40">{usedPct}% used</span>
-                </div>
-                <SharpBar value={usedPct} />
-                <p className="mt-2 text-[12px] text-white/35">
-                  Additional usage beyond limits consumes Other models quota or on-demand spend.{' '}
-                  <button type="button" className="text-white/55 underline" onClick={() => openTab('/docs/billing')}>
-                    Learn more
-                  </button>
-                </p>
-              </div>
-              <div>
-                <div className="mb-2 flex items-center justify-between text-[13px]">
-                  <span>Other models</span>
-                  <span className="text-white/40">{byokPct}% used</span>
-                </div>
-                <SharpBar value={byokPct} tone="soft" />
-                <p className="mt-2 text-[12px] text-white/35">
-                  Your own keys. Additional usage beyond limits consumes on-demand spend.
-                </p>
-              </div>
-            </div>
+      {!isUnpaid && (
+        <section className="space-y-6">
+          <div className="space-y-2">
+            <h2 className="text-[16px] font-medium tracking-[-0.02em] text-white/92">Models on your plan</h2>
+            <p className="text-[13px] text-white/40">Pool usage resets on {resetLabel}.</p>
           </div>
-
-          <div>
-            <p className="mb-3 text-[13px] text-white/40">On-demand</p>
-            <div className="mb-2 flex items-center justify-between text-[13px]">
-              <span>On-demand</span>
-              <span className="text-white/40">
-                ${onDemand.toFixed(2)} / {limitMode === 'unlimited' ? '∞' : `$${limit}`}
-              </span>
-            </div>
-            <SharpBar value={onDemand} max={limitMode === 'unlimited' ? Math.max(onDemand, 1) : limit} tone="soft" />
-            <p className="mt-2 text-[12px] text-white/35">Usage past your limit is billed later as on-demand.</p>
-            <div className="mt-4 flex flex-wrap items-end justify-between gap-3">
-              <div>
-                <p className="text-[13px]">Monthly limit</p>
-                <p className="text-[12px] text-white/40">Set a fixed amount or make it unlimited.</p>
+          <div className="space-y-6">
+            <ModelPoolBlock
+              title="Everyday pool"
+              subtitle={`Included on ${currentPlan.name} · $${poolMeta.cheapDisplayUsd.toFixed(0)}/mo budget`}
+              models={[...EVERYDAY_MODEL_ROWS]}
+              usageLabel={
+                usageReady
+                  ? `$${cheapUsedUsd.toFixed(2)} / $${poolMeta.cheapDisplayUsd.toFixed(2)} (${cheapPct}%)`
+                  : 'Usage updating…'
+              }
+              usagePct={usageReady ? cheapPct : undefined}
+              footnote="Fast, affordable models for daily coding. Does not touch your Additional budget."
+            />
+            {poolMeta.premiumDisplayUsd > 0 ? (
+              <ModelPoolBlock
+                title="Additional pool"
+                subtitle={`Included on ${currentPlan.name} · $${poolMeta.premiumDisplayUsd.toFixed(0)}/mo budget`}
+                models={[...ADDITIONAL_MODEL_ROWS]}
+                usageLabel={
+                  usageReady
+                    ? `$${premiumUsedUsd.toFixed(2)} / $${poolMeta.premiumDisplayUsd.toFixed(2)} (${premiumPct}%)`
+                    : 'Usage updating…'
+                }
+                usagePct={usageReady ? premiumPct : undefined}
+                footnote="Frontier models on a separate pool — switch when you need Opus, GPT-6, or Sonnet."
+              />
+            ) : (
+              <ModelPoolBlock
+                title="Additional models"
+                subtitle="Pro ($20/mo) — separate $10/mo pool, not shared with Everyday"
+                models={[...ADDITIONAL_MODEL_ROWS]}
+                locked
+                footnote="Upgrade to Pro to use Claude Opus, GPT-6 Astra, Claude Sonnet, and Grok without BYOK."
+                onUpgrade={() => upgrade('pro')}
+              />
+            )}
+            <article className="rounded-2xl border border-white/[0.07] bg-[#141413] p-6 sm:p-7">
+              <div className="flex items-start justify-between gap-6">
+                <div>
+                  <h3 className="text-[15px] font-medium text-white/92">Other models</h3>
+                  <p className="mt-1.5 max-w-md text-[13px] leading-relaxed text-white/42">
+                    Your own API keys — billed by the provider, not Soumtok.
+                  </p>
+                </div>
+                <span className="shrink-0 text-[12px] font-medium tabular-nums text-white/48">
+                  {usageReady ? `${byokPct}% used` : 'Updating…'}
+                </span>
               </div>
-              <div className="flex items-center gap-2">
-                <select
-                  value={limitMode}
-                  onChange={(event) => setLimitMode(event.target.value as 'fixed' | 'unlimited')}
-                  className="rounded-none border border-white/15 bg-[#0c0c0b] px-2 py-1.5 text-[13px]"
-                >
-                  <option value="fixed">Fixed</option>
-                  <option value="unlimited">Unlimited</option>
-                </select>
-                {limitMode === 'fixed' && (
-                  <input
-                    type="number"
-                    min={0}
-                    value={limit}
-                    onChange={(event) => setLimit(Number(event.target.value))}
-                    className="w-16 rounded-none border border-white/15 bg-[#0c0c0b] px-2 py-1.5 text-[13px]"
-                  />
-                )}
-                <button
-                  type="button"
-                  onClick={saveLimit}
-                  className="rounded-none border border-white/15 px-3 py-1.5 text-[13px] text-white/70 hover:bg-white/[0.04]"
-                >
-                  Save
-                </button>
-              </div>
-            </div>
+              {usageReady ? (
+                <div className="mt-6">
+                  <SharpBar value={byokPct} tone="soft" />
+                </div>
+              ) : null}
+            </article>
           </div>
-        </>
+        </section>
       )}
-      {status && <p className="text-[13px] text-[#f54e00]">{status}</p>}
+      {status && (
+        <p
+          className={`text-[13px] ${
+            /confirmed|saved|active/i.test(status) ? 'text-emerald-400' : 'text-[#f54e00]'
+          }`}
+        >
+          {status}
+        </p>
+      )}
     </div>
   )
 }
@@ -470,7 +602,7 @@ export function BillingPanel({ plan }: { plan?: string }) {
     const flag = new URLSearchParams(window.location.search).get('paypal')
     if (flag === 'success') {
       commitPendingPayMethod()
-      setStatus('Payment confirmed. A receipt was sent to your email.')
+      setStatus('Payment confirmed. Your plan is active on web and Desktop — receipt emailed to you.')
     }
     if (flag === 'cancel') setStatus('Checkout was cancelled.')
     if (flag === 'error') setStatus('Checkout could not confirm the payment.')
@@ -484,7 +616,9 @@ export function BillingPanel({ plan }: { plan?: string }) {
         setPlanRenewsAt(data.planRenewsAt || null)
         if (data.planStartedAt) setUsageWindow('cycle')
         if (flag === 'success' && data.plan && data.plan !== 'hobby') {
-          setStatus(`You're on ${planLabel(data.plan)}. A receipt was sent to your email.`)
+          setStatus(
+            `You're on ${planLabel(data.plan)}. Plan active on web and Desktop — receipt emailed to you.`,
+          )
         } else if (!data.paypal && flag !== 'success') {
           setStatus('Checkout is not connected on the server.')
         }
@@ -537,7 +671,8 @@ export function BillingPanel({ plan }: { plan?: string }) {
     navigate(checkoutPath(next, cycle))
   }
 
-  const currentPlan = BILLING_PLANS.find((item) => item.id === current) || BILLING_PLANS[0]
+  const currentPlan = planById(current)
+  const unpaid = isUnpaidPlan(current)
   const tokenRows = usage.map((row) => ({
     ...row,
     tokens: row.prompt_tokens + row.completion_tokens,
@@ -552,28 +687,19 @@ export function BillingPanel({ plan }: { plan?: string }) {
   const renews = planRenewsAt
     ? new Date(planRenewsAt)
     : new Date(now.getFullYear(), now.getMonth() + 1, 0)
-  const cycleLabel = selectedWindow?.label || cycleStartingLabel(started)
-  const credit = PLAN_CREDIT[current] || PLAN_CREDIT.hobby
-  const quota = credit * TOKENS_PER_CREDIT
-  const overTokens = Math.max(0, tokenTotal - quota)
-  const onDemand = (overTokens / 1_000_000) * 2
-  const spendLimit = Number(localStorage.getItem('soumtok-spend-limit') || 50)
-  const renewAmount = current === 'hobby' ? '' : currentPlan.price
+  const renewAmount = unpaid ? '' : currentPlan.price
 
   return (
     <div className="space-y-3">
-      {current === 'hobby' && (
+      {unpaid && (
         <div className="save-banner flex flex-wrap items-center justify-between gap-3 rounded-xl px-4 py-3">
-          <p className="text-[13px] font-medium">Switch to annual billing and save 20%</p>
+          <p className="text-[13px] font-medium">Start at $5/mo — Everyday models included</p>
           <button
             type="button"
-            onClick={() => {
-              setCycle('annual')
-              setPlansOpen(true)
-            }}
+            onClick={() => checkout('start')}
             className="save-banner-btn"
           >
-            Upgrade now
+            Subscribe
           </button>
         </div>
       )}
@@ -585,11 +711,11 @@ export function BillingPanel({ plan }: { plan?: string }) {
             <p className="mt-1 text-[22px] font-medium tracking-[-0.03em]">
               {currentPlan.name}{' '}
               <span className="font-medium text-white/90">
-                {current === 'hobby' ? 'Free' : planPriceLine(currentPlan)}
+                {unpaid ? 'Subscribe' : planPriceLine(currentPlan)}
               </span>
             </p>
             <p className="mt-3 text-[13px] leading-6 text-white/70">{currentPlan.explain}</p>
-            {current !== 'hobby' && (
+            {!unpaid && (
               <p className="mt-3 text-[13px] leading-6 text-white/45">
                 Your {planCycle === 'annual' ? 'annual' : 'monthly'} cycle started{' '}
                 {started.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}
@@ -636,19 +762,6 @@ export function BillingPanel({ plan }: { plan?: string }) {
           groupTotal={otherTotal}
           allTotal={tokenTotal}
         />
-      </Card>
-
-      <Card>
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <p className="text-[15px] font-medium">On-demand usage</p>
-          <span className="text-[12px] text-white/40">{cycleLabel}</span>
-        </div>
-        <p className="mt-4 text-[22px] font-medium tracking-[-0.03em]">
-          ${onDemand.toFixed(2)} <span className="text-[14px] font-normal text-white/40">/ ${spendLimit.toFixed(2)}</span>
-        </p>
-        <p className="mt-2 text-[13px] text-white/45">
-          Usage past your included limit is billed here as on-demand.
-        </p>
       </Card>
 
       <Card>

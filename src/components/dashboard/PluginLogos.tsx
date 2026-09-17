@@ -1,122 +1,52 @@
-const LIGHT = new Set([
-  'notion',
-  'github',
-  'google-drive',
-  'google-calendar',
-  'gmail',
-  'slack',
-  'supabase',
-  'vercel',
-  'atlassian',
-  'gitlab',
-  'hubspot',
-  'asana',
-  'salesforce',
-])
-const TINT: Record<string, string> = {
-  datadog: 'bg-[#632CA6] invert',
-  linear: 'bg-[#5E6AD2] invert',
-  sentry: 'bg-[#362D59]',
-}
-const OFFICIAL_SRC: Record<string, string> = {
-  canva: 'https://static.canva.com/static/images/android-192x192-2.png',
-  huggingface: 'https://huggingface.co/front/assets/huggingface_logo-noborder.svg',
-  context7: 'https://context7.com/brand/context7-icon-dark.svg',
-  salesforce: 'https://a.sfdcstatic.com/shared/images/c360-nav/salesforce-no-type-logo.svg',
-  neon: 'https://neon.com/brand/neon-logomark-dark-color.svg',
-  hubspot: 'https://www.hubspot.com/hubfs/HubSpot_Logos/HubSpot-Inversed-Favicon.png',
-}
+import { useEffect, useMemo, useState } from 'react'
+import { catalogPlugin } from '../../../shared/plugins'
+import {
+  PLUGIN_LOGO_COLOR_BRAND,
+  PLUGIN_LOGO_FILL,
+  pluginLogoCandidatesForId,
+} from '../../../shared/pluginLogos'
 
-export function PluginLogo({ id, className = 'h-9 w-9' }: { id: string; className?: string }) {
-  const src = OFFICIAL_SRC[id] || `/logos/plugins/${id}.svg`
-  const box = `${className} shrink-0 overflow-hidden rounded-lg grid place-items-center`
-  if (LIGHT.has(id)) {
-    return (
-      <span className={`${box} bg-white p-1.5`}>
-        <img src={src} alt="" className="h-full w-full object-contain" />
-      </span>
-    )
+export function PluginLogo({
+  id,
+  logo,
+  logos,
+  className = 'h-9 w-9',
+}: {
+  id: string
+  logo?: string | null
+  logos?: string[]
+  className?: string
+}) {
+  const meta = catalogPlugin(id)
+  const candidates = useMemo(() => {
+    const fromApi = [logo, ...(logos || [])].filter(Boolean) as string[]
+    const chain = fromApi.length ? [...fromApi, ...pluginLogoCandidatesForId(id)] : pluginLogoCandidatesForId(id)
+    return [...new Set(chain)]
+  }, [id, logo, logos])
+  const [idx, setIdx] = useState(0)
+
+  useEffect(() => {
+    setIdx(0)
+  }, [id, candidates.join('\0')])
+
+  const src = candidates[idx]
+  const letter =
+    (meta?.name || id).replace(/^[^a-zA-Z0-9]+/, '').slice(0, 1).toUpperCase() || '?'
+  const box = `${className} plugin-logo shrink-0`
+  const fill = PLUGIN_LOGO_FILL.has(id) || PLUGIN_LOGO_COLOR_BRAND.has(id) || id === 'higgsfield'
+  const mod = [fill ? 'plugin-logo-fill' : '', id === 'higgsfield' ? 'plugin-logo-dark' : ''].filter(Boolean).join(' ')
+
+  if (!src || idx >= candidates.length) {
+    return <span className={`${box} plugin-logo-letter`}>{letter}</span>
   }
-  if (id === 'granola') {
-    return (
-      <span className={`${box} bg-[#111110]`}>
-        <img src="https://github.com/granola-inc.png" alt="" className="h-full w-full object-cover" />
-      </span>
-    )
-  }
-  if (id === 'figma') {
-    return (
-      <span className={`${box} bg-[#111110] p-1.5`}>
-        <img src={src} alt="" className="h-full w-full object-contain" />
-      </span>
-    )
-  }
-  if (id === 'sentry') {
-    return (
-      <span className={`${box} bg-[#362D59] p-1.5`}>
-        <img src={src} alt="" className="h-full w-full object-contain invert" />
-      </span>
-    )
-  }
-  if (id === 'stripe') {
-    return (
-      <span className={`${box} bg-[#635BFF] p-1.5`}>
-        <img src={src} alt="" className="h-full w-full object-contain invert" />
-      </span>
-    )
-  }
-  if (id === 'postman') {
-    return (
-      <span className={`${box} bg-[#FF6C37] p-1.5`}>
-        <img src={src} alt="" className="h-full w-full object-contain invert" />
-      </span>
-    )
-  }
-  if (id === 'firebase') {
-    return (
-      <span className={`${box} bg-[#1a1408] p-1.5`}>
-        <img src={src} alt="" className="h-full w-full object-contain" />
-      </span>
-    )
-  }
-  if (id === 'neon') {
-    return (
-      <span className={`${box} bg-[#0b0b0a]`}>
-        <img src={src} alt="" className="h-full w-full object-contain" />
-      </span>
-    )
-  }
-  if (id === 'context7' || id === 'canva' || id === 'huggingface') {
-    return (
-      <span className={`${box} bg-[#111110]`}>
-        <img src={src} alt="" className="h-full w-full object-contain" />
-      </span>
-    )
-  }
-  if (id === 'cloudflare') {
-    return (
-      <span className={`${box} bg-[#1a120c] p-1`}>
-        <img src={src} alt="" className="h-full w-full object-contain" />
-      </span>
-    )
-  }
-  if (TINT[id]) {
-    return (
-      <span className={`${box} ${TINT[id].split(' ')[0]} p-1.5`}>
-        <img src={src} alt="" className="h-full w-full object-contain invert" />
-      </span>
-    )
-  }
+
   return (
-    <span className={`${box} bg-white/[0.06] text-[12px] font-medium text-white/80`}>
+    <span className={`${box} ${mod}`.trim()} title={meta?.name || id}>
       <img
         src={src}
         alt=""
-        className="h-full w-full object-contain p-1.5"
-        onError={(event) => {
-          event.currentTarget.style.display = 'none'
-          event.currentTarget.parentElement!.textContent = id.slice(0, 1).toUpperCase()
-        }}
+        decoding="async"
+        onError={() => setIdx((current) => current + 1)}
       />
     </span>
   )

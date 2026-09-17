@@ -447,10 +447,194 @@ html[data-theme="light"] .account-menu {
   box-shadow: 0 16px 48px rgba(23, 22, 20, 0.12);
 }
 
-html[data-theme="light"] .logo-mark,
-html[data-theme="light"] .brand-logo {
+html[data-theme="light"] .logo-mark {
   filter: brightness(0);
   opacity: 1;
+}
+
+html[data-theme="light"] .brand-logo {
+  filter: none;
+  opacity: 1;
+}
+
+/* —— Studio + Test Hub: light platform theme —— */
+html[data-theme="light"] .test-hub-panel {
+  --th-shell-bg: var(--app-bg);
+  --th-chrome-bg: #ffffff;
+  --th-tabs-bg: var(--app-recessed);
+  --th-surface: #ffffff;
+  --th-surface-muted: var(--app-recessed);
+  --th-line: rgba(11, 11, 10, 0.14);
+  --th-text: #0b0b0a;
+  --th-text-muted: rgba(11, 11, 10, 0.58);
+  --th-accent: #0066b8;
+  --th-accent-soft: rgba(0, 102, 184, 0.1);
+  --th-accent-border: rgba(0, 102, 184, 0.32);
+  background: var(--th-shell-bg) !important;
+  color: var(--th-text);
+}
+
+html[data-theme="dark"] .test-hub-panel {
+  --th-shell-bg: #0e0e0d;
+  --th-chrome-bg: linear-gradient(180deg, #252526 0%, #1f1f1f 100%);
+  --th-tabs-bg: #1a1a1a;
+  --th-surface: #141413;
+  --th-surface-muted: #141413;
+  --th-line: rgba(255, 255, 255, 0.08);
+  --th-text: #f3f3f3;
+  --th-text-muted: rgba(255, 255, 255, 0.45);
+  --th-accent: #007acc;
+  --th-accent-soft: rgba(0, 122, 204, 0.16);
+  --th-accent-border: rgba(0, 122, 204, 0.4);
+  background: var(--th-shell-bg);
+  color: var(--th-text);
+}
+
+.test-hub-panel .th-chrome-header {
+  background: var(--th-chrome-bg);
+  border-color: var(--th-line) !important;
+}
+
+.test-hub-panel .th-chrome-title {
+  color: var(--th-text);
+}
+
+.test-hub-panel .th-workspace-tabs {
+  background: var(--th-tabs-bg) !important;
+  border-color: var(--th-line) !important;
+}
+
+html[data-theme="light"] .test-hub-panel .th-chat-pane {
+  border-color: var(--th-line) !important;
+}
+
+html[data-theme="light"] .test-hub-panel .th-chat-pane [class*="141413"],
+html[data-theme="light"] .test-hub-panel .th-chat-pane [class*="181816"] {
+  background: var(--th-surface) !important;
+  border-color: var(--th-line) !important;
+  box-shadow: 0 1px 0 rgba(11, 11, 10, 0.04);
+}
+
+html[data-theme="light"] .test-hub-panel .th-chat-pane [class*="text-white"],
+html[data-theme="light"] .test-hub-panel .th-chrome-header [class*="text-white"],
+html[data-theme="light"] .test-hub-panel .th-workspace-tabs [class*="text-white"] {
+  color: var(--th-text) !important;
+}
+
+html[data-theme="light"] .test-hub-panel .th-chat-pane [class*="text-white/75"],
+html[data-theme="light"] .test-hub-panel .th-chat-pane [class*="text-white/70"],
+html[data-theme="light"] .test-hub-panel .th-chrome-header [class*="text-white/40"],
+html[data-theme="light"] .test-hub-panel .th-workspace-tabs [class*="text-white/60"] {
+  color: var(--th-text-muted) !important;
+}
+
+html[data-theme="light"] .test-hub-panel .th-chat-pane [class*="text-white/40"],
+html[data-theme="light"] .test-hub-panel .th-chat-pane [class*="text-white/35"],
+html[data-theme="light"] .test-hub-panel .th-chat-pane [class*="text-white/30"] {
+  color: rgba(11, 11, 10, 0.45) !important;
+}
+
+html[data-theme="light"] .test-hub-panel .th-chat-pane [class*="border-white"],
+html[data-theme="light"] .test-hub-panel .th-chrome-header [class*="border-white"],
+html[data-theme="light"] .test-hub-panel .th-workspace-tabs [class*="border-white"] {
+  border-color: var(--th-line) !important;
+}
+
+html[data-theme="light"] .test-hub-panel .th-workspace-tabs [class*="007acc"] {
+  border-color: var(--th-accent-border) !important;
+  background: var(--th-accent-soft) !important;
+}
+
+html[data-theme="light"] .test-hub-panel .th-workspace-tabs [class*="f0f7ff"] {
+  color: var(--th-accent) !important;
+}
+
+html[data-theme="light"] .test-hub-panel .th-chrome-header [class*="007acc"] {
+  border-color: var(--th-accent-border) !important;
+  background: var(--th-accent-soft) !important;
+  color: var(--th-accent) !important;
+}
+
+html[data-theme="light"] .test-hub-panel .th-chrome-header [class*="eaf4ff"] {
+  color: var(--th-accent) !important;
+}
+
+html[data-theme="light"] .test-hub-panel .th-chrome-header button[class*="white/"] {
+  background: rgba(11, 11, 10, 0.04) !important;
+  border-color: var(--th-line) !important;
+  color: rgba(11, 11, 10, 0.72) !important;
+}
+
+html[data-theme="light"] .test-hub-panel .th-chrome-header button[class*="white/"]:hover {
+  background: rgba(11, 11, 10, 0.08) !important;
+  color: var(--th-text) !important;
+}
+
+html[data-theme="light"] .test-hub-panel .th-chrome-header [class*="bg-black"] {
+  background: var(--th-surface-muted) !important;
+  border-color: var(--th-line) !important;
+}
+
+html[data-theme="light"] .test-hub-panel aside[class*="0c0c0b"] {
+  background: var(--app-recessed) !important;
+  border-color: var(--th-line) !important;
+}
+
+html[data-theme="light"] .test-hub-panel aside [class*="text-white/35"] {
+  color: rgba(11, 11, 10, 0.42) !important;
+}
+
+html[data-theme="light"] .studio-shell aside {
+  box-shadow: 1px 0 0 var(--app-line);
+}
+
+html[data-theme="light"] .studio-shell .dash-nav-item.is-active {
+  background: rgba(11, 11, 10, 0.08) !important;
+  font-weight: 600;
+}
+
+html[data-theme="light"] .studio-shell [class*="text-white/35"],
+html[data-theme="light"] .studio-shell [class*="text-white/30"] {
+  color: rgba(11, 11, 10, 0.42) !important;
+}
+
+html[data-theme="light"] .studio-shell [class*="text-white/55"] {
+  color: rgba(11, 11, 10, 0.62) !important;
+}
+
+html[data-theme="light"] .studio-shell button[class*="text-white/45"]:hover {
+  color: rgba(11, 11, 10, 0.85) !important;
+  background: rgba(11, 11, 10, 0.06) !important;
+}
+
+html[data-theme="light"] .theme-app:not(.keep-dark) > aside .brand-logo,
+html[data-theme="light"] .theme-app.studio-shell .brand-logo {
+  filter: none !important;
+  opacity: 1 !important;
+}
+
+html[data-theme="light"] .test-hub-panel [class*="007acc"][class*="text-white"],
+html[data-theme="light"] .test-hub-panel button[class*="bg-[#007acc]"] {
+  color: #fff !important;
+}
+
+html[data-theme="light"] .test-hub-panel .th-chrome-header [class*="007acc/28"],
+html[data-theme="light"] .test-hub-panel .th-chrome-header [class*="007acc/25"] {
+  color: var(--th-accent) !important;
+}
+
+/* Dashboard panels — clearer cards on light background */
+html[data-theme="light"] .theme-app:not(.keep-dark) main {
+  background: var(--app-bg);
+}
+
+html[data-theme="light"] .theme-app:not(.keep-dark) [class*="141413"],
+html[data-theme="light"] .theme-app:not(.keep-dark) [class*="161614"] {
+  box-shadow: 0 1px 0 rgba(11, 11, 10, 0.04);
+}
+
+html[data-theme="light"] .theme-app:not(.keep-dark) header[class*="border-white"] {
+  background: #fff !important;
 }
 
 html[data-surface="marketing"] .logo-mark,
@@ -755,6 +939,45 @@ body {
   }
 }
 
+.plugin-logo {
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.plugin-logo img {
+  width: 70%;
+  height: 70%;
+  object-fit: contain;
+}
+
+.plugin-logo-fill img {
+  object-fit: cover;
+  width: 100%;
+  height: 100%;
+}
+
+/* White tile — show brand colors as-is (same as desktop conn-logo-fill). */
+.plugin-logo-mono img {
+  filter: none;
+}
+
+.plugin-logo-dark {
+  background: #0b0b0b;
+}
+
+.plugin-logo-letter {
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
 .loader-ring {
   display: inline-block;
   border-radius: 999px;
@@ -983,6 +1206,48 @@ canvas {
   border-right: 1px solid var(--app-line, rgba(255, 255, 255, 0.08));
   padding-top: max(12px, env(safe-area-inset-top));
   padding-bottom: max(12px, env(safe-area-inset-bottom));
+}
+
+/* Studio workbench tabs — scroll on narrow screens */
+.bench-tab-row {
+  overflow-x: auto;
+  flex-wrap: nowrap;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+
+.bench-tab-row::-webkit-scrollbar {
+  display: none;
+}
+
+/* Test Hub — phone layout */
+.test-hub-panel .th-mobile-view-tabs {
+  background: var(--th-tabs-bg, #1a1a1a);
+}
+
+.test-hub-panel .th-mobile-view-tabs button {
+  flex: 1;
+  min-width: 0;
+}
+
+@media (max-width: 1023px) {
+  .test-hub-panel .th-chrome-header {
+    row-gap: 0;
+  }
+
+  .test-hub-panel .th-project-actions {
+    flex: 1 1 auto;
+    justify-content: flex-end;
+    min-width: 0;
+  }
+}
+
+.studio-shell .composer-mode-row {
+  scrollbar-width: none;
+}
+
+.studio-shell .composer-mode-row::-webkit-scrollbar {
+  display: none;
 }
 
 @supports (padding: max(0px)) {

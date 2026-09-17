@@ -74,3 +74,13 @@ export function watchTheme() {
   media.addEventListener('change', onSystem)
   return () => media.removeEventListener('change', onSystem)
 }
+
+export function isMarketingSurface() {
+  return document.documentElement.dataset.surface === 'marketing'
+}
+
+/** Resolved light/dark for brand assets (respects marketing always-dark). */
+export function brandTheme(): 'light' | 'dark' {
+  if (isMarketingSurface()) return 'dark'
+  return document.documentElement.dataset.theme === 'light' ? 'light' : 'dark'
+}

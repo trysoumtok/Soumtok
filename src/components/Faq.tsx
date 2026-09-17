@@ -8,7 +8,7 @@ export function Faq() {
           Cheap. Powerful. Africa’s #1 coding platform.
         </h2>
         <p className="mt-4 max-w-[520px] text-[15px] leading-7 text-white/50">
-          Start coding from $13.99 a month. The searches people actually type — answered straight.
+          Start coding from $5 a month. The searches people actually type — answered straight.
         </p>
         <dl className="mt-10 divide-y divide-white/[0.06] border-y border-white/[0.06]">
           {FAQ.map((item) => (

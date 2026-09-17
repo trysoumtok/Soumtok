@@ -21,11 +21,11 @@ export function parseSandboxCommand(raw: string) {
   const head = parts[0].toLowerCase()
   const sub = (parts[1] || '').toLowerCase()
   if (head === 'npm') {
-    if (!['test', 'run', 'install', 'i', 'ci'].includes(sub)) return null
+    if (!['test', 'run', 'install', 'i', 'ci', '--version', '-v'].includes(sub)) return null
     if (sub === 'run' && !/^test$/i.test(parts[2] || '')) return null
     if (parts.includes('-g') || parts.includes('--global') || parts.includes('publish')) return null
   }
-  if (head === 'npx' && !/^tsc$/i.test(parts[1] || '')) return null
+  if (head === 'npx' && !/^(tsc|--version|-v)$/i.test(parts[1] || '')) return null
   if (head === 'git' && !/^(status|log|diff|show|add|commit|clone)$/i.test(parts[1] || '')) return null
   if (head === 'git' && /^commit$/i.test(parts[1] || '') && !parts.some((part) => part === '-m' || part.startsWith('-m'))) {
     return null

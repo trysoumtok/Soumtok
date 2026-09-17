@@ -1,6 +1,7 @@
 import { cloneElement, isValidElement, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactElement, type ReactNode, type RefObject } from 'react'
-import type { AgentEvent } from '../../../shared/agent'
-import { previewStamp } from '../../../shared/preview'
+import { previewFromFiles, type AgentEvent } from '../../../shared/agent'
+import { previewStamp, slimSiteFiles } from '../../../shared/preview'
+import { injectPreviewErrorBridge } from '../../../shared/testHub'
 import { filesFromClipboard } from '../../lib/chatFiles'
 import { Bone } from '../Loaders'
 import { CodeEditor } from './CodeEditor'
@@ -395,6 +396,7 @@ function BrowserChrome({
   siteTitle,
   html,
   files,
+  origin,
   onMoveWindow,
   onClose,
   onMin,
@@ -414,46 +416,46 @@ function BrowserChrome({
   onPasteFiles?: (files: File[]) => void
 }) {
   const frame = useRef<HTMLIFrameElement>(null)
-  const stamp = previewStamp(html || '', files || {})
-  const seq = useRef(0)
-  const [path, setPath] = useState('')
-  const [served, setServed] = useState('')
+  const page = useMemo(() => {
+    const built = String(html || '').trim()
+    if (built) return built
+    if (!Object.keys(files || {}).length) return ''
+    return previewFromFiles(files || {}, '')
+  }, [html, files])
+  const srcDoc = useMemo(() => (page ? injectPreviewErrorBridge(page) : ''), [page])
+  const stamp = previewStamp(page, files || {})
+  const publishSeq = useRef(0)
+  const [publishedPath, setPublishedPath] = useState('')
+  const [publishBusy, setPublishBusy] = useState(false)
   const [bust, setBust] = useState(0)
-  const href = path && served ? `${window.location.origin}${path}${path.includes('?') ? '&' : '?'}v=${served}.${bust}` : ''
+  const host = origin || (typeof window !== 'undefined' ? window.location.origin : '')
+  const displayUrl = page ? `${host.replace(/^https?:\/\//, '')}/preview` : ''
+  const externalHref =
+    publishedPath && host ? `${host}${publishedPath}${publishedPath.includes('?') ? '&' : '?'}v=${stamp}.${bust}` : ''
   const label = siteTitle || 'Preview'
-  const refreshing = Boolean(stamp) && served !== stamp
-  const showSkeleton = !href
+  const showSkeleton = !srcDoc
 
-  useEffect(() => {
-    if (!html && !Object.keys(files || {}).length) {
-      setPath('')
-      setServed('')
-      return
-    }
-    const next = ++seq.current
-    const ac = new AbortController()
-    const timer = window.setTimeout(() => {
-      void fetch('/api/studio/site', {
+  async function publishForExternalTab() {
+    if (!page.trim()) return ''
+    const next = ++publishSeq.current
+    setPublishBusy(true)
+    try {
+      const res = await fetch('/api/studio/site', {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        signal: ac.signal,
-        body: JSON.stringify({ html: html || '', files: files || {}, seq: next }),
+        body: JSON.stringify({ html: page, files: slimSiteFiles(files || {}), seq: next }),
       })
-        .then((res) => res.json())
-        .then((data: { path?: string }) => {
-          if (next !== seq.current || !data.path) return
-          setPath(data.path)
-          setServed(stamp)
-        })
-        .catch(() => undefined)
-    }, 80)
-    return () => {
-      ac.abort()
-      window.clearTimeout(timer)
+      const data = (await res.json()) as { path?: string }
+      if (next !== publishSeq.current || !data.path) return ''
+      setPublishedPath(data.path)
+      return `${host}${data.path}${data.path.includes('?') ? '&' : '?'}v=${stamp}.${bust}`
+    } catch {
+      return ''
+    } finally {
+      if (next === publishSeq.current) setPublishBusy(false)
     }
-    // stamp already covers html + files bodies
-  }, [stamp])
+  }
 
   useEffect(() => {
     const node = frame.current
@@ -485,9 +487,11 @@ function BrowserChrome({
         /* ignore */
       }
     }
-  }, [href, onPasteFiles])
+  }, [srcDoc, onPasteFiles])
 
-  function openOutside() {
+  async function openOutside() {
+    if (!page.trim()) return
+    const href = externalHref || (await publishForExternalTab())
     if (!href) return
     window.open(href, '_blank', 'noopener,noreferrer')
   }
@@ -528,33 +532,29 @@ function BrowserChrome({
         </button>
         <div className="mx-1 flex h-8 min-w-0 flex-1 items-center gap-2 rounded-full bg-[#f1f3f4] px-3">
           <span className="text-[11px] text-[#5f6368]">ⓘ</span>
-          <span className="min-w-0 flex-1 truncate text-[13px] text-[#202124]">{href.replace(/^https?:\/\//, '') || 'Preview'}</span>
+          <span className="min-w-0 flex-1 truncate text-[13px] text-[#202124]">{displayUrl || 'Preview'}</span>
         </div>
         <button
           type="button"
-          disabled={!href}
-          onClick={openOutside}
+          disabled={!page.trim() || publishBusy}
+          onClick={() => void openOutside()}
           className="mr-1 shrink-0 rounded-full bg-[#1a73e8] px-3 py-1.5 text-[12px] font-medium text-white disabled:opacity-40"
         >
-          Open in Chrome
+          {publishBusy ? 'Publishing…' : 'Open in Chrome'}
         </button>
       </div>
       <div className="relative min-h-0 flex-1 overflow-hidden bg-white" aria-busy={showSkeleton}>
-        {href ? (
+        {srcDoc ? (
           <iframe
-            key={`${path}-${served}-${bust}`}
+            key={`${stamp}-${bust}`}
             ref={frame}
             title={label}
-            src={href}
-            className={`h-full w-full border-0 bg-white ${showSkeleton ? 'opacity-0' : 'opacity-100'}`}
+            sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+            srcDoc={srcDoc}
+            className="h-full w-full border-0 bg-white"
           />
         ) : null}
-        {showSkeleton || !href ? <PreviewPageSkeleton /> : null}
-        {refreshing && href ? (
-          <div className="pointer-events-none absolute inset-x-0 top-0 z-10 h-0.5 overflow-hidden bg-[#1a73e8]/20">
-            <div className="h-full w-1/3 animate-pulse bg-[#1a73e8]" />
-          </div>
-        ) : null}
+        {showSkeleton ? <PreviewPageSkeleton /> : null}
       </div>
     </div>
   )

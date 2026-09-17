@@ -91,6 +91,13 @@ export function isGeneralOrSoumtokChat(text: string) {
   }
   if (/\b(src\/|apps\/|\.tsx?\b|\.jsx?\b)\b/.test(t)) return false
   if (
+    /\b(add|create|build|make|more|new)\b/.test(t) &&
+    /\b(page|pages|site|website|landing|nav|header|footer|section)\b/.test(t)
+  ) {
+    return false
+  }
+  if (/\b(sign[\s-]?in|login|register|sign[\s-]?up|auth)\s+page\b/.test(t)) return false
+  if (
     /\b(soumtok|dashboard|billing|invoice|api key|connector|connectors|mcp|extension|claude code|sign in|sign-in|open folder|local tools|how do i|where (is|do)|what is soumtok|neon|lakebase|branch)\b/.test(
       t,
     )
@@ -306,20 +313,16 @@ export function analyzeUserRequest(
     }
   }
 
-  if (isGeneralOrSoumtokChat(repaired)) {
+  if (follow === 'question' || (follow !== 'task' && looksLikeQuestion(repaired))) {
+    const meaning = /name|heading|title|brand/i.test(repaired)
+      ? 'Answer with the current project name / heading from the existing files. Do not edit anything.'
+      : 'Answer the question from the existing project and this chat. Do not start a new site or rewrite files.'
     return {
-      kind: 'chat',
-      meaning: repaired || 'General conversation or Soumtok help.',
-      do: [
-        'Understand the question first, then answer from Soumtok product knowledge and this chat',
-        'Use tools only if they explicitly asked about files in their open project',
-      ],
-      dont: [
-        'Force a repo scan or list_dir for casual chat',
-        'Invent a coding task',
-        'Say you cannot access Soumtok docs — use SOUMTOK PRODUCT GUIDE in context',
-      ],
-      thought: 'Understand first, then answer — no automatic code research.',
+      kind: 'question',
+      meaning,
+      do: ['Understand the question first, then read only the files needed and reply with the fact they asked for'],
+      dont: ['Write or rewrite files', 'Say Preview is ready', 'Treat this as a rename'],
+      thought: 'They asked a question about the current project — I’ll answer, not edit.',
       repaired,
       keep,
     }
@@ -334,21 +337,6 @@ export function analyzeUserRequest(
       thought: `They asked to connect ${plugin.name}.`,
       repaired,
       connectProvider: plugin.id,
-    }
-  }
-
-  if (follow === 'question' || (follow !== 'task' && looksLikeQuestion(repaired))) {
-    const meaning = /name|heading|title|brand/i.test(repaired)
-      ? 'Answer with the current project name / heading from the existing files. Do not edit anything.'
-      : 'Answer the question from the existing project and this chat. Do not start a new site or rewrite files.'
-    return {
-      kind: 'question',
-      meaning,
-      do: ['Understand the question first, then read only the files needed and reply with the fact they asked for'],
-      dont: ['Write or rewrite files', 'Say Preview is ready', 'Treat this as a rename'],
-      thought: 'They asked a question about the current project — I’ll answer, not edit.',
-      repaired,
-      keep,
     }
   }
 
@@ -409,7 +397,10 @@ export function analyzeUserRequest(
     }
   }
 
-  if (follow === 'task' || (hasFiles && /\b(add|fix|change|update|edit|make)\b/i.test(repaired))) {
+  if (
+    follow === 'task' ||
+    (hasFiles && /\b(add|fix|change|update|edit|make)\b/i.test(repaired) && follow !== 'question')
+  ) {
     const meaning = repaired
     const shot = hasImage && hasFiles
     const logo = wantsRealLogo(repaired)
@@ -480,6 +471,25 @@ export function analyzeUserRequest(
           : `Analyzed: ${meaning.slice(0, 160)}`,
       repaired,
       where: where || undefined,
+      keep,
+    }
+  }
+
+  if (isGeneralOrSoumtokChat(repaired)) {
+    return {
+      kind: 'chat',
+      meaning: repaired || 'General conversation or Soumtok help.',
+      do: [
+        'Understand the question first, then answer from Soumtok product knowledge and this chat',
+        'Use tools only if they explicitly asked about files in their open project',
+      ],
+      dont: [
+        'Force a repo scan or list_dir for casual chat',
+        'Invent a coding task',
+        'Say you cannot access Soumtok docs — use SOUMTOK PRODUCT GUIDE in context',
+      ],
+      thought: 'Understand first, then answer — no automatic code research.',
+      repaired,
       keep,
     }
   }

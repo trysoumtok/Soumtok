@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useSession } from '../lib/auth-client'
 import { navigate, openTab } from '../lib/nav'
+import { BrandLockup } from './ui'
 
 export function SiteHeader({ active }: { active: 'docs' | 'help' | 'contact' | 'none' }) {
   const { data: session } = useSession()
@@ -10,7 +11,7 @@ export function SiteHeader({ active }: { active: 'docs' | 'help' | 'contact' | '
     <header className="sticky top-0 z-40 border-b border-white/[0.06] bg-[#0b0b0a]/95 backdrop-blur">
       <div className="mx-auto flex h-14 max-w-[1280px] items-center gap-3 px-4 md:gap-4 md:px-6">
         <button type="button" className="shrink-0" onClick={() => navigate('/')} aria-label="Soumtok">
-          <img src="/images/soumtok-lockup.png" alt="Soumtok" className="brand-logo h-5 w-auto max-w-[140px]" />
+          <BrandLockup className="h-5 w-auto max-w-[140px]" />
         </button>
         <nav className="hidden items-center gap-5 text-[13px] md:flex">
           <NavLink href="/docs" label="Docs" on={active === 'docs'} />

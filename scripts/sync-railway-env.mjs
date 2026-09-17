@@ -45,7 +45,9 @@ const needed = [
   'SMTP_HOST',
   'SMTP_PORT',
   'SMTP_FROM',
-  'RESEND_API_KEY',
+  'NEON_AUTH_BASE_URL',
+  'NEON_MAIL_URL',
+  'NEON_MAIL_SECRET',
 ]
 
 const mode = process.argv[1] && process.argv.includes('--set') ? 'set' : process.argv.includes('--set') ? 'set' : 'check'

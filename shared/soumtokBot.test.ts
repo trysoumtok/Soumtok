@@ -10,7 +10,7 @@ import {
 import { prepareDesktopAgentTurn } from './desktopAgent.ts'
 
 test('parse agent driver', () => {
-  assert.equal(parseAgentDriver('bot'), 'bot')
+  assert.equal(parseAgentDriver('bot'), 'ide')
   assert.equal(parseAgentDriver('ide'), 'ide')
   assert.equal(parseAgentDriver('other'), 'ide')
 })

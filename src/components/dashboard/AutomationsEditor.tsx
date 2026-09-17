@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { GITHUB_APP_INSTALL_URL } from '../../../shared/githubApp.ts'
 import {
   completeStudio,
   createAutomation,
@@ -17,7 +18,7 @@ import {
   type GithubRepo,
   type InstalledPlugin,
 } from '../../lib/api'
-import { signIn } from '../../lib/auth-client'
+import { signInSocial } from '../../lib/auth-client'
 import { navigate } from '../../lib/nav'
 import { GithubIcon, SearchIcon } from './icons'
 import { PluginLogo } from './PluginLogos'
@@ -80,7 +81,7 @@ export function AutomationsEditor({ authorName }: { authorName: string }) {
   const [models, setModels] = useState<StudioModel[]>([])
   const [repos, setRepos] = useState<GithubRepo[]>([])
   const [githubConnected, setGithubConnected] = useState(false)
-  const [installUrl, setInstallUrl] = useState('https://github.com/apps/soumtok/installations/new')
+  const [installUrl, setInstallUrl] = useState(GITHUB_APP_INSTALL_URL)
   const [runs, setRuns] = useState<AutomationRun[]>([])
   const [status, setStatus] = useState('')
   const [busy, setBusy] = useState(false)
@@ -288,7 +289,7 @@ export function AutomationsEditor({ authorName }: { authorName: string }) {
   }
 
   async function connectGithub() {
-    await signIn.social({ provider: 'github', callbackURL: '/dashboard/studio/automations' })
+    await signInSocial({ provider: 'github', callbackURL: '/dashboard/studio/automations' })
   }
 
   useEffect(() => {

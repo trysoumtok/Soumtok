@@ -74,7 +74,7 @@ export function Frontier() {
           <article id="pay">
             <h3 className="text-[20px] font-semibold">Pay the way you already pay</h3>
             <p className="mt-3 text-[14px] leading-6 text-white/50">
-              Trial is free. Pro starts at $13.99. Checkout in Kenyan shillings on M-Pesa, or USD
+              Start at $5/mo. Pro is $20 with dual pools. Checkout in Kenyan shillings on M-Pesa, or USD
               on PayPal and card. Receipts download as PDF.
             </p>
             <div className="mt-4">

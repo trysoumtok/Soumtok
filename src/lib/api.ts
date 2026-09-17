@@ -1263,6 +1263,8 @@ export async function streamStudio(
     onResult?: (result: { name: string; ok: boolean; text: string; files?: Record<string, string>; command?: string }) => void
     onTools?: (tools: { name: string; args: Record<string, string> }[]) => void
     onProgress?: (calls: { name: string; path?: string; chars: number; content?: string }[]) => void
+    onPing?: () => void
+    onConnected?: (info: { model?: string; provider?: string }) => void
   },
 ): Promise<StudioRun & { files?: Record<string, string> }> {
   const res = await fetch('/api/studio/complete/stream', {
@@ -1326,6 +1328,10 @@ export async function streamStudio(
         error?: string
         done?: boolean
         reset?: boolean
+        ping?: boolean
+        connected?: boolean
+        model?: string
+        provider?: string
         round?: number
         text?: string
         tools?: { name: string; args: Record<string, string> }[]
@@ -1343,6 +1349,8 @@ export async function streamStudio(
         continue
       }
       if (payload.error) throw new Error(payload.error)
+      if (payload.ping) opts?.onPing?.()
+      if (payload.connected) opts?.onConnected?.({ model: payload.model, provider: payload.provider })
       if (payload.reset) {
         text = ''
         onText('')
@@ -1375,26 +1383,60 @@ export async function streamTestHub(
   messages: { role: 'user' | 'assistant' | 'system'; content: string; files?: ChatFile[] }[],
   onText: (text: string) => void,
   signal?: AbortSignal,
-  opts?: { files?: Record<string, string> },
+  opts?: {
+    files?: Record<string, string>
+    onPing?: () => void
+    onConnected?: (info: { model?: string; provider?: string }) => void
+  },
 ): Promise<StudioRun & { files?: Record<string, string> }> {
-  const timeout = AbortSignal.timeout(180_000)
-  const merged =
-    signal ?
-      AbortSignal.any([signal, timeout])
-    : timeout
+  const timeout = AbortSignal.timeout(120_000)
+  const stallAbort = new AbortController()
+  let sawDelta = false
+  let stallTimer: ReturnType<typeof setTimeout> | undefined
+  const clearStall = () => {
+    clearTimeout(stallTimer)
+    stallTimer = undefined
+  }
+  const armStall = () => {
+    clearStall()
+    if (signal?.aborted) return
+    stallTimer = setTimeout(() => {
+      if (!sawDelta && !signal?.aborted) stallAbort.abort()
+    }, 45_000)
+  }
+  const onChunk = (text: string) => {
+    if (text.trim()) sawDelta = true
+    onText(text)
+  }
+  const merged = AbortSignal.any([
+    timeout,
+    stallAbort.signal,
+    ...(signal ? [signal] : []),
+  ])
   try {
-    return await streamStudio(model, messages, onText, merged, {
+    armStall()
+    const run = await streamStudio(model, messages, onChunk, merged, {
       agent: false,
       client: 'test-hub',
-      files: opts?.files,
+      onPing: () => {
+        opts?.onPing?.()
+        armStall()
+      },
+      onConnected: (info) => {
+        opts?.onConnected?.(info)
+        armStall()
+      },
     })
+    clearStall()
+    return run
   } catch (err) {
+    clearStall()
     if (signal?.aborted) throw err
+    if (sawDelta) throw err
     try {
-      const data = await completeStudio(model, messages, AbortSignal.timeout(180_000), {
+      const data = await completeStudio(model, messages, AbortSignal.timeout(120_000), {
         agent: false,
         client: 'test-hub',
-        files: opts?.files,
       })
       const text = data.text || ''
       onText(text)

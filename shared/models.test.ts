@@ -9,7 +9,9 @@ import {
   pickAutoModel,
   sortModelsByPower,
   soumtokCodingModels,
+  catalogModelId,
   upstreamModelId,
+  usageModelLabel,
   usesMaxCompletionTokens,
   IMAGE_MODEL,
   isImageModel,
@@ -92,6 +94,12 @@ test('Flash and Flash Vision call the multimodal DeepSeek API', () => {
   assert.equal(upstreamModelId('deepseek-v4-pro'), 'deepseek-v4-pro')
 })
 
+test('catalogModelId maps upstream usage rows back to Soumtok catalog ids', () => {
+  assert.equal(catalogModelId('deepseek-flash'), 'deepseek-v4-flash')
+  assert.equal(catalogModelId('deepseek-v4-flash'), 'deepseek-v4-flash')
+  assert.match(usageModelLabel('deepseek-flash'), /Flash/i)
+})
+
 test('OpenAI chat completions use max_completion_tokens', () => {
   assert.equal(usesMaxCompletionTokens('openai', 'gpt-5.6-sol'), true)
   assert.equal(usesMaxCompletionTokens('openai', 'gpt-4'), true)
@@ -141,9 +149,9 @@ test('GPT-5.6 Sol omits temperature', () => {
   assert.equal(openaiOmitsTemperature('gpt-5.6-sol-medium'), true)
 })
 
-test('still images default to Flux 2 Max on Replicate', () => {
+test('still images default to Flux 1.1 Pro on Replicate', () => {
   assert.equal(IMAGE_MODEL.provider, 'replicate')
-  assert.equal(IMAGE_MODEL.id, 'black-forest-labs/flux-2-max')
+  assert.equal(IMAGE_MODEL.id, 'black-forest-labs/flux-1.1-pro')
   assert.ok(isImageModel('black-forest-labs/flux-2-max'))
   assert.ok(isImageModel('black-forest-labs/flux-2-pro'))
   assert.ok(isImageModel('google/imagen-4-ultra'))

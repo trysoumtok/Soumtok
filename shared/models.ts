@@ -92,6 +92,11 @@ export function soumtokCodingModels() {
   return CODING_MODELS.filter((model) => SOUMTOK_CODING_PROVIDERS.includes(model.provider))
 }
 
+/** Studio/web model picker — Soumtok Agent is the harness, not a billed model row. */
+export function soumtokPickerModels() {
+  return soumtokCodingModels().filter((model) => model.id !== 'soumtok-agent')
+}
+
 const KEY_URL: Record<ModelProvider, string> = {
   openrouter: 'https://openrouter.ai/keys',
   openai: 'https://platform.openai.com/api-keys',
@@ -229,6 +234,20 @@ export function resolveModelId(id: string) {
 export function upstreamModelId(id: string) {
   const resolved = resolveModelId(id)
   return UPSTREAM_MODEL_IDS[resolved] || resolved
+}
+
+/** Normalize stored usage rows (upstream API ids) back to Soumtok catalog ids. */
+export function catalogModelId(id: string) {
+  const resolved = resolveModelId(id)
+  if (CODING_MODELS.some((model) => model.id === resolved)) return resolved
+  for (const [catalog, upstream] of Object.entries(UPSTREAM_MODEL_IDS)) {
+    if (upstream === resolved) return catalog
+  }
+  return resolved
+}
+
+export function usageModelLabel(id: string) {
+  return modelById(catalogModelId(id)).name
 }
 
 export function desktopCodingModels() {
@@ -523,6 +542,13 @@ export function usesMaxCompletionTokens(provider: ModelProvider, modelId: string
 
 export const IMAGE_MODELS = [
   {
+    id: 'black-forest-labs/flux-1.1-pro',
+    name: 'Flux 1.1 Pro',
+    provider: 'replicate',
+    strength: 'Fast, reliable stills for Studio builds. No video, no music.',
+    cost: '~$0.04 / image',
+  },
+  {
     id: 'black-forest-labs/flux-2-max',
     name: 'Flux 2 Max',
     provider: 'replicate',
@@ -542,13 +568,6 @@ export const IMAGE_MODELS = [
     provider: 'replicate',
     strength: 'Google photoreal stills when the backend is up.',
     cost: '~$0.08 / image',
-  },
-  {
-    id: 'black-forest-labs/flux-1.1-pro',
-    name: 'Flux 1.1 Pro',
-    provider: 'replicate',
-    strength: 'Older Flux stills. Kept for compatibility.',
-    cost: '~$0.04 / image',
   },
   {
     id: 'fal-ai/flux/schnell',

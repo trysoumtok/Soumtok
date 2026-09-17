@@ -29,15 +29,23 @@ if (process.platform === 'win32') {
   } catch {
     /* not running */
   }
+  try {
+    execSync(
+      'powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \\"Name = \'electron.exe\'\\" | Where-Object { $_.ExecutablePath -like \'*soumtok*desktop*\' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"',
+      { stdio: 'ignore' },
+    )
+  } catch {
+    /* none */
+  }
 }
 
 function run(cmd) {
   execSync(cmd, { cwd: desktopDir, stdio: 'inherit', env: process.env })
 }
 
-const stageDir = path.join(releaseDir, 'stage')
+const stageDir = path.join(releaseDir, `stage-${Date.now()}`)
 
-console.log('\n→ Packing Windows x64 app (once) → release/stage/')
+console.log(`\n→ Packing Windows x64 app (once) → ${path.relative(desktopDir, stageDir)}/`)
 run(`npx electron-builder --win --x64 --dir -c.directories.output="${stageDir.replace(/\\/g, '/')}"`)
 
 const prepackaged = path.join(stageDir, 'win-unpacked')
@@ -56,11 +64,13 @@ const nsisBuilds = [
 for (const build of nsisBuilds) {
   const artifactName = `Soumtok-Setup-${version}-win-${build.arch}-${build.suffix}.exe`
   console.log(`\n→ NSIS ${artifactName}`)
+  let pre = prepackaged
   if (build.arch === 'arm64') {
-    console.log('  (packing arm64 app dir first)')
-    run('npx electron-builder --win --arm64 --dir')
+    const armStage = path.join(releaseDir, `stage-arm64-${Date.now()}`)
+    console.log(`  (packing arm64 app dir first → ${path.relative(desktopDir, armStage)}/)`)
+    run(`npx electron-builder --win --arm64 --dir -c.directories.output="${armStage.replace(/\\/g, '/')}"`)
+    pre = path.join(armStage, 'win-arm64-unpacked')
   }
-  const pre = build.arch === 'arm64' ? path.join(releaseDir, 'win-arm64-unpacked') : prepackaged
   if (!fs.existsSync(pre)) {
     console.warn(`  ⊘ Skipped — ${pre} missing (build on ${build.arch} host or CI)`)
     continue

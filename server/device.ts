@@ -1,6 +1,7 @@
 import type { Hono } from 'hono'
 import { catalogPlugin } from '../shared/plugins.ts'
 import { connectorLoginUrl } from '../shared/connectors.ts'
+import { resolvePluginLogoUrls } from '../shared/pluginLogos.ts'
 import { formatUserCode, mintUserCode, normalizeUserCode } from '../shared/connectLinks.ts'
 import { pool } from './db.ts'
 import { env, hasGithub } from './env.ts'
@@ -30,12 +31,21 @@ function origin() {
   return env.betterAuthUrl.replace(/\/$/, '') || 'http://localhost:5173'
 }
 
+function logoFields(pluginId: string | null) {
+  if (!pluginId) return { logo: null as string | null, logos: [] as string[] }
+  const plugin = catalogPlugin(pluginId)
+  const logos = resolvePluginLogoUrls(pluginId, origin(), plugin?.logo)
+  return { logo: logos[0] || null, logos }
+}
+
 function publicPayload(row: DeviceRow, extra: Record<string, unknown> = {}) {
   const plugin = row.plugin_id ? catalogPlugin(row.plugin_id) : null
+  const provider = row.plugin_id || plugin?.id || 'service'
   return {
     code: formatUserCode(row.code),
-    provider: row.plugin_id || plugin?.id || 'service',
+    provider,
     name: plugin?.name || 'Service',
+    ...logoFields(provider !== 'service' ? provider : row.plugin_id),
     kind: row.kind,
     status: row.status,
     url: row.verification_uri || `${origin()}/connect/${formatUserCode(row.code)}`,

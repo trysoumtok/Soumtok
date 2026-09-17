@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { confirmTwoFactor } from '../lib/api'
 import { authClient } from '../lib/auth-client'
 
 function totpSecret(uri: string) {
@@ -51,14 +52,14 @@ export function SecuritySetup() {
       return
     }
     setBusy('verify')
-    const result = await authClient.twoFactor.verifyTotp({ code: totpCode })
-    setBusy('idle')
-    if (result.error) {
-      setError(result.error.message || 'That authenticator code is not valid')
-      return
+    try {
+      await confirmTwoFactor(totpCode)
+      setTwoFactorOn(true)
+      setNote('2-factor is on. Save the backup codes below.')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'That authenticator code is not valid')
     }
-    setTwoFactorOn(true)
-    setNote('2-factor is on. Save the backup codes below.')
+    setBusy('idle')
   }
 
   async function onAddPasskey() {

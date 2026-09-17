@@ -112,8 +112,15 @@ export type PayheroLookup = {
 
 function classifyPayheroStatus(raw: unknown): PayheroLookup['status'] {
   const status = String(raw || '').toLowerCase()
-  if (['success', 'successful', 'completed', 'complete', 'paid'].includes(status)) return 'success'
-  if (['failed', 'fail', 'cancelled', 'canceled', 'expired'].includes(status)) return 'failed'
+  const code = String(raw || '').trim()
+  if (['success', 'successful', 'completed', 'complete', 'paid', '0'].includes(status)) return 'success'
+  if (
+    ['failed', 'fail', 'cancelled', 'canceled', 'expired', '1032', '2001', '17', '26'].includes(status) ||
+    ['1032', '2001', '17', '26'].includes(code) ||
+    ['failed', 'fail', 'cancelled', 'canceled', 'expired'].some((word) => code.includes(word))
+  ) {
+    return 'failed'
+  }
   if (['queued', 'pending', 'processing', 'true'].includes(status)) return 'pending'
   return 'unknown'
 }
@@ -121,6 +128,13 @@ function classifyPayheroStatus(raw: unknown): PayheroLookup['status'] {
 function lookupFrom(data: Record<string, unknown>): PayheroLookup {
   const nested = (data.response || data.data || {}) as Record<string, unknown>
   const resultCode = String(nested.ResultCode ?? data.ResultCode ?? '')
+  if (['1', '1032', '2001', '17', '26'].includes(resultCode)) {
+    return {
+      status: 'failed',
+      reference: String(data.reference || nested.ExternalReference || nested.external_reference || ''),
+      checkoutId: String(data.CheckoutRequestID || nested.CheckoutRequestID || ''),
+    }
+  }
   if (resultCode === '0') {
     return {
       status: 'success',

@@ -37,8 +37,8 @@ export function botMaxToolRounds(driver: AgentDriver, defaultRounds = 42) {
   return driver === 'bot' ? Math.max(defaultRounds, 48) : defaultRounds
 }
 
-export function parseAgentDriver(raw: unknown): AgentDriver {
-  return raw === 'bot' ? 'bot' : 'ide'
+export function parseAgentDriver(_raw: unknown): AgentDriver {
+  return 'ide'
 }
 
 export const AGENT_DRIVER_STORAGE_KEY = 'soumtok-agent-driver'
@@ -51,13 +51,13 @@ export function readStoredAgentDriver(): AgentDriver {
   }
 }
 
-export function writeStoredAgentDriver(driver: AgentDriver) {
+export function writeStoredAgentDriver(_driver: AgentDriver) {
   try {
-    localStorage.setItem(AGENT_DRIVER_STORAGE_KEY, driver)
+    localStorage.setItem(AGENT_DRIVER_STORAGE_KEY, 'ide')
   } catch {
     /* ignore */
   }
   if (typeof window !== 'undefined') {
-    window.dispatchEvent(new CustomEvent('soumtok-agent-driver', { detail: driver }))
+    window.dispatchEvent(new CustomEvent('soumtok-agent-driver', { detail: 'ide' }))
   }
 }

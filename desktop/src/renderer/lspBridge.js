@@ -47,14 +47,31 @@
     host?.querySelector('.editor-lsp-banner')?.remove()
   }
 
+  function languageExtInstalled(hint) {
+    const wb = window.__soumtokWorkbench
+    const id = String(hint?.id || '').toLowerCase()
+    if (!id) return false
+    if (wb?.state?.installedExtById?.get(id)) return true
+    for (const key of wb?.state?.installedExtById?.keys?.() || []) {
+      if (String(key).toLowerCase() === id) return true
+    }
+    return false
+  }
+
   function paintBanner(host, tab, hint) {
     if (!host || !hint) return
     removeBanner(host)
+    const installed = languageExtInstalled(hint)
     const bar = document.createElement('div')
     bar.className = 'editor-lsp-banner'
-    bar.innerHTML = `<span class="editor-lsp-banner-text">${hint.label} — full LSP via extension host</span>
-      <button type="button" class="ghost editor-lsp-open">Open LSP</button>
-      <button type="button" class="ghost editor-lsp-dismiss" aria-label="Dismiss">×</button>`
+    if (installed) {
+      bar.innerHTML = `<span class="editor-lsp-banner-text">${hint.label} is installed — available to the editor and agent</span>
+        <button type="button" class="ghost editor-lsp-open">Enable in workspace</button>
+        <button type="button" class="ghost editor-lsp-dismiss" aria-label="Dismiss">×</button>`
+    } else {
+      bar.innerHTML = `<span class="editor-lsp-banner-text">Install ${hint.label} from Extensions so the agent can use it here</span>
+        <button type="button" class="ghost editor-lsp-dismiss" aria-label="Dismiss">×</button>`
+    }
     bar.querySelector('.editor-lsp-dismiss')?.addEventListener('click', () => bar.remove())
     bar.querySelector('.editor-lsp-open')?.addEventListener('click', () => {
       void openExtensionLsp(hint)
@@ -65,23 +82,17 @@
 
   async function openExtensionLsp(hint) {
     const api = window.soumtok
+    const wb = window.__soumtokWorkbench
     if (!api?.extensionHostStart) {
-      window.__soumtokWorkbench?.appendPanelOutput?.('[LSP] Install Soumtok Code host (Settings → Setup)\n')
+      wb?.appendPanelOutput?.('[LSP] Install Soumtok Code host (Settings → Setup)\n')
       return
     }
-    const item = {
-      extensionId: hint.id,
-      displayName: `${hint.label} (LSP)`,
-      openCommand: hint.command,
-    }
-    if (typeof window.__soumtokOpenExtensionLsp === 'function') {
-      await window.__soumtokOpenExtensionLsp(item)
-      return
-    }
-    await api.extensionHostStart?.({ usePlatformWorkspace: true })
-    window.__soumtokWorkbench?.appendPanelOutput?.(
-      `[LSP] Extension host started — install ${hint.id} from Extensions if needed.\n`,
-    )
+    const folder = wb?.state?.folder
+    await api.extensionHostStart?.({
+      usePlatformWorkspace: !folder,
+      workspace: folder || undefined,
+    })
+    wb?.appendPanelOutput?.(`[LSP] ${hint.label} is active in this workspace.\n`)
   }
 
   function onEditorRender(host, tab, langId) {

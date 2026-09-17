@@ -158,6 +158,79 @@ function pruneOtherExtensionVersions(publisher, name, keepDir) {
   }
 }
 
+/**
+ * VS Code skips folders listed in `.obsolete` and only reliably loads entries in its own
+ * `extensions.json`. Sideloaded installs (Cline, Roo, …) were on disk but marked removed,
+ * so the host never activated them.
+ */
+function reviveInstalledExtensions() {
+  const root = extensionsRoot()
+  try {
+    fs.unlinkSync(path.join(root, '.obsolete'))
+  } catch {
+    /* absent */
+  }
+
+  const installed = []
+  let entries = []
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true })
+  } catch {
+    return false
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue
+    const dir = path.join(root, entry.name)
+    const row = readInstalledOne(dir)
+    if (row) installed.push({ ...row, folderName: entry.name })
+  }
+
+  let previous = []
+  try {
+    previous = JSON.parse(fs.readFileSync(path.join(root, 'extensions.json'), 'utf8'))
+  } catch {
+    previous = []
+  }
+  const prevById = new Map(
+    (Array.isArray(previous) ? previous : [])
+      .filter((r) => r?.identifier?.id)
+      .map((r) => [String(r.identifier.id).toLowerCase(), r]),
+  )
+
+  const { pathToFileURL } = require('url')
+  const scanner = installed.map((row) => {
+    const id = String(row.id || '').toLowerCase()
+    const old = prevById.get(id)
+    const fsPath = row.path
+    const href = pathToFileURL(fsPath).href
+    const slashPath = `/${fsPath.replace(/\\/g, '/')}`
+    return {
+      identifier: { id },
+      version: row.version,
+      location: {
+        $mid: 1,
+        fsPath,
+        _sep: 1,
+        external: href,
+        path: slashPath,
+        scheme: 'file',
+      },
+      relativeLocation: row.folderName,
+      metadata: {
+        ...(old?.metadata || {}),
+        isApplicationScoped: false,
+        isMachineScoped: false,
+        isBuiltin: false,
+        installedTimestamp: old?.metadata?.installedTimestamp || Date.now(),
+        pinned: false,
+        source: old?.metadata?.source || 'vsix',
+      },
+    }
+  })
+  fs.writeFileSync(path.join(root, 'extensions.json'), `${JSON.stringify(scanner)}\n`, 'utf8')
+  return true
+}
+
 function unzipVsix(vsixPath, destDir) {
   fs.mkdirSync(destDir, { recursive: true })
   if (process.platform === 'win32') {
@@ -358,11 +431,12 @@ async function extensionMeta(publisher, name) {
 }
 
 function readInstalledOne(dir) {
-  const { readExtensionPackage, resolveIconPath } = require('./extensionActivity')
+  const { readExtensionPackage, resolveIconPath, classifyExtension } = require('./extensionActivity')
   const parsed = readExtensionPackage(dir)
   if (!parsed?.pkg) return null
   const { pkg, pkgRoot } = parsed
   const iconPath = resolveIconPath(pkgRoot, pkg.icon)
+  const classified = classifyExtension(pkg)
   return {
     id: `${pkg.publisher}.${pkg.name}`,
     publisher: pkg.publisher,
@@ -372,6 +446,9 @@ function readInstalledOne(dir) {
     description: pkg.description || '',
     path: dir,
     iconPath,
+    kind: classified.kind,
+    languages: classified.languages,
+    hasAppUi: classified.hasAppUi,
   }
 }
 
@@ -459,6 +536,7 @@ async function installFromOpenVsx(publisher, name) {
     /* ignore */
   }
   validateInstalledExtension(dest)
+  reviveInstalledExtensions()
   pruneOtherExtensionVersions(meta.publisher, meta.name, dest)
   const extension = readInstalledOne(dest)
   const installed = listInstalledExtensions()
@@ -487,6 +565,49 @@ function uninstallExtension(installPath) {
   return { ok: true, storage: extensionsStorageInfo() }
 }
 
+function findInstalledExtension(payload = {}) {
+  const list = listInstalledExtensions()
+  const extensionId = String(payload.extensionId || payload.id || '').trim()
+  if (extensionId) {
+    const hit = list.find((row) => row.id === extensionId)
+    if (hit) return hit
+  }
+  const publisher = String(payload.publisher || payload.namespace || '').trim()
+  const name = String(payload.name || '').trim()
+  if (!publisher || !name) return null
+  return (
+    list.find(
+      (row) =>
+        String(row.publisher).toLowerCase() === publisher.toLowerCase() &&
+        String(row.name).toLowerCase() === name.toLowerCase(),
+    ) || null
+  )
+}
+
+function validateExtensionForHost(payload = {}) {
+  const publisher = String(payload.publisher || payload.namespace || '').trim()
+  const name = String(payload.name || '').trim()
+  const extensionId = String(payload.extensionId || payload.id || '').trim()
+  if (!publisher && !name && !extensionId) return { ok: true }
+
+  const ext = findInstalledExtension(payload)
+  if (!ext) {
+    return { ok: false, error: 'Extension not found on this device. Reinstall it from the marketplace.' }
+  }
+
+  const parsed = require('./extensionActivity').readExtensionPackage(ext.path)
+  const hostVersion = require('./extensionHostRuntime').hostVsCodeVersion()
+  const engine = parsed?.pkg?.engines?.vscode
+  // Engine check only after the host is installed — first open downloads it via startSoumtokCodeHost.
+  if (engine && hostVersion && !engineSatisfied(engine, hostVersion)) {
+    return {
+      ok: false,
+      error: `Extension requires VS Code ${engine}, but Soumtok Code is ${hostVersion}.`,
+    }
+  }
+  return { ok: true, extension: ext }
+}
+
 function readWorkspaceRecommendations(workspaceRoot) {
   if (!workspaceRoot) return []
   const file = path.join(workspaceRoot, '.vscode', 'extensions.json')
@@ -509,7 +630,11 @@ module.exports = {
   extensionsRoot,
   extensionsStorageInfo,
   migrateExtensionsLayout,
+  reviveInstalledExtensions,
   resolveVsixSource,
   latestInstallableVersion,
   soumtokIdeRoot,
+  findInstalledExtension,
+  validateExtensionForHost,
+  engineSatisfied,
 }

@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { livePlanEstimate, type AgentEvent, type AskQuestion } from '../../../shared/agent'
 import { formatUserCode } from '../../../shared/connectLinks'
-import { normalizeLiveStep } from '../../../shared/toolFeed'
+import { normalizeLiveStep, shortenAgentStatus } from '../../../shared/toolFeed'
 import { PluginLogo } from './PluginLogos'
 
 export function AskCard({
@@ -254,9 +254,12 @@ export function AgentLiveCard({
   const stages = ['Analyzing and understanding', 'Passed to the model', work]
   const phase = done ? 3 : analyzing ? 0 : handed ? 1 : 2
   const header = done ? stages[2] : stages[Math.min(phase, 2)]
-  const snippet = preview?.text
-    ? preview.text.split('\n').slice(-14).join('\n')
-    : ''
+  const snippet =
+    preview?.text &&
+    !/^data:image\//i.test(preview.text.trim()) &&
+    !/\.(png|jpe?g|gif|webp|avif)$/i.test(preview.path)
+      ? preview.text.split('\n').slice(-14).join('\n')
+      : ''
   return (
     <div className="max-w-[520px] rounded-xl border border-white/[0.08] bg-[#141413] px-3.5 py-3">
       <div className="flex items-center justify-between gap-3">
@@ -272,7 +275,7 @@ export function AgentLiveCard({
       </div>
       {picked ? <p className="mt-1 truncate pl-[22px] text-[11px] text-white/35">{picked}</p> : null}
       {!done && analyzing && understanding ? (
-        <p className="mt-1 pl-[22px] text-[13px] leading-5 text-white/55">{understanding}</p>
+        <p className="mt-1 pl-[22px] text-[13px] leading-5 text-white/55">{shortenAgentStatus(understanding)}</p>
       ) : null}
       <ol className="mt-2.5 space-y-1">
         {stages.map((item, index) => {
@@ -399,7 +402,7 @@ export function ConnectCard({
   return (
     <div className="overflow-hidden rounded-2xl border border-[#f54e00]/30 bg-[#1a100c]">
       <div className="flex items-start gap-3 border-b border-white/[0.06] px-4 py-3">
-        <PluginLogo id={event.provider} className="h-8 w-8" />
+        <PluginLogo id={event.provider} logo={event.logo} className="h-8 w-8" />
         <div className="min-w-0 flex-1">
           <p className="text-[12px] uppercase tracking-[0.12em] text-[#f54e00]/80">Connect</p>
           <p className="mt-1 text-[14px] font-medium text-white">

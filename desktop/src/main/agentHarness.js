@@ -11,9 +11,26 @@ const {
 } = require('../shared/chatMessagesRuntime')
 const { compactConversation, compactGitSnapshot } = require('../shared/tokenGuard')
 const { stripDsmlFromText, parseDsmlInvokes, textLooksLikeDsml, sanitizeAssistantText } = require('./dsmlTools')
+const {
+  parseToolArgs,
+  toolCallArgs,
+  editPathFromArgs,
+  mergeToolCalls,
+} = require('../shared/toolArgsRuntime.js')
 const { generateStillViaReplicate } = require('./replicateImage')
 const { parseStillRequest, normalizeStillAspect } = require('../shared/stillAspect.js')
 const { createCheckpoint, restoreCheckpoint } = require('./checkpoints')
+const {
+  writePlanDocument,
+  readPlanDocument,
+  userWantsPlanFirst,
+  userWantsBuildPlan,
+  userWantsCanvas,
+  shouldWritePlanArtifact,
+  isPlanPath,
+  isCanvasPath,
+} = require('./planDocument')
+const { composeTerminalStateBlock } = require('./terminalState')
 const {
   classifyUserTask,
   userAskedToGenerateImage,
@@ -27,16 +44,19 @@ const {
   taskKindLabel,
   composeTaskContract,
   taskCompletionMet,
-  shouldContinueAgentTask,
   taskIncompleteNudge,
   stuckSteerNudge,
   adaptiveSteering,
   signalIntent,
   needsVagueEditClarification,
   buildEditClarificationAsk,
+  imageCountFromUser,
+  countGeneratedImagesInScope,
   workHasReadTerminal,
   workHasDevServerTerminal,
   workAfterLastHuman,
+  workHasSuccessfulWrites,
+  toolOutputShowsLocalhost,
   classifyFromEvidence,
   verifyIntroducedNewErrors,
 } = require('./agentTaskGate')
@@ -57,18 +77,72 @@ const {
 } = require('./agentState')
 const {
   isGeneralKnowledgeQuestion,
+  messageNeedsProjectFolder,
+  composeGeneralAssistantBrief,
   userAskedToBuildSomething,
   userAskedForLocalhost,
   composeThinkFirstBrief,
   composeWorkLoopBrief,
 } = require('./agentThinkFirst')
 const { loadProjectRules } = require('./projectRules')
-const { skillsCatalogBlock } = require('./agentSkills')
+const {
+  skillsCatalogBlock,
+  enrichAttachedLocalSkills,
+  enrichAttachedCloudSkills,
+  enrichAttachedPluginSkills,
+  connectorHintsForAttachedSkills,
+  flattenInstalledPluginSkills,
+} = require('./agentSkills')
+const {
+  loadSkillMemory,
+  rememberSkills,
+  skillsFromAttachments,
+  matchSkillsForQuery,
+  composeSkillMemoryBrief,
+  buildSkillUseAsk,
+  skillBodyFromMemory,
+  formatChosenSkillBlock,
+} = require('./skillMemory')
+const { formatAttachedPluginSkillsBlock } = require('../../../shared/pluginSkillsRuntime.cjs')
+const {
+  resolveMcpConnector,
+  formatConnectorRef,
+  connectorWorkflowHints,
+} = require('../../../shared/connectorsRuntime.cjs')
 const { gitSnapshot } = require('./gitTools')
 const { buildWorkspaceAtlas } = require('./workspaceAtlas')
 const { refreshProjectMemory, composeProjectBrief } = require('./projectMemory')
+
+function installedExtensionsBrief() {
+  try {
+    const { listInstalledExtensions } = require('./extensionsMarket')
+    const list = listInstalledExtensions()
+    if (!list.length) return ''
+    const langs = list.filter((e) => e.kind === 'language' || (e.languages || []).length)
+    const apps = list.filter((e) => e.hasAppUi || e.kind === 'app')
+    const lines = [
+      'INSTALLED EXTENSIONS (already on this device — use them; do not ask the user to install):',
+    ]
+    if (langs.length) {
+      lines.push(
+        `Language: ${langs
+          .map((e) => `${e.displayName}${e.languages?.length ? ` [${e.languages.slice(0, 8).join(', ')}]` : ''}`)
+          .join('; ')}. Run via terminal in WORKSPACE (python, go, rustc, …). read_lints uses the language toolchain when present.`,
+      )
+    }
+    if (apps.length) {
+      lines.push(`App panels the user can open: ${apps.map((e) => e.displayName).join(', ')}.`)
+    }
+    return lines.join('\n')
+  } catch {
+    return ''
+  }
+}
+const HARNESS_DEV_WAIT_MS = 8000
+
 const {
   composeBuildDirectorBrief,
+  composeScaffoldFastBrief,
   parseBuildIntent,
   inferIntentForFolder,
   isPreviewableBuildKind,
@@ -76,9 +150,19 @@ const {
   workspaceLooksMessy,
   pickRunCommandFromFolder,
   projectDeliversInBrowser,
+  inferDevServerUrl,
   applyGreenfieldScaffold,
   workspaceIsGreenfield,
 } = require('./buildDirector')
+const {
+  composeKnowledgeBrief,
+  composeTemplateBriefCompact,
+  composeFallbackBuildBrief,
+  patternDeliverables,
+} = require('./knowledgeBase')
+const { composeUniversalBuildStandards } = require('../../../shared/buildDesignDoctrine.cjs')
+const { runCompletenessCheck } = require('./completenessVerifier')
+const { runQualityGates } = require('./qualityGates')
 
 const agentSteerQueue = []
 const askWaiters = new Map()
@@ -161,6 +245,7 @@ function drainAgentSteer(work, ctx) {
 
 async function maybeVerifyAfterEdits(folder, prefs, calls, onEvent, work, ctx) {
   if (!folder) return null
+  if (ctx?._scaffoldWrote?.length && !ctx?._userEditedBeyondScaffold) return null
   const edited = (calls || []).some((c) => {
     const n = String(c.name || '').toLowerCase()
     return n === 'write' || n === 'diff' || n === 'edit' || n === 'str_replace' || n === 'apply_patch'
@@ -410,10 +495,10 @@ async function tryAutoWipeWorkspace({ folder, userMessage, work, prefs, onEvent,
   }
 }
 
-function workHasGenerateImageThisTurn(work) {
-  return workAfterLastHuman(work).some(
-    (m) => m.role === 'tool' && /^generate_image$/i.test(String(m.name || '')) && m.ok !== false,
-  )
+function workHasGenerateImageThisTurn(work, requested = 1) {
+  const scope = workAfterLastHuman(work)
+  const done = countGeneratedImagesInScope(scope)
+  return done >= Math.max(1, requested)
 }
 
 function finishImageJob({ work, onEvent, runMeta, text, error }) {
@@ -506,12 +591,18 @@ async function tryAutoGenerateImage({ folder, userMessage, work, prefs, onEvent,
   const text = lastUserTextFromWork(work, userMessage)
   const hint = imageIntentHintFromWork(work)
   if (!userAskedToGenerateImage(text, hint)) return null
-  if (workHasGenerateImageThisTurn(work)) {
+  const requested = imageCountFromUser(text)
+  const scope = workAfterLastHuman(work)
+  const already = countGeneratedImagesInScope(scope)
+  if (already >= requested) {
     return finishImageJob({
       work,
       onEvent,
       runMeta,
-      text: 'The still is already saved this turn. Check assets/generated/.',
+      text:
+        requested > 1
+          ? `Generated ${already} still${already === 1 ? '' : 's'}. Check assets/generated/.`
+          : 'The still is already saved this turn. Check assets/generated/.',
     })
   }
   if (!folder) {
@@ -525,37 +616,58 @@ async function tryAutoGenerateImage({ folder, userMessage, work, prefs, onEvent,
   const parsed = stillRequestFromUser(text)
   const prompt = parsed.prompt
   const aspect = parsed.aspect
-  onEvent?.({ type: 'status', text: `Understood — generating ${aspect} still…` })
-  onEvent?.({ type: 'tool', name: 'generate_image', args: { prompt, aspect } })
-  const got = await runDesktopTool(folder, 'generate_image', { prompt, aspect }, prefs, toolCtx || {})
-  onEvent?.({
-    type: 'result',
-    name: 'generate_image',
-    ok: got.ok,
-    text: (got.text || '').slice(0, 12_000),
-    path: got.rel || '',
-    image: got.image?.dataUrl || '',
-    aspect: got.aspect || aspect,
-  })
-  if (got.rel) onEvent?.({ type: 'file', path: got.rel })
-  work.push({
-    role: 'tool',
-    name: 'generate_image',
-    content: (got.text || (got.ok ? 'Generated still image.' : 'Image generation failed')).slice(0, 12_000),
-    ok: got.ok !== false,
-  })
-  if (!got.ok) {
-    return finishImageJob({
-      work,
-      onEvent,
-      runMeta,
-      error: got.text || 'Could not generate the image. Sign in and check that the server has REPLICATE_API_TOKEN.',
+  const savedPaths = []
+  for (let i = already; i < requested; i += 1) {
+    const label = requested > 1 ? `${i + 1}/${requested}` : ''
+    onEvent?.({
+      type: 'status',
+      text: label ? `Generating still ${label}…` : `Understood — generating ${aspect} still…`,
     })
+    const pathHint =
+      requested > 1 ? `assets/generated/${slugImageStem(prompt)}-${i + 1}` : ''
+    onEvent?.({ type: 'tool', name: 'generate_image', args: { prompt, aspect, path: pathHint || undefined } })
+    const got = await runDesktopTool(
+      folder,
+      'generate_image',
+      { prompt, aspect, path: pathHint || undefined },
+      prefs,
+      toolCtx || {},
+    )
+    onEvent?.({
+      type: 'result',
+      name: 'generate_image',
+      ok: got.ok,
+      text: (got.text || '').slice(0, 12_000),
+      path: got.rel || '',
+      image: got.image?.dataUrl || '',
+      aspect: got.aspect || aspect,
+    })
+    if (got.rel) {
+      onEvent?.({ type: 'file', path: got.rel })
+      savedPaths.push(got.rel)
+    }
+    work.push({
+      role: 'tool',
+      name: 'generate_image',
+      content: (got.text || (got.ok ? 'Generated still image.' : 'Image generation failed')).slice(0, 12_000),
+      ok: got.ok !== false,
+    })
+    if (!got.ok) {
+      return finishImageJob({
+        work,
+        onEvent,
+        runMeta,
+        error: got.text || 'Could not generate the image. Sign in and check that the server has REPLICATE_API_TOKEN.',
+      })
+    }
   }
-  const ratio = got.aspect || aspect
-  const reply = got.rel
-    ? `Done — generated a ${ratio} still at ${got.rel}.`
-    : String(got.text || `Generated a ${ratio} still.`)
+  const ratio = aspect
+  const reply =
+    savedPaths.length > 1
+      ? `Done — generated ${savedPaths.length} stills:\n${savedPaths.map((p) => `· ${p}`).join('\n')}`
+      : savedPaths[0]
+        ? `Done — generated a ${ratio} still at ${savedPaths[0]}.`
+        : `Generated ${requested} still${requested === 1 ? '' : 's'}.`
   if (runMeta) runMeta.repliedViaEvent = true
   onEvent?.({ type: 'assistant', text: reply, model: 'Soumtok', requestedModel: 'Soumtok' })
   onEvent?.({ type: 'workspace_refresh' })
@@ -581,10 +693,21 @@ const WIPE_WORKSPACE_BRIEF = `SOUMTOK WORKSPACE WIPE (user explicitly asked to d
 const IMAGE_NOW_BRIEF = `SOUMTOK IMAGE NOW (harness classified a standalone still-image request):
 
 - Understand their request first (subject, follow-up like "a new one", ratio). Then generate.
+- If they asked for N images (e.g. "2 images"), call generate_image N times with different paths (…-1.png, …-2.png).
 - Call generate_image({ prompt }) NOW with their subject. Still images only.
 - Do NOT list_dir, read, grep, glob, or explore the project.
 - Do NOT say you need tool access — generate_image is already enabled this turn.
-- Save under assets/generated/ and tell them the path.`
+- Save under assets/generated/ and tell them every path.`
+
+function slugImageStem(prompt) {
+  return (
+    String(prompt || 'image')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 40) || 'image'
+  )
+}
 
 function workHasDeletes(work) {
   return (work || []).some((m) => {
@@ -646,9 +769,10 @@ function workHasFileWritesThisTurn(work) {
   return workHasFileWrites(workAfterLastHuman(work))
 }
 
-async function applyGreenfieldScaffoldIfStalled({ folder, userMessage, work, onEvent, ctx }) {
+function emitGreenfieldScaffoldEvents({ folder, userMessage, work, onEvent, ctx, allowWhenWrites = false }) {
   if (!folder || !workspaceIsGreenfield(folder)) return false
-  if (workHasFileWritesThisTurn(work) || ctx._scaffoldWrote?.length) return false
+  if (ctx._scaffoldWrote?.length) return false
+  if (!allowWhenWrites && workHasFileWritesThisTurn(work)) return false
   const text = lastUserTextFromWork(work, userMessage)
   if (!userWantsGreenfieldBuild(text) && !userAskedToBuildSomething(text)) return false
   const sc = applyGreenfieldScaffold(folder, text)
@@ -661,21 +785,126 @@ async function applyGreenfieldScaffoldIfStalled({ folder, userMessage, work, onE
   } catch {
     /* optional */
   }
+  onEvent?.({ type: 'workspace_refresh' })
   for (const rel of sc.wrote) {
+    onEvent?.({ type: 'file', path: rel })
     onEvent?.({ type: 'tool', name: 'write', args: { path: rel } })
     onEvent?.({ type: 'result', name: 'write', ok: true, text: `Wrote ${rel}`, path: rel })
   }
   injectHarnessFact(
     work,
-    `SCAFFOLD ON DISK (harness wrote starter files after the model stalled — tighten these to the USER request, do not recreate a second tree):\n${sc.wrote.join('\n')}`,
+    `SCAFFOLD ON DISK (harness wrote starter files — tighten these to the USER request, do not recreate a second tree):\n${sc.wrote.join('\n')}`,
     'SCAFFOLD ON DISK',
   )
+  const fastBrief = composeScaffoldFastBrief(text, folder, sc.wrote)
+  injectSystemBlock(work, fastBrief, 'SOUMTOK SCAFFOLD FAST')
+  const compactPattern = composeTemplateBriefCompact(text)
+  if (compactPattern) injectSystemBlock(work, compactPattern, 'SOUMTOK BUILD PATTERN')
+  ctx._patternDeliverables = patternDeliverables(text)
+  onEvent?.({ type: 'status', text: `Starter on disk (${sc.wrote.length} files) — customizing…` })
   return true
 }
 
-function concludeWrittenWork({ work, onEvent, runMeta, lastText, usedModel, requestedModel }) {
+async function applyGreenfieldScaffoldIfStalled({ folder, userMessage, work, onEvent, ctx }) {
+  return emitGreenfieldScaffoldEvents({ folder, userMessage, work, onEvent, ctx, allowWhenWrites: false })
+}
+
+function extractPlanSteps(text) {
+  const steps = []
+  const seen = new Set()
+  for (const line of String(text || '').split('\n')) {
+    const m = line.match(/^\s*(?:\d+[\.)]|[-*•])\s+(.+?)\s*$/)
+    if (!m) continue
+    const content = m[1].replace(/\*\*/g, '').trim()
+    if (!content || content.length < 4 || seen.has(content.toLowerCase())) continue
+    seen.add(content.toLowerCase())
+    steps.push({ id: `plan_${steps.length + 1}`, content, status: 'pending' })
+    if (steps.length >= 8) break
+  }
+  return steps
+}
+
+function emitPlanFromAssistantText(onEvent, roundCtx, text, round, mode, userMessage) {
+  if (roundCtx._planEmitted || round > 2) return
+  if (!shouldWritePlanArtifact({ mode, userMessage, roundCtx })) return
+  const steps = extractPlanSteps(text)
+  if (steps.length < 2) return
+  roundCtx._planEmitted = true
+  roundCtx._planSummary = `Plan · ${steps.length} steps`
+  onEvent?.({ type: 'todo', todos: steps, merge: false })
+  onEvent?.({ type: 'status', text: roundCtx._planSummary })
+  const folder = roundCtx.folder
+  const goal = roundCtx._runState?.goal || ''
+  if (folder) {
+    try {
+      const doc = writePlanDocument(folder, { goal, steps, status: 'draft' })
+      if (doc?.path) {
+        onEvent?.({ type: 'plan_file', path: doc.path })
+        onEvent?.({ type: 'file', path: doc.path })
+      }
+    } catch {
+      /* optional */
+    }
+  }
+}
+
+function buildStillNeedsDevServer(folder, work) {
+  if (!folder) return false
+  try {
+    if (!fs.existsSync(path.join(folder, 'package.json'))) return false
+  } catch {
+    return false
+  }
+  const scope = workAfterLastHuman(work)
+  if (!workHasSuccessfulWrites(scope)) return false
+  if (toolOutputShowsLocalhost(scope) || workHasDevServerTerminal(scope)) return false
+  const intent = inferIntentForFolder(folder, '')
+  return projectDeliversInBrowser(intent, folder)
+}
+
+function agentShouldAutoContinue({ mode, folder, round, maxRounds, taskKind, work, runState }) {
+  if (mode !== 'agent' || !folder) return false
+  if (round >= maxRounds - 1) return false
+  if (taskKind === 'chat' || taskKind === 'analyze') return false
+  if (buildStillNeedsDevServer(folder, work)) return true
+  if (taskCompletionMet(taskKind, work, runState)) return false
+  return true
+}
+
+async function maybeAutoStartDevServer({ folder, work, prefs, onEvent, signal, toolCtx }) {
+  if (!buildStillNeedsDevServer(folder, work)) return null
+  onEvent?.({ type: 'status', text: 'Starting dev server for you…' })
+  const calls = []
+  if (!fs.existsSync(path.join(folder, 'node_modules'))) {
+    calls.push({ id: 'auto_install', name: 'terminal', arguments: { command: 'npm install' } })
+  }
+  calls.push({ id: 'auto_dev', name: 'terminal', arguments: { command: pickRunCommandFromFolder(folder) } })
+  calls.push({ id: 'auto_read', name: 'read_terminal', arguments: { wait_ms: HARNESS_DEV_WAIT_MS } })
+  const ran = await executeToolCalls({
+    calls,
+    folder,
+    prefs,
+    work,
+    onEvent,
+    signal,
+    assistantContent: '[Soumtok harness] Auto-starting dev server after build.',
+    toolCtx,
+  })
+  if (ran?.error) return null
+  const scope = workAfterLastHuman(work)
+  for (const m of scope) {
+    if (m.role !== 'tool') continue
+    const found = String(m.content || '').match(/https?:\/\/(?:localhost|127\.0\.0\.1):\d+/)
+    if (found) return found[0]
+  }
+  return inferDevServerUrl(folder)
+}
+
+function concludeWrittenWork({ work, onEvent, runMeta, lastText, usedModel, requestedModel, folder, runUrl }) {
   const text =
-    lastText && isUserFacingConclusion(lastText, work) ? lastText : composeLocalConclusion(work, { run: false })
+    lastText && isUserFacingConclusion(lastText, work)
+      ? lastText
+      : composeLocalConclusion(work, { run: false, folder, runUrl })
   if (!text) return lastText
   if (runMeta) runMeta.repliedViaEvent = true
   onEvent?.({
@@ -805,10 +1034,10 @@ function assistantDeferredAction(text) {
 }
 
 const AGENT_FINISH_VERIFY_NUDGE =
-  '[Soumtok harness] Do NOT ask the user to say "go" or wait for permission. You said you would verify — call tools NOW: read_terminal({ wait_ms: 15000 }) then terminal("netstat -ano | findstr LISTENING | findstr :5170") (and API port), and/or web_fetch on http://localhost:PORT/health. Reply only after tool output with URLs and pass/fail.'
+  '[Soumtok harness] Do NOT ask the user to say "go" or wait for permission. You said you would verify — call tools NOW: read_terminal({ wait_ms: 8000 }) then terminal("netstat -ano | findstr LISTENING | findstr :5170") (and API port), and/or web_fetch on http://localhost:PORT/health. Reply only after tool output with URLs and pass/fail.'
 
 const PREVIEW_RUN_NOW_NUDGE =
-  '[Soumtok harness] User said go — execute NOW with tools: write() every planned file (no XML in chat), terminal("npm install"), terminal("npm start" or npm run dev), read_terminal({ wait_ms: 20000 }), reply with localhost URL. Tools ARE allowed. Intent is BUILD not question.'
+  '[Soumtok harness] User said go — execute NOW with tools: write() every planned file (no XML in chat), terminal("npm install"), terminal("npm start" or npm run dev), read_terminal({ wait_ms: 8000 }), reply with localhost URL. Tools ARE allowed. Intent is BUILD not question.'
 
 const APPLY_EDIT_NOW_NUDGE =
   '[Soumtok harness] Guide: finish the user request with diff()/write()/terminal() on the files you have. You may read({ path, start_line, end_line }) if you still need a slice. Do not tell the user about the harness. Do not ask "want me to". Then a short summary with evidence.'
@@ -817,7 +1046,7 @@ const DO_WORK_NOW_NUDGE = APPLY_EDIT_NOW_NUDGE
 
 function composeRunNowNudge(folder) {
   const cmd = pickRunCommandFromFolder(folder)
-  return `[Soumtok harness] User asked to RUN the app / localhost NOW. Prefer terminal("${cmd}") then read_terminal({ wait_ms: 20000 }). If the port is already in use, that app is already running — reply with that URL (do not fail). You may read files if you still need them. Do not tell the user about the harness.`
+  return `[Soumtok harness] User asked to RUN the app / localhost NOW. Prefer terminal("${cmd}") then read_terminal({ wait_ms: 8000 }). If the port is already in use, that app is already running — reply with that URL (do not fail). You may read files if you still need them. Do not tell the user about the harness.`
 }
 
 function composeBuildAutoRunNudge(folder, buildKind) {
@@ -827,7 +1056,7 @@ function composeBuildAutoRunNudge(folder, buildKind) {
   if (web) {
     return `[Soumtok harness] Build phase done — verify and launch WITHOUT asking permission:
 1. terminal("npm test" or node test.js) if the repo has tests — fix failures with write/diff.
-2. terminal("${cmd}") → read_terminal({ wait_ms: 20000 }).
+2. terminal("${cmd}") → read_terminal({ wait_ms: 8000 }).
 3. Reply with localhost URL + 1–2 sentences on what you built from the user's request. No "want me to run".`
   }
   return `[Soumtok harness] Run what you built: terminal("${cmd}") (or the correct npm script), read_terminal if needed, summarize output. No permission ask.`
@@ -852,13 +1081,13 @@ const BROWSER_SEE_PAGE_NUDGE =
   '[Soumtok harness] Localhost is up. Call browser({ action: "snapshot", url: "http://localhost:PORT" }) NOW so you can see the page (errors, blank canvas, headings). Terminal logs are not a screenshot. Then conclude with the URL and what is on the page.'
 
 const ANALYZE_THEN_BUILD_NUDGE =
-  '[Soumtok harness] Scaffold is on disk or listed in KNOWN FILES. Do NOT list_dir. diff/write src/ if needed, then terminal("npm install"); terminal("npm run dev") — Windows: ; not &&. Then read_terminal({ wait_ms: 20000 }). Tools only.'
+  '[Soumtok harness] Scaffold is on disk or listed in KNOWN FILES. Do NOT list_dir. diff/write src/ if needed, then terminal("npm install"); terminal("npm run dev") — Windows: ; not &&. Then read_terminal({ wait_ms: 8000 }). Tools only.'
 
 const AGENT_FOLLOW_THROUGH_NUDGE =
   '[Soumtok harness] You told the user you would fix/update/run/change something — do it NOW in this session using tools (read, grep, write, diff, terminal). Do not send another chat-only reply until the fix is applied and verified (e.g. npm test / node). Only stop if a tool returns a hard error.'
 
 const AGENT_FINISH_APP_NUDGE =
-  '[Soumtok harness] Stop asking the user to choose. Execute now with tools:\n1. Fix tests (write/diff) until npm test / node test.js passes if tests exist.\n2. terminal(start/dev script from package.json) — integrated Terminal.\n3. read_terminal({ wait_ms: 20000 }) — confirm URL or demo output.\nReply only after tools run. No menus.'
+  '[Soumtok harness] Stop asking the user to choose. Execute now with tools:\n1. Fix tests (write/diff) until npm test / node test.js passes if tests exist.\n2. terminal(start/dev script from package.json) — integrated Terminal.\n3. read_terminal({ wait_ms: 8000 }) — confirm URL or demo output.\nReply only after tools run. No menus.'
 
 function projectLooksLikeLocalWebApp(folder) {
   if (!folder) return false
@@ -927,16 +1156,8 @@ const AGENT_ACT_NOW_NUDGE =
 const AGENT_WIPE_NOW_NUDGE =
   '[Soumtok harness] User ordered DELETE EVERYTHING in this project. Call wipe_workspace() immediately (or delete each path). Do NOT ask them to use PowerShell. Do NOT read more files first. Then list_dir(".") and confirm.'
 
-function parseToolArgs(raw) {
-  try {
-    return JSON.parse(raw || '{}')
-  } catch {
-    return {}
-  }
-}
-
 function inspectPathFromCall(call) {
-  const args = parseToolArgs(call.arguments || call.input)
+  const args = toolCallArgs(call)
   const n = String(call.name || '').toLowerCase()
   if (n === 'terminal' || n === 'shell') {
     const asRead = parseFileReadViaShell(String(args.command || args.cmd || ''))
@@ -1278,7 +1499,7 @@ Open tabs: ${files}${modelLine}${scanBlock}
 
 Use JSON function tools (write/diff/terminal/read). Chat XML <write> does not create files.
 "go"/"yes" after a plan = execute write + terminal now. Tools are on.
-Real PC terminal via terminal() then read_terminal({ wait_ms: 20000 }). Never sandboxed.
+Real PC terminal via terminal() then read_terminal({ wait_ms: 8000 }). Never sandboxed.
 Build: write files → npm install → npm start/dev → URL. Messy folder: fix in place.
 Reply concisely after tools run.`
 }
@@ -1385,6 +1606,13 @@ function replaceSystemChunk(work, marker, block) {
 }
 
 function syncTaskKind(roundCtx, work, userMessage, prefs) {
+  if (roundCtx._taskKindLocked && roundCtx._taskKind) {
+    if (roundCtx._runState) {
+      roundCtx._runState.taskKind = roundCtx._taskKind
+      roundCtx._runState.acceptanceCriteria = acceptanceFor(roundCtx._taskKind, roundCtx._runState.goal)
+    }
+    return roundCtx._taskKind
+  }
   const live = lastUserTextFromWork(work, userMessage)
   const next = classifyFromEvidence(
     live,
@@ -1397,6 +1625,7 @@ function syncTaskKind(roundCtx, work, userMessage, prefs) {
     roundCtx._taskKind,
   )
   roundCtx._taskKind = next
+  roundCtx._taskKindLocked = true
   if (prefs) prefs.activeTaskKind = next
   if (roundCtx._runState) {
     roundCtx._runState.taskKind = next
@@ -1427,6 +1656,7 @@ function applyCachedSystem(work, ctx) {
     )
   }
   if (ctx._runState) parts.push(composeRunStateBlock(ctx._runState))
+  if (ctx._terminalBlock) parts.push(ctx._terminalBlock)
   const sysIdx = (work || []).findIndex((m) => m.role === 'system')
   const next = parts.filter(Boolean).join('\n\n')
   if (sysIdx >= 0) work[sysIdx].content = next
@@ -1449,6 +1679,11 @@ function injectDevScriptsIntoWork(work, block) {
 }
 
 async function ensureWorkspaceContext({ folder, prefs, work, userMessage, onEvent, ctx, threadTitle }) {
+  if (!ctx._extensionsBriefInjected) {
+    const brief = installedExtensionsBrief()
+    if (brief) injectSystemBlock(work, brief, 'INSTALLED EXTENSIONS')
+    ctx._extensionsBriefInjected = true
+  }
   if (!folder) return ctx
   const text = lastUserTextFromWork(work, userMessage)
   const lastAsst = lastAssistantTextFromWork(work)
@@ -1497,10 +1732,16 @@ async function ensureWorkspaceContext({ folder, prefs, work, userMessage, onEven
           ? 'Thinking…'
           : 'Understanding your request…'
     onEvent?.({ type: 'status', text: understand })
-    if (taskKind === 'build' || taskKind === 'execute' || taskKind === 'fix') {
-      await new Promise((r) => setTimeout(r, 600))
+    if (
+      prefs.thinkFirst !== false &&
+      !ctx._scaffoldWrote?.length &&
+      (taskKind === 'build' || taskKind === 'execute' || taskKind === 'fix')
+    ) {
+      await new Promise((r) => setTimeout(r, 300))
     }
-    injectSystemBlock(work, composeThinkFirstBrief(text, taskKind), 'SOUMTOK THINK FIRST')
+    if (prefs.thinkFirst !== false && !ctx._scaffoldWrote?.length) {
+      injectSystemBlock(work, composeThinkFirstBrief(text, taskKind), 'SOUMTOK THINK FIRST')
+    }
     const loop = composeWorkLoopBrief(taskKind)
     if (loop) injectSystemBlock(work, loop, 'SOUMTOK LOOP')
   }
@@ -1508,7 +1749,13 @@ async function ensureWorkspaceContext({ folder, prefs, work, userMessage, onEven
     const contract = composeTaskContract(text, taskKind)
     if (contract) {
       ctx._taskContractInjected = true
-      onEvent?.({ type: 'status', text: `Planning · ${taskKindLabel(taskKind)}` })
+      onEvent?.({
+        type: 'status',
+        text:
+          String(ctx?.mode || '').toLowerCase() === 'plan' || ctx?._userAskedPlanFirst
+            ? `Planning · ${taskKindLabel(taskKind)}`
+            : `Working · ${taskKindLabel(taskKind)}`,
+      })
       injectSystemBlock(work, contract, 'SOUMTOK TASK INTENT')
     }
   }
@@ -1544,6 +1791,12 @@ async function ensureWorkspaceContext({ folder, prefs, work, userMessage, onEven
   const wantsInspect = userWantsCodeInspection(text) || userWantsAnalysis(text)
   const visual = userWantsVisualPolish(text)
   const greenfieldBuild = wantsBuild && workspaceIsGreenfield(folder) && !visual
+  if (wantsBuild && !ctx._buildStandardsInjected) {
+    injectSystemBlock(work, composeUniversalBuildStandards(), 'SOUMTOK BUILD STANDARDS')
+    const fallbackBrief = composeFallbackBuildBrief(text)
+    if (fallbackBrief) injectSystemBlock(work, fallbackBrief, 'SOUMTOK BUILD DOCTRINE')
+    ctx._buildStandardsInjected = true
+  }
   if (greenfieldBuild && !ctx._scaffoldTried) {
     ctx._scaffoldTried = true
     ctx._buildKind = inferIntentForFolder(folder, text).kind
@@ -1567,6 +1820,7 @@ async function ensureWorkspaceContext({ folder, prefs, work, userMessage, onEven
     taskKind === 'wipe' ||
     taskKind === 'run' ||
     taskKind === 'image' ||
+    Boolean(ctx._scaffoldWrote?.length) ||
     userAskedToGenerateImage(text, { priorImage: workHasPriorGeneratedImage(work) }) ||
     isGeneralOrSoumtokChat(text)
   if (!ctx._atlasInjected && !skipAtlas && (ctx._projectMemory?.queryChanged || !workAlreadyHasAtlas(work))) {
@@ -1627,6 +1881,7 @@ async function ensureWorkspaceContext({ folder, prefs, work, userMessage, onEven
   const messy = workspaceLooksMessy(folder, ctx.workspaceScan || '')
   if (
     !visual &&
+    !ctx._scaffoldWrote?.length &&
     (wantsBuild || wantsFix || (messy && projectLooksLikeLocalWebApp(folder))) &&
     !ctx._buildDirectorInjected
   ) {
@@ -1635,6 +1890,12 @@ async function ensureWorkspaceContext({ folder, prefs, work, userMessage, onEven
     injectSystemBlock(work, brief, messy ? 'SOUMTOK MESSY WORKSPACE RECOVERY' : 'SOUMTOK BUILD DIRECTOR')
     ctx._buildDirectorInjected = true
     ctx._buildKind = inferIntentForFolder(folder, text).kind
+    const knowledge = composeKnowledgeBrief(text)
+    if (knowledge) {
+      injectSystemBlock(work, knowledge, 'SOUMTOK BUILD PATTERN')
+      ctx._patternDeliverables = patternDeliverables(text)
+      /* Do not auto-write PLAN.md from build pattern hints — only in Plan mode or when user asked to plan first. */
+    }
   }
   if (userIsBareConfirm(text) && (assistantAskedPermission(lastAsst) || assistantOfferedApplyEdit(lastAsst))) {
     if (priorAssistantOfferedPreview(work) && !/\b(apply|diff|write|edit|patch)\b/i.test(lastAsst)) {
@@ -1683,6 +1944,13 @@ function isUserFacingConclusion(text, work) {
   }
   if (assistantAskedPermission(t) || assistantOfferedApplyEdit(t)) return false
   if (/\bharness blocked|want me to proceed|if you say go\b/i.test(t)) return false
+  if (
+    /reload the running page/i.test(t) &&
+    !toolOutputShowsLocalhost(workAfterLastHuman(work)) &&
+    !workHasDevServerTerminal(workAfterLastHuman(work))
+  ) {
+    return false
+  }
   if (workHasFileWritesThisTurn(work) && t.length >= 24) return true
   if (t.length >= 48 && /\b(updated|fixed|changed|wrote|patched|src\/|\.ts\b|\.js\b)\b/i.test(t)) return true
   return isSubstantiveAgentReply(t, work)
@@ -1690,6 +1958,7 @@ function isUserFacingConclusion(text, work) {
 
 function composeLocalConclusion(work, opts = {}) {
   const scope = workAfterLastHuman(work)
+  const folder = opts.folder || null
   const paths = []
   const seen = new Set()
   let attemptedFail = false
@@ -1702,7 +1971,7 @@ function composeLocalConclusion(work, opts = {}) {
       continue
     }
     if (!/\b(updated |wrote |edited )\b/i.test(c)) continue
-    const fromContent = c.match(/\b([\w./\\-]+\.(?:ts|tsx|js|jsx|css|html|py|json|md))\b/gi) || []
+    const fromContent = c.match(/\b([\w./\\-]+\.(?:ts|tsx|js|jsx|css|html|py|json|md|svg))\b/gi) || []
     for (const p of fromContent) {
       const rel = p.replace(/\\/g, '/')
       if (seen.has(rel)) continue
@@ -1710,26 +1979,43 @@ function composeLocalConclusion(work, opts = {}) {
       paths.push(rel)
     }
   }
-  if (paths.length) {
-    return `Updated ${paths.slice(0, 6).join(', ')}. Reload the running page to see the change.`
-  }
-  let url = ''
-  for (const m of scope) {
-    if (m.role !== 'tool') continue
-    const n = String(m.name || '').toLowerCase()
-    if (!/^(terminal|read_terminal|browser|web_fetch|fetch)$/.test(n)) continue
-    const found = String(m.content || '').match(/https?:\/\/(?:localhost|127\.0\.0\.1):\d+/)
-    if (found) {
-      url = found[0]
-      break
+  let url = opts.runUrl || ''
+  if (!url) {
+    for (const m of scope) {
+      if (m.role !== 'tool') continue
+      const n = String(m.name || '').toLowerCase()
+      if (!/^(terminal|read_terminal|browser|web_fetch|fetch)$/.test(n)) continue
+      const found = String(m.content || '').match(/https?:\/\/(?:localhost|127\.0\.0\.1):\d+/)
+      if (found) {
+        url = found[0]
+        break
+      }
     }
   }
-  if (url) return `App is running at ${url}.`
+  const fileLine = paths.length ? paths.slice(0, 6).join(', ') : ''
+  if (url) {
+    return fileLine
+      ? `**Done.** Updated ${fileLine}.\n\nOpen **${url}** in your browser to see it.`
+      : `**Your app is running.** Open **${url}** in your browser.`
+  }
+  if (paths.length && folder && buildStillNeedsDevServer(folder, work)) {
+    const runCmd = pickRunCommandFromFolder(folder)
+    const guess = inferDevServerUrl(folder)
+    const install = fs.existsSync(path.join(folder, 'node_modules')) ? '' : '1. `npm install`\n2. '
+    return `**Built your project.** Updated ${fileLine}.\n\n**Start it** (integrated terminal, Ctrl+J):\n${install}\`${runCmd}\`\n\nThen open **${guess}**`
+  }
+  if (paths.length) {
+    const serverUp =
+      workHasDevServerTerminal(scope) || toolOutputShowsLocalhost(scope)
+    if (serverUp) return `Updated ${fileLine}. Reload the running page to see the change.`
+    return `Updated ${fileLine}.`
+  }
   if (opts.run || workHasDevServerTerminal(work)) {
     if (workHasDevServerTerminal(work)) {
-      return 'Started the dev server. Check the Integrated Terminal for the localhost URL.'
+      const guess = folder ? inferDevServerUrl(folder) : 'http://localhost:5173'
+      return `Started the dev server. Open **${guess}** (check the Terminal tab if that port differs).`
     }
-    return 'Could not confirm a running localhost URL yet. Say continue and I will start the dev server.'
+    return 'Could not confirm a running localhost URL yet. Say **run it** and I will start the dev server.'
   }
   if (attemptedFail) return 'Edits were attempted but did not apply (unverified). Check the last tool error.'
   return 'No verified file updates this turn.'
@@ -1845,33 +2131,104 @@ async function postDesktopAgentRound(api, body) {
   return last
 }
 
+function formatAttachedSkillsBlock(attachedSkills, attachedPluginSkills, attachedLocalSkills, connectors, manualFileSkills) {
+  const cloudRows = Array.isArray(attachedSkills) ? attachedSkills.filter((row) => row?.id || row?.name) : []
+  const pluginRows = Array.isArray(attachedPluginSkills)
+    ? attachedPluginSkills.filter((row) => row?.insert || row?.label || row?.description || row?.body)
+    : []
+  const localRows = Array.isArray(attachedLocalSkills)
+    ? attachedLocalSkills.filter((row) => row?.name)
+    : []
+  const fileSkillRows = Array.isArray(manualFileSkills) ? manualFileSkills.filter((row) => row?.name) : []
+  if (!cloudRows.length && !pluginRows.length && !localRows.length && !fileSkillRows.length) return ''
+  const parts = [
+    'USER SKILLS ATTACHED FOR THIS RUN:',
+    'Start your reply by briefly acknowledging each attached skill — name it, explain what it is, and list 2–3 things the user can ask you to do with it now. Full SKILL.md bodies are preloaded below; read and analyze them before acting. Call read_skill only if a body is missing.',
+  ]
+  const pluginBlock = formatAttachedPluginSkillsBlock(pluginRows)
+  if (pluginBlock) parts.push(pluginBlock)
+  const lines = []
+  if (localRows.length || fileSkillRows.length || cloudRows.length) {
+    if (localRows.length) {
+      lines.push('BUILT-IN / LOCAL SKILLS ATTACHED:')
+      for (const row of localRows) {
+        lines.push(`\n## ${row.name} [${row.source || 'local'}]`)
+        if (row.description) lines.push(String(row.description).slice(0, 500))
+        const body = String(row.body || '').trim()
+        if (body) {
+          lines.push('\n--- SKILL.md ---')
+          lines.push(body.slice(0, 20_000))
+        } else {
+          lines.push(`Call read_skill({ name: "${row.name}" }) to load the full playbook.`)
+        }
+      }
+    }
+    if (fileSkillRows.length) {
+      lines.push('\nMANUALLY ATTACHED SKILL FILES (paperclip / drag-drop):')
+      for (const row of fileSkillRows) {
+        lines.push(`\n## ${row.name} [file${row.fileName ? `: ${row.fileName}` : ''}]`)
+        if (row.description) lines.push(String(row.description).slice(0, 500))
+        const body = String(row.body || '').trim()
+        if (body) {
+          lines.push('\n--- SKILL.md ---')
+          lines.push(body.slice(0, 20_000))
+        }
+      }
+    }
+    if (cloudRows.length) {
+      lines.push('\nCLOUD SKILLS ATTACHED (user account):')
+      for (const row of cloudRows) {
+        const title = row.name || row.file_name || row.id
+        const body = String(row.body || row.excerpt || '').trim()
+        lines.push(`\n## ${title}`)
+        if (row.description) lines.push(String(row.description).slice(0, 500))
+        if (body) lines.push(body.slice(0, 20_000))
+        else lines.push(`(No excerpt — call read_skill({ name: "${title}" }) to load it.)`)
+      }
+    }
+    parts.push(lines.join('\n'))
+  }
+  const hints = connectorHintsForAttachedSkills([...localRows, ...fileSkillRows], pluginRows, connectors)
+  if (hints) parts.push(hints)
+  parts.push('Obey attached skills when they apply. Use mcp() only after Connectors sign-in when live tools are required.')
+  return parts.join('\n\n')
+}
+
 function formatPlatformContext(data) {
   if (!data || typeof data !== 'object') return ''
   const lines = ['SOUMTOK PLATFORM CONTEXT (account-wide — any project):']
   const skills = data.skills || []
   if (skills.length) {
-    lines.push('Skills:')
+    lines.push('Your uploaded skills (attach in composer or read_skill by name):')
     for (const row of skills.slice(0, 12)) {
       lines.push(`- ${row.name || row.file_name}: ${String(row.excerpt || '').slice(0, 200)}`)
     }
   }
   const plugins = data.plugins || []
   for (const plug of plugins.slice(0, 6)) {
-    const skillLabels = (plug.skills || []).map((s) => s.label || s.id).filter(Boolean)
-    if (skillLabels.length) lines.push(`Plugin ${plug.name}: skills ${skillLabels.join(', ')}`)
+    const skills = plug.skills || []
+    if (skills.length) {
+      lines.push(
+        `Installed skill pack ${plug.name}: ${skills
+          .slice(0, 12)
+          .map((s) => `${s.label || s.id} (read_skill "${plug.plugin_id || plug.pluginId}:${s.id}")`)
+          .join('; ')}`,
+      )
+    }
   }
   const connectors = data.connectors || []
   const live = connectors.filter((c) => c.connected)
   if (live.length) {
-    lines.push('MCP connectors (use mcp(server, tool)):')
-    for (const c of live.slice(0, 10)) {
-      const tools = (c.tools || []).map((t) => t.name).filter(Boolean)
-      lines.push(`- ${c.name} (${c.id})${c.mcpUrl ? ` ${c.mcpUrl}` : ''}${tools.length ? `: ${tools.slice(0, 8).join(', ')}` : ''}`)
+    lines.push('MCP connectors — call mcp({ server: "<name or plugin_id>", tool: "<tool>", ...args }):')
+    for (const c of live.slice(0, 12)) {
+      lines.push(formatConnectorRef(c))
     }
+    const workflows = connectorWorkflowHints(live)
+    if (workflows) lines.push(workflows)
   } else {
     lines.push('MCP: none connected. User connects from Settings → Connectors (marketplace), which opens the system browser and saves the MCP URL.')
   }
-  lines.push('Images: generate_image(prompt, aspect?) saves stills to assets/generated/. Default aspect 1:1. If they asked 16:9 / 9:16 / 4:3, pass aspect and keep that ratio out of the prompt. examine_media(path) describes images/videos. No video or music generation.')
+  lines.push('Files: Soumtok extracts text from PDF, Word, Excel, PowerPoint, RTF, ODF, EPUB, ZIP, code, and plain text attachments into ATTACHED FILES. read(path) and examine_media(path) work on workspace files — images/videos use vision; documents return extracted text. Copies land in .soumtok/inbox/. generate_image for stills only. No video/music generation.')
   if (lines.length === 1) return ''
   lines.push('Use codebase_search for meaning, git() for SCM, browser() after localhost, read_skill() for SKILL.md, task() for exploration.')
   return lines.join('\n')
@@ -1931,9 +2288,7 @@ async function runSubagentTask(toolCtx, args) {
     }
     const { text, toolCalls, model: picked } = res.data
     lastText = text || lastText
-    let calls = toolCalls || []
-    const sanitized = sanitizeAssistantText(text || '')
-    if (!calls.length && sanitized.calls.length) calls = sanitized.calls
+    let calls = mergeToolCalls(toolCalls || [], text || '', sanitizeAssistantText)
     if (!calls.length) {
       return { ok: true, text: (lastText || '(no subagent output)').slice(0, 16_000) }
     }
@@ -1958,9 +2313,20 @@ const WRITE_TOOLS = /^(write|diff|edit|str_replace|apply_patch|delete|wipe_works
 async function runOneToolCall(call, folder, prefs, work, onEvent, signal, toolCtx) {
   if (signal?.aborted) return { error: 'Cancelled' }
   if (!call.id) call.id = `call_${crypto.randomUUID()}`
-  const args = parseToolArgs(call.arguments)
+  const args = toolCallArgs(call)
   const n = String(call.name || '').toLowerCase()
-  onEvent?.({ type: 'tool', name: call.name, args })
+  const contentPreview =
+    /^(write|diff|edit|str_replace|apply_patch)$/i.test(n) &&
+    (args.content || args.new_string || args.newString)
+      ? String(args.content || args.new_string || args.newString).slice(0, 16_000)
+      : ''
+  onEvent?.({
+    type: 'tool',
+    name: call.name,
+    args,
+    path: args.path || args.file || '',
+    contentPreview,
+  })
 
   const runState = toolCtx?.roundCtx?._runState
   if (isToolDisabled(runState, n, args)) {
@@ -1989,6 +2355,23 @@ async function runOneToolCall(call, folder, prefs, work, onEvent, signal, toolCt
     }
   }
 
+  if (n === 'terminal') {
+    const cmd = String(args.command || args.cmd || '')
+    if (/Get-Content|^\s*type\s+|^\s*cat\s+/im.test(cmd) && toolCtx?.roundCtx) {
+      const sig = `shellread:${cmd.replace(/\s+/g, ' ').slice(0, 140)}`
+      toolCtx.roundCtx._shellReadSig = toolCtx.roundCtx._shellReadSig || {}
+      const hits = (toolCtx.roundCtx._shellReadSig[sig] || 0) + 1
+      toolCtx.roundCtx._shellReadSig[sig] = hits
+      if (hits >= 2) {
+        const text =
+          'Shell read already ran with this command. Use write/diff to edit, or npm run dev + read_terminal — do not re-read files via terminal.'
+        onEvent?.({ type: 'result', name: call.name, ok: true, text, path: '' })
+        work.push({ role: 'tool', tool_call_id: call.id, name: call.name, content: text, ok: true })
+        return { ok: true, name: call.name, skippedRepeat: true }
+      }
+    }
+  }
+
   if (toolCtx?.roundCtx && /^(read|read_terminal|terminal_log|terminal_logs|grep|list_dir)$/.test(n)) {
     const sig = `${n}:${JSON.stringify(args).slice(0, 180)}`
     const count = (toolCtx.roundCtx._repeatSig && toolCtx.roundCtx._repeatSig[sig]) || 0
@@ -2005,10 +2388,14 @@ async function runOneToolCall(call, folder, prefs, work, onEvent, signal, toolCt
 
   const uiMode = String(toolCtx?.parentMode || 'agent').toLowerCase()
   if ((uiMode === 'plan' || uiMode === 'ask') && WRITE_TOOLS.test(n)) {
-    const text = `${n} is blocked in ${uiMode} mode. Use switch_mode(agent) after the user confirms, or ask_question to clarify first.`
-    onEvent?.({ type: 'result', name: call.name, ok: false, text })
-    work.push({ role: 'tool', tool_call_id: call.id, name: call.name, content: text, ok: false })
-    return { ok: false, name: call.name, blocked: true }
+    const rel = editPathFromArgs(args) || String(args.path || args.file || '')
+    const planDocOk = uiMode === 'plan' && (isPlanPath(rel) || isCanvasPath(rel))
+    if (!planDocOk) {
+      const text = `${n} is blocked in ${uiMode} mode. Use switch_mode(agent) after the user confirms, or ask_question to clarify first.`
+      onEvent?.({ type: 'result', name: call.name, ok: false, text })
+      work.push({ role: 'tool', tool_call_id: call.id, name: call.name, content: text, ok: false })
+      return { ok: false, name: call.name, blocked: true }
+    }
   }
 
   if (n === 'ask_question' || n === 'askquestion') {
@@ -2088,9 +2475,21 @@ async function runOneToolCall(call, folder, prefs, work, onEvent, signal, toolCt
       todos = toolCtx.roundCtx._todos
       if (folder) {
         try {
-          saveTodos(folder, todos)
+          saveTodos(folder, todos, toolCtx?.roundCtx?._threadId)
         } catch {
           /* persist optional */
+        }
+        if (String(toolCtx?.parentMode || '').toLowerCase() === 'plan') {
+          try {
+            const goal = toolCtx?.roundCtx?._runState?.goal || ''
+            const doc = writePlanDocument(folder, { goal, steps: todos, status: 'draft' })
+            if (doc?.path) {
+              onEvent?.({ type: 'plan_file', path: doc.path })
+              onEvent?.({ type: 'file', path: doc.path })
+            }
+          } catch {
+            /* optional */
+          }
         }
       }
     }
@@ -2133,6 +2532,15 @@ async function runOneToolCall(call, folder, prefs, work, onEvent, signal, toolCt
     aspect: out.aspect || args.aspect || args.aspect_ratio || args.ratio || '',
   })
   if (out.rel) onEvent?.({ type: 'file', path: out.rel })
+  if (out.rel && isCanvasPath(out.rel)) {
+    onEvent?.({ type: 'canvas', path: out.rel, title: 'Design canvas' })
+  }
+  if (out.rel && isPlanPath(out.rel)) {
+    onEvent?.({ type: 'plan_file', path: out.rel })
+  }
+  if (out.ok !== false && /^(write|diff|edit|str_replace|apply_patch|delete|wipe_workspace|clear_workspace)$/.test(n)) {
+    onEvent?.({ type: 'workspace_refresh' })
+  }
   work.push({
     role: 'tool',
     tool_call_id: call.id,
@@ -2200,8 +2608,8 @@ async function executeToolCalls({ calls, folder, prefs, work, onEvent, signal, a
     for (const call of list) {
       const cn = String(call.name || '').toLowerCase()
       if (!/^(write|diff|edit|delete|wipe_workspace|clear_workspace|str_replace|apply_patch)$/i.test(cn)) continue
-      const a = parseToolArgs(call.arguments)
-      const p = String(a.path || a.file || '').replace(/\\/g, '/')
+      const a = toolCallArgs(call)
+      const p = editPathFromArgs(a)
       if (p) {
         editPaths.push(p)
         if (roundCtx._fileBefore[p] == null) {
@@ -2221,7 +2629,11 @@ async function executeToolCalls({ calls, folder, prefs, work, onEvent, signal, a
       } catch {
         /* checkpoint optional */
       }
-      if (roundCtx._verifyBaseline == null && fs.existsSync(path.join(folder, 'tsconfig.json'))) {
+      if (
+        roundCtx._verifyBaseline == null &&
+        fs.existsSync(path.join(folder, 'tsconfig.json')) &&
+        !roundCtx._scaffoldWrote?.length
+      ) {
         try {
           const base = await runDesktopTool(folder, 'terminal', { command: 'npx tsc --noEmit' }, prefs)
           roundCtx._verifyBaseline = base.text || ''
@@ -2264,6 +2676,19 @@ async function executeToolCalls({ calls, folder, prefs, work, onEvent, signal, a
   const order = new Map(list.map((c, i) => [c.id, i]))
   toolRows.sort((a, b) => (order.get(a.tool_call_id) ?? 999) - (order.get(b.tool_call_id) ?? 999))
   work.push(...toolRows, ...other)
+  if (roundCtx._scaffoldWrote?.length && !roundCtx._userEditedBeyondScaffold) {
+    const scaffoldSet = new Set(roundCtx._scaffoldWrote.map((p) => String(p).replace(/\\/g, '/')))
+    for (const call of list) {
+      const cn = String(call.name || '').toLowerCase()
+      if (!/^(write|diff|edit|str_replace|apply_patch)$/.test(cn)) continue
+      const rel = editPathFromArgs(toolCallArgs(call))
+      const p = rel ? String(rel).replace(/\\/g, '/') : ''
+      if (p && !scaffoldSet.has(p)) {
+        roundCtx._userEditedBeyondScaffold = true
+        break
+      }
+    }
+  }
   await maybeVerifyAfterEdits(folder, prefs, list, onEvent, work, roundCtx)
   return { ok: true, failed }
 }
@@ -2353,7 +2778,7 @@ async function runStudioCompleteFallback({
   if (isTrialModelCapError(res)) {
     const hint =
       ctx?.apiHost && !/127\.0\.0\.1|localhost/i.test(ctx.apiHost)
-        ? ' Ask an admin to redeploy soumtok.com with the latest server and SOUMTOK_OPEN_ACCESS=1, or point Desktop at a local API (SOUMTOK_API=http://127.0.0.1:3000 in repo .env + npm start).'
+        ? ' Ask an admin to redeploy soumtok.com with the latest server and SOUMTOK_OPEN_ACCESS=1, or point Desktop at a local API (SOUMTOK_API=http://localhost:5173 in repo .env + npm run dev).'
         : ''
     return {
       error: errorFromResponse(res, 'That model is not on your trial plan. Pick another model or upgrade.') + hint,
@@ -2448,6 +2873,10 @@ async function runAgentHarness({
   openFiles,
   branch,
   files,
+  attachedSkills,
+  attachedPluginSkills,
+  attachedLocalSkills,
+  attachedManualSkills,
   agentPrefs,
   subagentModel,
   signal,
@@ -2455,13 +2884,27 @@ async function runAgentHarness({
   onIntegratedTerminalRun,
   onTerminalMirror,
   threadTitle,
+  threadId,
 }) {
+  const scopedThreadId = String(threadId || '').trim()
+  const priorTurns = Array.isArray(messages) ? messages.filter((m) => m && m.role !== 'system') : []
+  const isFreshThread = priorTurns.length === 0
+  let uiMode = String(mode || 'agent').toLowerCase()
+  const askedPlanFirst = userWantsPlanFirst(userMessage)
+  if (askedPlanFirst) {
+    uiMode = 'plan'
+    onEvent?.({ type: 'mode_switch', target: 'plan', explanation: 'Planning first — writes go to PLAN.md only until you send BUILD.' })
+  } else if (userWantsBuildPlan(userMessage)) {
+    uiMode = 'agent'
+    onEvent?.({ type: 'mode_switch', target: 'agent', explanation: 'Executing approved plan.' })
+  }
+  mode = uiMode
   let prefs = applyIntelligenceToPrefs(
     applyRunModeToPrefs(agentPrefs && typeof agentPrefs === 'object' ? agentPrefs : {}),
   )
-  if (!folder && userMessage && (userWantsCodeInspection(userMessage) || userWantsAnalysis(userMessage))) {
+  if (!folder && userMessage && messageNeedsProjectFolder(userMessage, { attachments: files })) {
     return {
-      error: 'Open a project folder (File → Open Folder) so Soumtok can read source files on your PC.',
+      error: 'Open a project folder (File → Open Folder) so Soumtok can read and edit files on your PC.',
       text: '',
     }
   }
@@ -2476,10 +2919,49 @@ async function runAgentHarness({
     .filter((m) => m && m.role !== 'system')
     .map((m) => ({ ...m }))
   prefs = prefsForAgentTools(prefs, userMessage, work, threadTitle)
-  const attach = collectImageFiles(files)
+  const generalChat = isGeneralOrSoumtokChat(userMessage)
+  if (!folder) {
+    prefs = { ...prefs, localToolsEnabled: false, activeTaskKind: 'chat' }
+  } else if (generalChat) {
+    prefs = { ...prefs, activeTaskKind: 'chat' }
+  }
+  if (!folder || generalChat) {
+    injectSystemBlock(work, composeGeneralAssistantBrief(userMessage, Boolean(folder)), 'SOUMTOK GENERAL ASSISTANT')
+  }
+  if (isFreshThread) {
+    injectSystemBlock(
+      work,
+      [
+        'NEW AGENT CHAT (this tab only):',
+        'This conversation is separate from other agent tabs in the sidebar.',
+        'Answer only what the user says in THIS chat — do not continue, reference, or assume tasks from other agent tabs unless they paste that context here.',
+        generalChat
+          ? 'This is a general question — reply in plain language; no repo scan or file tools unless they ask for code work.'
+          : '',
+      ]
+        .filter(Boolean)
+        .join('\n'),
+      'SOUMTOK NEW CHAT',
+    )
+  }
+  let attach = collectImageFiles(files)
+  try {
+    const {
+      enrichAttachmentsText,
+      persistAttachmentsToInbox,
+      formatAttachedDocumentsBlock,
+    } = require('./documentExtract')
+    attach = await enrichAttachmentsText(attach)
+    if (folder) attach = persistAttachmentsToInbox(folder, attach)
+    const docBlock = formatAttachedDocumentsBlock(attach)
+    if (docBlock) injectSystemBlock(work, docBlock, 'SOUMTOK ATTACHED FILES')
+  } catch {
+    /* optional local extract */
+  }
   const thisTurnHasImage = attach.some(fileIsImage)
+  const thisTurnHasAttach = attach.length > 0
   if (userMessage) {
-    work.push({ role: 'user', content: userMessage, files: thisTurnHasImage ? attach : attach.length ? attach : undefined })
+    work.push({ role: 'user', content: userMessage, files: thisTurnHasAttach ? attach : undefined })
   }
 
   const runMeta = { repliedViaEvent: false }
@@ -2500,7 +2982,11 @@ async function runAgentHarness({
     folder,
     branch,
     openFiles: tabsForRound,
-    mode,
+    mode: uiMode,
+    _userAskedPlanFirst: askedPlanFirst,
+    _taskKind: !folder || generalChat ? 'chat' : undefined,
+    _threadId: scopedThreadId,
+    _isFreshThread: isFreshThread,
     driver,
     modelLabel: model === 'auto' ? 'Auto' : model,
     requestedModel: model,
@@ -2515,9 +3001,37 @@ async function runAgentHarness({
   }
   if (folder) {
     try {
-      roundCtx._todos = loadTodos(folder)
+      roundCtx._todos = loadTodos(folder, scopedThreadId)
     } catch {
       roundCtx._todos = []
+    }
+    roundCtx._terminalBlock = composeTerminalStateBlock(folder)
+    if (uiMode === 'plan') {
+      injectSystemBlock(
+        work,
+        [
+          'SOUMTOK PLAN MODE:',
+          '• Read-only on source files — only write PLAN.md and CANVAS.md.',
+          '• Use todo_write + structured PLAN.md with clear steps, file paths, and acceptance criteria.',
+          '• When user sends BUILD, switch_mode(agent) and execute the plan.',
+          userWantsCanvas(userMessage)
+            ? '• User asked for design/docs — write CANVAS.md with layout sections, page flow, and component notes.'
+            : '',
+        ]
+          .filter(Boolean)
+          .join('\n'),
+        'SOUMTOK PLAN MODE',
+      )
+    }
+    if (userWantsBuildPlan(userMessage)) {
+      const planBody = readPlanDocument(folder)
+      injectSystemBlock(
+        work,
+        planBody
+          ? `USER APPROVED PLAN — execute PLAN.md now:\n\n${planBody.slice(0, 12_000)}`
+          : 'USER SENT BUILD — execute the in-chat plan and todos. Write files and verify in terminal.',
+        'EXECUTE PLAN',
+      )
     }
   }
 
@@ -2544,6 +3058,17 @@ async function runAgentHarness({
     if (autoImage) return autoImage
   }
 
+  if (folder && mode === 'agent') {
+    emitGreenfieldScaffoldEvents({
+      folder,
+      userMessage,
+      work,
+      onEvent,
+      ctx: roundCtx,
+      allowWhenWrites: true,
+    })
+  }
+
   if (folder) {
     await ensureWorkspaceContext({
       folder,
@@ -2561,7 +3086,7 @@ async function runAgentHarness({
         if (sysIdx >= 0) work[sysIdx].content = `${work[sysIdx].content}\n\n${rules}`
         else work.unshift({ role: 'system', content: rules })
       }
-      if (prefs.skillsEnabled !== false) {
+      if (prefs.skillsEnabled !== false && !roundCtx._scaffoldWrote?.length) {
         const skillCat = skillsCatalogBlock(folder, { thirdPartyImports: prefs.thirdPartyImports !== false })
         if (skillCat) injectSystemBlock(work, skillCat, 'SKILLS (read_skill')
       }
@@ -2569,21 +3094,82 @@ async function runAgentHarness({
   }
 
   let platformConnectors = []
+  let cloudSkills = []
+  let accountPluginSkills = []
+  const skipPlatformContext = Boolean(roundCtx._scaffoldWrote?.length) && workspaceIsGreenfield(folder)
   try {
-    const ctxRes = await api('GET', '/api/studio/tools/context', null, 20_000)
-    if (ctxRes.status === 200 && ctxRes.data) {
-      platformConnectors = ctxRes.data.connectors || []
-      if (roundCtx._taskKind !== 'image') {
-        const block = formatPlatformContext(ctxRes.data)
-        if (block) {
-          const sysIdx = work.findIndex((m) => m.role === 'system')
-          if (sysIdx >= 0) work[sysIdx].content = `${work[sysIdx].content}\n\n${block}`
-          else work.unshift({ role: 'system', content: block })
+    if (!skipPlatformContext) {
+      const ctxRes = await api('GET', '/api/studio/tools/context', null, 8_000)
+      if (ctxRes.status === 200 && ctxRes.data) {
+        platformConnectors = ctxRes.data.connectors || []
+        cloudSkills = ctxRes.data.skills || []
+        accountPluginSkills = flattenInstalledPluginSkills(ctxRes.data.plugins || [])
+        if (roundCtx._taskKind !== 'image') {
+          const block = formatPlatformContext(ctxRes.data)
+          if (block) {
+            const sysIdx = work.findIndex((m) => m.role === 'system')
+            if (sysIdx >= 0) work[sysIdx].content = `${work[sysIdx].content}\n\n${block}`
+            else work.unshift({ role: 'system', content: block })
+          }
         }
       }
     }
   } catch {
     /* platform context optional */
+  }
+
+  const attachmentSkillDocs = skillsFromAttachments(files)
+  const enrichedLocalSkills = folder
+    ? enrichAttachedLocalSkills(folder, attachedLocalSkills)
+    : Array.isArray(attachedLocalSkills)
+      ? attachedLocalSkills.filter((row) => row?.name)
+      : []
+  const enrichedCloudSkills = await enrichAttachedCloudSkills(attachedSkills, getBuffer)
+  const enrichedManualSkills = (Array.isArray(attachedManualSkills) ? attachedManualSkills : [])
+    .filter((row) => row?.name)
+    .map((row) => ({
+      ...row,
+      body: row.body || attachmentSkillDocs.find((doc) => doc.name === row.name)?.body || '',
+    }))
+  for (const doc of attachmentSkillDocs) {
+    if (!enrichedManualSkills.some((row) => row.name === doc.name)) {
+      enrichedManualSkills.push(doc)
+    }
+  }
+  const enrichedPluginSkills = await enrichAttachedPluginSkills(attachedPluginSkills, accountPluginSkills)
+  const attachedBlock = formatAttachedSkillsBlock(
+    enrichedCloudSkills,
+    enrichedPluginSkills,
+    enrichedLocalSkills,
+    platformConnectors,
+    enrichedManualSkills,
+  )
+  if (attachedBlock && roundCtx._taskKind !== 'image') {
+    injectSystemBlock(work, attachedBlock, 'USER SKILLS ATTACHED')
+  }
+
+  if (folder && scopedThreadId && roundCtx._taskKind !== 'image' && !isFreshThread) {
+    const memBrief = composeSkillMemoryBrief(loadSkillMemory(folder, scopedThreadId))
+    if (memBrief) injectSystemBlock(work, memBrief, 'SAVED SKILLS (THIS CHAT)')
+    const toRemember = [
+      ...enrichedLocalSkills,
+      ...enrichedManualSkills,
+      ...enrichedCloudSkills.map((row) => ({
+        name: row.name || row.file_name,
+        description: row.description || row.excerpt?.slice(0, 200) || row.name,
+        body: row.body || row.excerpt || '',
+        source: row.source || 'cloud',
+        fileName: row.file_name || '',
+      })),
+      ...enrichedPluginSkills.map((row) => ({
+        name: row.label || row.id,
+        description: row.description || row.pluginName || '',
+        body: row.body || row.insert || '',
+        source: 'plugin',
+        fileName: row.sourceUrl || '',
+      })),
+    ].filter((row) => row.name)
+    if (toRemember.length && scopedThreadId) rememberSkills(folder, toRemember, scopedThreadId)
   }
 
   if (roundCtx._runState) {
@@ -2592,6 +3178,67 @@ async function runAgentHarness({
     roundCtx._runState.acceptanceCriteria = acceptanceFor(roundCtx._runState.taskKind, roundCtx._runState.goal)
   }
   freezeSystemBase(work, roundCtx)
+
+  const attachedThisRun = new Set(
+    [
+      ...enrichedLocalSkills,
+      ...enrichedManualSkills,
+      ...enrichedCloudSkills,
+      ...enrichedPluginSkills,
+    ]
+      .map((row) => String(row.name || row.label || row.file_name || '').toLowerCase())
+      .filter(Boolean),
+  )
+  const hasAttachedSkills =
+    enrichedLocalSkills.length + enrichedManualSkills.length + enrichedCloudSkills.length + enrichedPluginSkills.length > 0
+
+  if (
+    folder &&
+    scopedThreadId &&
+    mode === 'agent' &&
+    roundCtx._taskKind !== 'image' &&
+    !roundCtx._skillAsked &&
+    !hasAttachedSkills &&
+    !isFreshThread &&
+    !generalChat
+  ) {
+    const mem = loadSkillMemory(folder, scopedThreadId)
+    const matched = matchSkillsForQuery(mem.skills, userMessage, attachedThisRun)
+    const skillAsk = buildSkillUseAsk(matched)
+    if (skillAsk) {
+      const askId = `ask_${crypto.randomUUID()}`
+      onEvent?.({ type: 'ask', id: askId, ...skillAsk })
+      try {
+        const answers = await waitForAskReply(askId, signal)
+        roundCtx._skillAsked = true
+        const picked = answers?.use_skill
+        const choice = Array.isArray(picked) ? picked[0] : picked
+        const choiceText = String(choice || '').trim()
+        if (choiceText && !/^none$/i.test(choiceText) && !/continue without/i.test(choiceText)) {
+          const skillName =
+            choiceText.split(' — ')[0].trim() ||
+            matched.find((row) => choiceText.toLowerCase().includes(String(row.name).toLowerCase()))?.name ||
+            choiceText
+          const saved = skillBodyFromMemory(mem, skillName)
+          if (saved) {
+            injectSystemBlock(work, formatChosenSkillBlock(saved), 'USER CHOSE SAVED SKILL')
+            rememberSkills(folder, [saved], scopedThreadId)
+          }
+          const note = `User chose to apply saved skill "${skillName}" for this run.`
+          roundCtx._liveUserMessage = `${String(userMessage || '').trim()}\n\n${note}`
+          for (let wi = work.length - 1; wi >= 0; wi -= 1) {
+            if (work[wi].role === 'user') {
+              work[wi].content = roundCtx._liveUserMessage
+              break
+            }
+          }
+          if (roundCtx._runState) roundCtx._runState.goal = roundCtx._liveUserMessage
+        }
+      } catch {
+        /* skipped */
+      }
+    }
+  }
 
   if (
     folder &&
@@ -2621,9 +3268,10 @@ async function runAgentHarness({
 
   const toolCtx = {
     api,
+    getBuffer,
     folder,
     prefs,
-    parentMode: mode,
+    parentMode: uiMode,
     waitForAskReply,
     model,
     subagentModel: subagentModel || 'auto',
@@ -2633,6 +3281,11 @@ async function runAgentHarness({
     branch,
     driver,
     connectors: platformConnectors,
+    cloudSkills: [
+      ...(Array.isArray(cloudSkills) ? cloudSkills : []),
+      ...(Array.isArray(attachedSkills) ? attachedSkills : []),
+    ],
+    pluginSkills: accountPluginSkills,
     async callMcp(args) {
       const server = String(args.server || args.connector || '').trim()
       const tool = String(args.tool || args.name || '').trim()
@@ -2643,15 +3296,33 @@ async function runAgentHarness({
         list = ctxRes.data?.connectors || []
         toolCtx.connectors = list
       }
-      const conn = list.find((c) => c.name === server || c.id === server)
+      let conn = resolveMcpConnector(list, server)
       if (!conn) {
+        const hints = list
+          .filter((c) => c.connected)
+          .slice(0, 8)
+          .map((c) => c.plugin_id || c.pluginId || c.name)
+          .filter(Boolean)
+        const hint = hints.length ? ` Connected: ${hints.join(', ')}.` : ''
         return {
           ok: false,
-          text: `No MCP connector "${server}". Open Settings → Connectors, search the marketplace, and tap Connect (browser sign-in).`,
+          text: `No MCP connector "${server}".${hint} Open Settings → Connectors, search the marketplace, and tap Connect (browser sign-in).`,
         }
       }
       if (!conn.connected) {
-        return { ok: false, text: `Connector "${conn.name}" is not connected — finish OAuth in Soumtok.` }
+        return { ok: false, text: `Connector "${conn.name}" is not connected — finish OAuth in Soumtok Settings → Connectors.` }
+      }
+      if (!(conn.tools || []).length) {
+        try {
+          const refresh = await api('POST', `/api/connectors/${encodeURIComponent(conn.id)}/connect`, null, 45_000)
+          const tools = refresh.data?.mcp?.tools
+          if (refresh.status === 200 && Array.isArray(tools) && tools.length) {
+            conn = { ...conn, tools, connected: refresh.data?.connected ?? conn.connected }
+            toolCtx.connectors = list.map((row) => (row.id === conn.id ? conn : row))
+          }
+        } catch {
+          /* use cached connector row */
+        }
       }
       const mcpArgs = Object.fromEntries(
         Object.entries(args).filter(([key]) => !['server', 'connector', 'tool', 'name'].includes(key)),
@@ -2714,15 +3385,30 @@ async function runAgentHarness({
   let totalPrompt = 0
   let totalCompletion = 0
   const maxRounds = maxToolRounds(driver === 'bot' ? 'bot' : 'ide', prefs)
+  syncTaskKind(roundCtx, work, userMessage, prefs)
 
-  function ensureWriteHasUserConclusion() {
+  async function ensureWriteHasUserConclusion() {
     if (runMeta.repliedViaEvent) return
     const askedRun =
       roundCtx._taskKind === 'run' ||
       userAskedForLocalhost(String(userMessage || lastUserTextFromWork(work, userMessage) || ''))
-    if (!workHasFileWritesThisTurn(work) && !askedRun) return
+    if (!workHasFileWritesThisTurn(work) && !askedRun && !buildStillNeedsDevServer(folder, work)) return
+    let runUrl = roundCtx._autoDevUrl || null
+    if (!runUrl && folder && buildStillNeedsDevServer(folder, work)) {
+      runUrl = await maybeAutoStartDevServer({
+        folder,
+        work,
+        prefs,
+        onEvent,
+        signal,
+        toolCtx,
+      })
+      if (runUrl) roundCtx._autoDevUrl = runUrl
+    }
     const text =
-      lastText && isUserFacingConclusion(lastText, work) ? lastText : composeLocalConclusion(work, { run: askedRun })
+      lastText && isUserFacingConclusion(lastText, work)
+        ? lastText
+        : composeLocalConclusion(work, { run: askedRun, folder, runUrl })
     runMeta.repliedViaEvent = true
     onEvent?.({
       type: 'assistant',
@@ -2744,23 +3430,38 @@ async function runAgentHarness({
       type: 'status',
       text: roundCtx._skipThinkStatus
         ? 'Working — applying…'
-        : round === 0
-          ? signalIntent(roundCtx._taskKind || roundCtx._runState?.taskKind || 'execute', liveUser)
-          : round === 1
-            ? 'Planning…'
+        : roundCtx._planSummary && round <= 2
+          ? roundCtx._planSummary
+          : round === 0
+            ? signalIntent(roundCtx._taskKind || roundCtx._runState?.taskKind || 'execute', liveUser)
             : `Working · step ${round + 1}…`,
     })
+    roundCtx._skipThinkStatus = false
     if (round === 0 && thisTurnHasImage) {
       onEvent?.({
         type: 'status',
         text: 'Sending image to Soumtok (vision analysis for your model)…',
       })
     }
+    if (round === 0 && attach.some((f) => /\.pdf$|\.docx$/i.test(String(f.name || '')))) {
+      onEvent?.({ type: 'status', text: 'Extracting document text for the model…' })
+    }
     if (round === 0 && model === 'auto') {
       onEvent?.({ type: 'status', text: 'Auto — Soumtok will pick model for cost and task…' })
     }
 
     pinLiveUserOnWork(work, liveUser)
+    let thinkTimer = null
+    let thinkDots = 0
+    const stopThinkPulse = () => {
+      if (thinkTimer) clearInterval(thinkTimer)
+      thinkTimer = null
+    }
+    onEvent?.({ type: 'status', text: `Thinking · round ${round + 1}…` })
+    thinkTimer = setInterval(() => {
+      thinkDots = (thinkDots + 1) % 4
+      onEvent?.({ type: 'status', text: `Model thinking${'.'.repeat(thinkDots + 1)} · round ${round + 1}` })
+    }, 2000)
     const res = await postDesktopAgentRound(api, {
       model,
       mode,
@@ -2769,10 +3470,11 @@ async function runAgentHarness({
       workspaceRoot: folder,
       openFiles: tabsForRound,
       branch,
-      files: round === 0 && thisTurnHasImage ? attach : undefined,
+      files: round === 0 && thisTurnHasAttach ? attach : undefined,
       agentPrefs: prefs,
       analysisKind: roundCtx._taskKind,
     })
+    stopThinkPulse()
 
     if (shouldUseStudioCompleteFallback(res)) {
       if (round > 0) {
@@ -2843,15 +3545,9 @@ async function runAgentHarness({
             repliedViaEvent: runMeta.repliedViaEvent,
           }
         }
-        if (workHasFileWritesThisTurn(work)) {
-          lastText = concludeWrittenWork({
-            work,
-            onEvent,
-            runMeta,
-            lastText,
-            requestedModel: roundCtx.requestedModel || model,
-          })
-          return { text: lastText, messages: persistWork(work), repliedViaEvent: true }
+        if (workHasFileWritesThisTurn(work) || buildStillNeedsDevServer(folder, work)) {
+          await ensureWriteHasUserConclusion()
+          return { text: lastText, messages: persistWork(work), repliedViaEvent: runMeta.repliedViaEvent }
         }
         return {
           error: 'The model could not continue this tool round. Send the same request again.',
@@ -2865,15 +3561,9 @@ async function runAgentHarness({
         round -= 1
         continue
       }
-      if (workHasFileWritesThisTurn(work)) {
-        lastText = concludeWrittenWork({
-          work,
-          onEvent,
-          runMeta,
-          lastText,
-          requestedModel: roundCtx.requestedModel || model,
-        })
-        return { text: lastText, messages: persistWork(work), repliedViaEvent: true }
+      if (workHasFileWritesThisTurn(work) || buildStillNeedsDevServer(folder, work)) {
+        await ensureWriteHasUserConclusion()
+        return { text: lastText, messages: persistWork(work), repliedViaEvent: runMeta.repliedViaEvent }
       }
       return { error: errMsg, text: lastText, messages: persistWork(work) }
     }
@@ -2892,11 +3582,12 @@ async function runAgentHarness({
     }
     if (res.data?.wrapNote && round === 0) onEvent?.({ type: 'status', text: res.data.wrapNote })
 
-    let calls = toolCalls || []
     const sanitized = sanitizeAssistantText(text || '')
-    if (!calls.length && sanitized.calls.length) calls = sanitized.calls
+    let calls = mergeToolCalls(toolCalls || [], text || '', sanitizeAssistantText)
 
     if (!calls.length) {
+      emitPlanFromAssistantText(onEvent, roundCtx, text, round, mode, userMessage)
+      const taskKindNow = roundCtx._taskKind || 'execute'
       const progress = noteRoundProgress(roundCtx._runState, work)
       const wantsWork = userWantedAgentWork(work, userMessage)
       const noUsefulTools = !workAfterLastHuman(work).some((m) => m.role === 'tool' && m.ok !== false)
@@ -2931,34 +3622,29 @@ async function runAgentHarness({
             onEvent,
             ctx: roundCtx,
           })
-          const kindNow = syncTaskKind(roundCtx, work, userMessage, prefs)
           steerWithNudge(
             work,
             stalledBuild
               ? '[Soumtok harness] Starter files are on disk (SCAFFOLD ON DISK). Tighten them to the USER request, then terminal("npm install"); terminal("npm run dev"). Windows: ; not &&. Do not recreate a second tree.'
               : progress.stuck
-                ? adaptiveSteering(kindNow, work, roundCtx._runState) || stuckSteerNudge(kindNow)
+                ? adaptiveSteering(taskKindNow, work, roundCtx._runState) || stuckSteerNudge(taskKindNow)
                 : APPLY_EDIT_NOW_NUDGE,
             roundCtx,
           )
         }
+        roundCtx._skipThinkStatus = true
         onEvent?.({ type: 'status', text: 'Working — applying…' })
         continue
       }
-      const taskKindNow = syncTaskKind(roundCtx, work, userMessage, prefs)
       if (
-        mode === 'agent' &&
-        folder &&
-        round < maxRounds - 1 &&
-        shouldContinueAgentTask({
+        agentShouldAutoContinue({
           mode,
           folder,
-          kind: taskKindNow,
-          work,
-          text: text || '',
           round,
           maxRounds,
-          state: roundCtx._runState,
+          taskKind: taskKindNow,
+          work,
+          runState: roundCtx._runState,
         })
       ) {
         if (taskKindNow === 'image') {
@@ -2975,8 +3661,16 @@ async function runAgentHarness({
           if (autoImage) return autoImage
         }
         if (String(text || '').trim()) work.push({ role: 'assistant', content: text })
-        steerWithNudge(work, taskIncompleteNudge(taskKindNow), roundCtx)
-        onEvent?.({ type: 'status', text: 'Working — applying…' })
+        const nudge = buildStillNeedsDevServer(folder, work)
+          ? taskIncompleteNudge('build')
+          : assistantShowsCodeWithoutWriting(text)
+            ? GREENFIELD_BUILD_NUDGE
+            : assistantDeferredAction(text)
+              ? AGENT_ACT_NOW_NUDGE
+              : taskIncompleteNudge(taskKindNow)
+        steerWithNudge(work, nudge, roundCtx)
+        roundCtx._skipThinkStatus = true
+        onEvent?.({ type: 'status', text: `Working · step ${round + 2}…` })
         continue
       }
       const cleanedReply = emitAssistantMessage(
@@ -2991,14 +3685,14 @@ async function runAgentHarness({
       if (cleanedReply) lastText = cleanedReply
       else if (sanitized.cleaned) lastText = sanitized.cleaned
       const outText = textLooksLikeDsml(lastText) ? stripDsmlFromText(lastText) : lastText
-      const taskKind = syncTaskKind(roundCtx, work, userMessage, prefs)
+      await ensureWriteHasUserConclusion()
+      const taskKind = roundCtx._taskKind || 'execute'
       const incomplete =
         mode === 'agent' &&
         folder &&
         taskKind !== 'analyze' &&
         taskKind !== 'chat' &&
-        !taskCompletionMet(taskKind, work, roundCtx._runState)
-      ensureWriteHasUserConclusion()
+        (buildStillNeedsDevServer(folder, work) || !taskCompletionMet(taskKind, work, roundCtx._runState))
       return {
         done: true,
         incomplete,
@@ -3025,6 +3719,34 @@ async function runAgentHarness({
     drainAgentSteer(work, roundCtx)
     syncTaskKind(roundCtx, work, userMessage, prefs)
     noteRoundProgress(roundCtx._runState, work)
+    if (
+      folder &&
+      workHasSuccessfulWrites(workAfterLastHuman(work)) &&
+      round < maxRounds - 2 &&
+      !(roundCtx._scaffoldWrote?.length && round < 2)
+    ) {
+      const liveUser = lastUserTextFromWork(work, userMessage)
+      const deliverables = roundCtx._patternDeliverables || patternDeliverables(liveUser)
+      const complete = runCompletenessCheck(folder, {
+        deliverables,
+        userText: liveUser,
+        taskKind: roundCtx._taskKind,
+      })
+      const quality = runQualityGates(folder, { userText: liveUser })
+      const gaps = [...complete.gaps, ...quality.failures]
+      if (gaps.length && !roundCtx._brainGapSig) {
+        roundCtx._brainGapSig = gaps.join('|').slice(0, 200)
+        steerWithNudge(
+          work,
+          `[Soumtok harness] Build incomplete — fix NOW:\n${gaps.slice(0, 8).map((g) => `- ${g}`).join('\n')}\nWrite/diff missing pieces. Then npm run dev.`,
+          roundCtx,
+        )
+        onEvent?.({ type: 'todo', todos: gaps.slice(0, 8).map((g, i) => ({ id: `gap-${i}`, content: g, status: 'pending' })), merge: true })
+        onEvent?.({ type: 'status', text: `Fixing ${gaps.length} gap(s)…` })
+      } else if (!gaps.length) {
+        roundCtx._brainGapSig = ''
+      }
+    }
     if (ran?.failed?.length && round < maxRounds - 1 && !roundCtx._failNudge) {
       roundCtx._failNudge = true
       const stuckFails = Object.entries(roundCtx._failSig || {}).filter(([, n]) => n >= 3)
@@ -3056,7 +3778,7 @@ async function runAgentHarness({
     })
     if (!fb.error && (fb.text || runMeta.repliedViaEvent)) {
       if (fb.text) lastText = fb.text
-      ensureWriteHasUserConclusion()
+      await ensureWriteHasUserConclusion()
       return {
         ...fb,
         promptTokens: totalPrompt + (fb.promptTokens || 0),
@@ -3079,7 +3801,7 @@ async function runAgentHarness({
     })
     if (!fb.error && (fb.text || runMeta.repliedViaEvent)) {
       if (fb.text) lastText = fb.text
-      ensureWriteHasUserConclusion()
+      await ensureWriteHasUserConclusion()
       return {
         ...fb,
         promptTokens: totalPrompt + (fb.promptTokens || 0),
@@ -3089,15 +3811,15 @@ async function runAgentHarness({
     }
   }
 
-  ensureWriteHasUserConclusion()
+  await ensureWriteHasUserConclusion()
 
-  const taskKind = syncTaskKind(roundCtx, work, userMessage, prefs)
+  const taskKind = roundCtx._taskKind || 'execute'
   const incomplete =
     mode === 'agent' &&
     folder &&
     taskKind !== 'analyze' &&
     taskKind !== 'chat' &&
-    !taskCompletionMet(taskKind, work, roundCtx._runState)
+    (buildStillNeedsDevServer(folder, work) || !taskCompletionMet(taskKind, work, roundCtx._runState))
 
   return {
     done: true,
@@ -3107,18 +3829,20 @@ async function runAgentHarness({
     promptTokens: totalPrompt,
     completionTokens: totalCompletion,
     note: incomplete
-      ? 'Unmet acceptance — no verified successful edit/test/localhost yet. Say continue to keep going.'
+      ? 'Still working toward acceptance — the agent will keep going on the next message if needed.'
       : lastText && isSubstantiveAgentReply(lastText, work)
         ? undefined
-        : 'Stopped after max tool rounds without a verified conclusion — send continue to keep going.',
+        : 'Stopped after max tool rounds — send continue to keep going.',
     repliedViaEvent: runMeta.repliedViaEvent,
   }
 }
 
-function isWriteBlockedInUiMode(uiMode, toolName) {
+function isWriteBlockedInUiMode(uiMode, toolName, relPath) {
   const n = String(toolName || '').toLowerCase()
   const mode = String(uiMode || 'agent').toLowerCase()
-  return (mode === 'plan' || mode === 'ask') && WRITE_TOOLS.test(n)
+  if (!(mode === 'plan' || mode === 'ask') || !WRITE_TOOLS.test(n)) return false
+  if (mode === 'plan' && relPath && (isPlanPath(relPath) || isCanvasPath(relPath))) return false
+  return true
 }
 
 module.exports = {
@@ -3129,5 +3853,9 @@ module.exports = {
   isWriteBlockedInUiMode,
   runOneToolCall,
   postDesktopAgentRound,
+  extractPlanSteps,
+  agentShouldAutoContinue,
+  buildStillNeedsDevServer,
+  composeLocalConclusion,
   shouldUseStudioCompleteFallback,
 }

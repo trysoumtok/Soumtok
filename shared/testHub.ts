@@ -1,5 +1,5 @@
 import type { ChatFile } from './chatMedia.ts'
-import { inlineAssets } from './preview.ts'
+import { inlineAssets, isBinaryWorkspaceFile } from './preview.ts'
 
 export const TEST_HUB_SYSTEM = `You are in Soumtok Test Hub — direct model access with no agent harness, no tools, and no automatic workspace scan.
 
@@ -13,9 +13,12 @@ This chat has memory: earlier turns and the current project files stay in contex
 
 Answer directly and helpfully — build, explain, review, or debug based on what they provide.
 
-When the user asks you to build or change a page, app, or UI: always include runnable fenced files with paths, e.g. a full \`\`\`html file="index.html"\`\`\` block. Add separate \`\`\`css\`\`\` and \`\`\`javascript\`\`\` blocks when styles or scripts are separate. Prefer rewriting the full updated file contents for each changed path so the live preview stays correct.
+When the user asks you to build or change a page, app, or UI: always output **separate closed fences** with paths, for example:
+\`\`\`html file="index.html"\`\`\`, \`\`\`css file="style.css"\`\`\`, \`\`\`javascript file="script.js"\`\`\`.
+index.html must be real HTML markup (not raw JavaScript pasted in the body). Put logic in script.js and styles in style.css.
+Prefer rewriting the **full** updated file for each path you touch so the Code panel and Preview stay in sync.
 
-Soumtok renders those files in the Preview panel on the right — that live preview is how the user sees what you built.`
+Soumtok lists every file under **Code** and runs them in **Preview** on the right — that live preview is how the user sees what you built.`
 
 export type TestHubMessage = {
   role: 'user' | 'assistant'
@@ -103,6 +106,52 @@ function looksLikeCss(body: string) {
   return /[{;}]/.test(t) && /[.#]?[\w-]+\s*\{/.test(t)
 }
 
+function looksLikeJs(body: string) {
+  const t = body.trim()
+  if (!t || looksLikeHtml(t) || looksLikeCss(t)) return false
+  return (
+    /\b(const|let|var|function|import|export|class|async|await)\b/.test(t) &&
+    /[=;{}()]/.test(t)
+  )
+}
+
+/** True when content should be treated as an HTML document, not JS/CSS source. */
+function isHtmlDocument(content: string) {
+  const t = String(content || '').trim()
+  if (!t) return false
+  if (looksLikeHtml(t)) return true
+  if (looksLikeJs(t) || looksLikeCss(t)) return false
+  return /<(?:!DOCTYPE|html|head|body|div|main|section|canvas|button|input|table|header|footer|nav|form|style|script|meta|link|span|p|h[1-6]|ul|ol|li)\b/i.test(
+    t,
+  )
+}
+
+function demoteMislabeledIndexHtml(files: Record<string, string>) {
+  const raw = files['index.html']?.trim()
+  if (!raw || isHtmlDocument(raw)) return
+  delete files['index.html']
+  if (looksLikeJs(raw) && !files['script.js']?.trim()) files['script.js'] = raw
+  else if (looksLikeCss(raw) && !files['style.css']?.trim()) files['style.css'] = raw
+}
+
+function bodyHasVisibleMarkup(inner: string) {
+  const t = String(inner || '')
+  if (/<script[\s>]/i.test(t)) return true
+  return /(?:^|\n)\s*<(?:div|main|canvas|button|input|form|table|section|nav|header|footer|ul|ol|svg)\b/i.test(t)
+}
+
+/** Raw JS pasted inside <body> without <script> shows as text — wrap it so the preview runs. */
+function fixJsTextInHtmlBody(html: string) {
+  return html.replace(/<body([^>]*)>([\s\S]*?)<\/body>/i, (full, attrs, inner) => {
+    const t = String(inner || '').trim()
+    if (!t || bodyHasVisibleMarkup(t)) return full
+    if (!looksLikeJs(t)) return full
+    const asModule = /\bimport\s+[\s\S]*?\bfrom\s+['"]/.test(t) || /\bexport\s+/.test(t)
+    const body = escapeScriptBody(t)
+    return `<body${attrs}><script${asModule ? ' type="module"' : ''}>${body}<\/script></body>`
+  })
+}
+
 function stripLeadingFilename(body: string) {
   const lines = body.split('\n')
   if (lines.length > 1 && /^[\w./-]+\.\w+$/.test(lines[0].trim())) {
@@ -161,6 +210,7 @@ function truncateHtmlDocument(html: string) {
 function wrapHtmlFragment(html: string) {
   const t = html.trim()
   if (!t) return ''
+  if (looksLikeJs(t) && !looksLikeHtml(t)) return ''
   if (/^<!DOCTYPE html/i.test(t) || /^<html[\s>]/i.test(t)) {
     return /<\/html>/i.test(t) ? truncateHtmlDocument(t) : `${t}</body></html>`
   }
@@ -172,6 +222,7 @@ function wrapHtmlFragment(html: string) {
 }
 
 function promoteHtmlFiles(files: Record<string, string>) {
+  demoteMislabeledIndexHtml(files)
   if (files['index.html']?.trim()) {
     files['index.html'] = truncateHtmlDocument(files['index.html'])
     return files
@@ -191,14 +242,35 @@ function promoteHtmlFiles(files: Record<string, string>) {
   return files
 }
 
+/** Combine two snapshots of the same path (models often emit many fences for one file). */
+export function mergeFileBodies(prev: string, next: string): string {
+  const a = String(prev || '').trim()
+  const b = String(next || '').trim()
+  if (!a) return b
+  if (!b) return a
+  if (b.includes(a)) return b
+  if (a.includes(b)) return a
+  if (b.length < 120 && a.length > b.length * 3) return a
+  // Models often emit many small follow-up fences for the same file — stitch them together.
+  return `${a}\n\n${b}`
+}
+
+function putArtifactFile(files: Record<string, string>, path: string, content: string) {
+  const body = String(content || '').trim()
+  if (!body) return
+  files[path] = files[path] ? mergeFileBodies(files[path], body) : body
+}
+
 function storeArtifact(files: Record<string, string>, path: string, body: string, n: number) {
   const peeled = peelEmbeddedFences(body, n)
   let content = peeled.body
   if (/\.html?$/i.test(path) || looksLikeHtml(content)) {
     content = truncateHtmlDocument(content)
   }
-  if (content) files[path] = content
-  Object.assign(files, peeled.files)
+  if (content) putArtifactFile(files, path, content)
+  for (const [p, c] of Object.entries(peeled.files)) {
+    putArtifactFile(files, p, c)
+  }
   return n + Object.keys(peeled.files).length
 }
 
@@ -209,33 +281,135 @@ export function filesFromFences(text: string): Record<string, string> {
   let n = 0
   const source = normalizeGluedFences(text)
   FENCE_RE.lastIndex = 0
+  let lastJsPath = ''
   while ((match = FENCE_RE.exec(source))) {
     const info = parseFenceInfo(match[1])
     const lang = info.lang.toLowerCase()
-    if (lang === 'json') continue
+    if (lang === 'json' && !info.path) continue
     const body = stripLeadingFilename(match[2])
     if (!body) continue
-    const path = resolveArtifactPath(info, body, ++n)
+    let path = resolveArtifactPath(info, body, ++n)
+    if (!info.path && (lang === 'javascript' || lang === 'js' || lang === 'jsx') && lastJsPath) path = lastJsPath
+    if (/\.(js|jsx|mjs|cjs|ts|tsx)$/i.test(path)) lastJsPath = path
     n = storeArtifact(files, path, body, n)
   }
   return files
 }
 
-/** Collect runnable files from assistant text, including partial fences while streaming. */
-export function extractBuildArtifacts(text: string): Record<string, string> {
-  const source = normalizeGluedFences(text)
-  const files = filesFromFences(source)
+function jsAlreadyInPage(page: string, js: string) {
+  const probe = js.trim().slice(0, 96)
+  return probe.length > 24 && page.includes(probe)
+}
+
+function escapeScriptBody(js: string) {
+  return String(js || '').replace(/<\/script>/gi, '<\\/script>')
+}
+
+function appendJsBeforeBodyEnd(page: string, js: string) {
+  if (!js.trim() || !page.includes('</body>')) return page
+  if (jsAlreadyInPage(page, js)) return page
+  const body = escapeScriptBody(js)
+  const asModule = /\bimport\s+[\s\S]*?\bfrom\s+['"]/.test(body) || /\bexport\s+/.test(body)
+  const tag = asModule ? `<script type="module">${body}<\/script>` : `<script>${body}<\/script>`
+  return page.replace(/<\/body>/i, `${tag}</body>`)
+}
+
+function sortArtifactPaths(paths: string[]) {
+  const rank = (p: string) => {
+    if (p === 'index.html') return 0
+    if (/\.html?$/i.test(p)) return 1
+    if (/\.css$/i.test(p)) return 2
+    if (/\.(js|jsx|mjs|cjs|ts|tsx)$/i.test(p)) return 3
+    return 4
+  }
+  return [...paths].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b))
+}
+
+function mergedCssText(files: Record<string, string>) {
+  return sortArtifactPaths(Object.keys(files))
+    .filter((p) => /\.css$/i.test(p))
+    .map((p) => files[p]?.trim())
+    .filter(Boolean)
+    .join('\n\n')
+}
+
+function mergedJsPaths(files: Record<string, string>) {
+  return sortArtifactPaths(Object.keys(files)).filter((p) => /\.(js|jsx|mjs|cjs|ts|tsx)$/i.test(p))
+}
+
+function appendAllProjectScripts(page: string, files: Record<string, string>) {
+  let out = page
+  for (const path of mergedJsPaths(files)) {
+    const js = files[path]
+    if (js?.trim()) out = appendJsBeforeBodyEnd(out, js)
+  }
+  return out
+}
+
+const PREVIEW_SHELL_BODY =
+  '<div id="app"></div><div id="root"></div><main id="calculator" class="app"></main>'
+
+function applyOpenFencePartial(source: string, files: Record<string, string>) {
   const partial = source.match(/```([^\n`]*)\r?\n([\s\S]*)$/)
   if (partial && !source.trimEnd().endsWith('```')) {
     const info = parseFenceInfo(partial[1])
     const lang = info.lang.toLowerCase()
     const body = stripLeadingFilename(partial[2])
-    if (lang !== 'json' && body) {
+    if ((lang !== 'json' || info.path) && body) {
       const path = resolveArtifactPath(info, body, 1)
       storeArtifact(files, path, body, Object.keys(files).length)
     }
   }
-  return promoteHtmlFiles(files)
+}
+
+/** Parse fences from one assistant chunk (no index.html promotion). */
+export function extractArtifactFilesRaw(text: string): Record<string, string> {
+  const full = normalizeGluedFences(String(text || ''))
+  const files = filesFromFences(full)
+  for (const [path, content] of Object.entries(filesFromParseSegments(full))) {
+    putArtifactFile(files, path, content)
+  }
+  applyOpenFencePartial(full, files)
+  return files
+}
+
+function finalizeArtifactFiles(files: Record<string, string>) {
+  return promoteHtmlFiles({ ...files })
+}
+
+/** Merge assistant turns — later chunks win on the same path (live stream is last). */
+export function mergeArtifactFiles(chunks: string[]): Record<string, string> {
+  const merged: Record<string, string> = {}
+  for (const chunk of chunks) {
+    const trimmed = String(chunk || '').trim()
+    if (!trimmed) continue
+    for (const [path, content] of Object.entries(extractArtifactFilesRaw(trimmed))) {
+      putArtifactFile(merged, path, content)
+    }
+  }
+  return finalizeArtifactFiles(merged)
+}
+
+/** Files shown in Code + Preview — adds a preview shell when the model only sent CSS/JS. */
+export function workspaceDisplayFiles(files: Record<string, string>): Record<string, string> {
+  const out = { ...files }
+  const hasHtml = Object.keys(out).some((p) => /\.html?$/i.test(p) && String(out[p] || '').trim())
+  const hasCss = mergedCssText(out)
+  const hasJs = mergedJsPaths(out).length > 0
+  if (!hasHtml && (hasCss || hasJs)) {
+    out['index.html'] =
+      `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Preview</title></head><body>${PREVIEW_SHELL_BODY}</body></html>`
+  }
+  if (!Object.keys(out).some((p) => /\.css$/i.test(p)) && hasJs) {
+    out['style.css'] = `html,body{margin:0;height:100%;background:#0f1115;color:#f2f2f2;font-family:system-ui,sans-serif}
+#app,#root,#calculator,.app,.calculator{min-height:100%;display:flex;flex-direction:column}`
+  }
+  return out
+}
+
+/** Collect runnable files from assistant text, including partial fences while streaming. */
+export function extractBuildArtifacts(text: string): Record<string, string> {
+  return finalizeArtifactFiles(extractArtifactFilesRaw(text))
 }
 
 const PREVIEW_ERROR_BRIDGE = `<script data-soumtok-preview-bridge>(function(){function send(level,message,source,line){try{parent.postMessage({type:'soumtok-preview-log',level:level||'error',message:String(message||''),source:source||'',line:line||0},'*')}catch(e){}}window.addEventListener('error',function(e){send('error',e.message,e.filename,e.lineno)});window.addEventListener('unhandledrejection',function(e){var r=e.reason;send('error',r&&r.message?r.message:String(r))});var oe=console.error;console.error=function(){send('error',Array.prototype.join.call(arguments,' '));try{oe.apply(console,arguments)}catch(x){}};})();</script>`
@@ -256,41 +430,39 @@ export function buildPreviewHtml(files: Record<string, string>): string {
     if (/\.html?$/i.test(path)) merged[path] = truncateHtmlDocument(content)
   }
   let page = merged['index.html'] || merged['public/index.html'] || merged['src/index.html'] || ''
+  if (page.trim() && !isHtmlDocument(page)) {
+    demoteMislabeledIndexHtml(merged)
+    page = merged['index.html'] || merged['public/index.html'] || merged['src/index.html'] || ''
+  }
   if (!page.trim()) {
-    const css = Object.entries(merged).find(([k]) => k.endsWith('.css'))?.[1] || ''
-    const js = Object.entries(merged).find(([k]) => k.endsWith('.js'))?.[1] || ''
+    const css = mergedCssText(merged)
+    const jsPaths = mergedJsPaths(merged)
+    const js = jsPaths.map((p) => merged[p]).filter(Boolean).join('\n;\n')
     if (css || js) {
-      page = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${css ? `<style>${css}</style>` : ''}</head><body><div id="app"></div>${js ? `<script>${js}<\/script>` : ''}</body></html>`
+      const asModule = js && (/\bimport\s+[\s\S]*?\bfrom\s+['"]/.test(js) || /\bexport\s+/.test(js))
+      const jsBody = escapeScriptBody(js)
+      page = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${css ? `<style>${css}</style>` : ''}</head><body>${PREVIEW_SHELL_BODY}${
+        js ? `<script${asModule ? ' type="module"' : ''}>${jsBody}<\/script>` : ''
+      }</body></html>`
     }
   }
   if (!page.trim()) return ''
   const wrapped = wrapHtmlFragment(truncateHtmlDocument(page))
-  let out = inlineAssets(wrapped, merged)
+  let out = fixJsTextInHtmlBody(inlineAssets(wrapped, merged))
   out = truncateHtmlDocument(out)
-  const css =
-    merged['styles/main.css'] ||
-    merged['src/index.css'] ||
-    merged['index.css'] ||
-    merged['styles.css'] ||
-    merged['style.css'] ||
-    Object.entries(merged).find(([k]) => k.endsWith('.css'))?.[1] ||
-    ''
+  const css = mergedCssText(merged)
   if (css && !/<style[\s>]/i.test(out)) {
     out = out.includes('</head>')
       ? out.replace(/<\/head>/i, `<style>${css}</style></head>`)
       : `<style>${css}</style>${out}`
   }
-  const js =
-    merged['scripts/main.js'] ||
-    merged['src/main.js'] ||
-    merged['main.js'] ||
-    merged['script.js'] ||
-    Object.entries(merged).find(([k]) => k.endsWith('.js'))?.[1] ||
-    ''
-  if (js && !/<script[\s>]/i.test(out) && out.includes('</body>')) {
-    out = out.replace(/<\/body>/i, `<script>${js}<\/script></body>`)
-  }
-  return truncateHtmlDocument(out)
+  out = appendAllProjectScripts(out, merged)
+  return injectPreviewErrorBridge(truncateHtmlDocument(out))
+}
+
+/** Paths for Test Hub Code panel (stable sort). */
+export function listArtifactPaths(files: Record<string, string>) {
+  return sortArtifactPaths(Object.keys(files).filter((p) => String(files[p] ?? '').trim()))
 }
 
 export function normalizeHighlightLang(lang: string) {
@@ -407,6 +579,35 @@ export function formatProseHtml(raw: string) {
   return out.join('')
 }
 
+function segmentArtifactPath(seg: { file?: string; lang?: string }, index: number) {
+  if (seg.file) return seg.file.replace(/^\.\//, '')
+  const lang = String(seg.lang || '').toLowerCase()
+  if (lang === 'html' || lang === 'htm') return 'index.html'
+  if (lang === 'css') return 'style.css'
+  if (lang === 'js' || lang === 'javascript' || lang === 'jsx') return 'script.js'
+  if (lang === 'ts' || lang === 'typescript') return 'script.ts'
+  if (lang === 'tsx') return 'Component.tsx'
+  if (lang && lang !== 'text') return `snippet-${index + 1}.${lang}`
+  return `snippet-${index + 1}.txt`
+}
+
+/** Same paths as chat code cards — merges every closed fence in order. */
+export function filesFromParseSegments(text: string): Record<string, string> {
+  const files: Record<string, string> = {}
+  let lastJsPath = ''
+  let n = 0
+  for (const seg of parseSegments(text)) {
+    if (seg.kind !== 'code' || !seg.content?.trim()) continue
+    const lang = String(seg.lang || '').toLowerCase()
+    if (lang === 'json' && !seg.file) continue
+    let path = segmentArtifactPath(seg, n++)
+    if (!seg.file && (lang === 'javascript' || lang === 'js' || lang === 'jsx') && lastJsPath) path = lastJsPath
+    if (/\.(js|jsx|mjs|cjs|ts|tsx)$/i.test(path)) lastJsPath = path
+    putArtifactFile(files, path, seg.content)
+  }
+  return files
+}
+
 export function parseSegments(text: string) {
   const parts: { kind: 'text' | 'code'; content: string; lang?: string; file?: string }[] = []
   const re = /```([^\n`]*)\r?\n([\s\S]*?)```/g
@@ -449,6 +650,10 @@ function projectFilesSnapshot(files: Record<string, string> | undefined) {
   const maxEach = 40_000
   for (const path of paths) {
     let body = String(files[path] ?? '')
+    if (isBinaryWorkspaceFile(path, body)) {
+      parts.push(`### ${path}\n(binary image — omitted from chat context; still in Preview)`)
+      continue
+    }
     if (body.length > maxEach) body = `${body.slice(0, maxEach)}\n/* …truncated… */`
     const chunk = `### ${path}\n\`\`\`\n${body}\n\`\`\``
     if (total + chunk.length > maxTotal) {

@@ -4,6 +4,77 @@
 const fs = require('fs')
 const path = require('path')
 const os = require('os')
+const {
+  githubBlobToRaw,
+  findPluginSkill,
+  flattenInstalledPluginSkills,
+} = require('../../../shared/pluginSkillsRuntime.cjs')
+const { resolveMcpConnector } = require('../../../shared/connectorsRuntime.cjs')
+
+const skillBodyCache = new Map()
+
+function isSkillLikeFileName(name) {
+  const n = String(name || '')
+  return /skill\.md$/i.test(n) || /\.skill$/i.test(n) || /\/skills?\//i.test(n.replace(/\\/g, '/'))
+}
+
+function skillFromDocument(raw, fileName, source = 'file') {
+  const text = String(raw || '').trim()
+  if (!text) return null
+  const parsed = parseFrontmatter(text)
+  const base = path.basename(String(fileName || 'SKILL.md'), path.extname(String(fileName || '.md')))
+  const name = parsed.name || base || 'skill'
+  const hasFrontmatter = parsed.name || parsed.description
+  const looksLikeSkill =
+    isSkillLikeFileName(fileName) ||
+    hasFrontmatter ||
+    /^#\s+skill\b/im.test(text) ||
+    /\bwhen to use\b/i.test(text.slice(0, 1200))
+  if (!looksLikeSkill) return null
+  return {
+    name,
+    description: parsed.description || name,
+    body: parsed.body || text,
+    source,
+    fileName: fileName || '',
+  }
+}
+
+async function enrichAttachedCloudSkills(attached, getBuffer) {
+  const out = []
+  for (const row of attached || []) {
+    const merged = { ...row, source: row.source || 'cloud' }
+    const excerpt = String(merged.excerpt || '').trim()
+    if (!excerpt && typeof getBuffer === 'function' && merged.id) {
+      try {
+        const res = await getBuffer('GET', `/api/skills/${encodeURIComponent(merged.id)}/file`, 60_000)
+        if (res?.buffer?.length) {
+          const ct = String(res.contentType || '')
+          const fname = merged.file_name || merged.name || 'skill.md'
+          if (/text|json|markdown|html|xml|csv/i.test(ct) || /\.(md|txt|skill)$/i.test(fname)) {
+            const text = res.buffer.toString('utf8')
+            const doc = skillFromDocument(text, fname, 'cloud')
+            if (doc) {
+              merged.name = merged.name || doc.name
+              merged.description = merged.description || doc.description
+              merged.excerpt = doc.body
+              merged.body = doc.body
+            } else {
+              merged.excerpt = text.slice(0, 20_000)
+              merged.body = text.slice(0, 20_000)
+            }
+          }
+        }
+      } catch {
+        /* optional fetch */
+      }
+    } else if (excerpt && !merged.body) {
+      merged.body = excerpt
+    }
+    out.push(merged)
+  }
+  return out
+}
 
 function parseFrontmatter(raw) {
   const text = String(raw || '')
@@ -114,4 +185,171 @@ function readSkillByName(workspaceRoot, name) {
   return { ok: true, text: `SKILL ${hit.name} (${hit.source})\n\n${hit.body.slice(0, 12_000)}` }
 }
 
-module.exports = { listAgentSkills, skillsCatalogBlock, readSkillByName }
+function findCloudSkill(cloudSkills, name) {
+  const want = String(name || '').trim().toLowerCase()
+  if (!want || !Array.isArray(cloudSkills)) return null
+  return (
+    cloudSkills.find(
+      (row) =>
+        String(row.id || '').toLowerCase() === want ||
+        String(row.name || '').toLowerCase() === want ||
+        String(row.file_name || '').toLowerCase() === want ||
+        String(row.name || '').toLowerCase().includes(want),
+    ) || null
+  )
+}
+
+async function fetchGithubSkillMarkdown(sourceUrl) {
+  const raw = githubBlobToRaw(sourceUrl)
+  if (!raw) return null
+  if (skillBodyCache.has(raw)) return skillBodyCache.get(raw)
+  try {
+    const res = await fetch(raw, {
+      headers: { 'User-Agent': 'Soumtok-Desktop/1.0' },
+      signal: AbortSignal.timeout(12_000),
+    })
+    if (!res.ok) return null
+    const text = await res.text()
+    skillBodyCache.set(raw, text)
+    return text
+  } catch {
+    return null
+  }
+}
+
+async function readInstalledPluginSkill(toolCtx, name) {
+  const list = toolCtx?.pluginSkills || []
+  const hit = findPluginSkill(list, name)
+  if (!hit) return null
+  const lines = [`SKILL ${hit.label || hit.skillId} (${hit.pluginName || hit.pluginId})`]
+  if (hit.description) lines.push(String(hit.description).trim())
+  if (hit.insert) lines.push(String(hit.insert).trim())
+  if (hit.body) {
+    lines.push('\n--- SKILL.md ---\n' + String(hit.body).slice(0, 12_000))
+    return { ok: true, text: lines.join('\n\n') }
+  }
+  if (hit.sourceUrl) {
+    const body = await fetchGithubSkillMarkdown(hit.sourceUrl)
+    if (body) {
+      hit.body = body
+      lines.push('\n--- SKILL.md ---\n' + body.slice(0, 12_000))
+      return { ok: true, text: lines.join('\n\n') }
+    }
+  }
+  if (lines.length > 1) return { ok: true, text: lines.join('\n\n') }
+  return { ok: false, text: `Plugin skill "${name}" has no readable content.` }
+}
+
+function enrichAttachedLocalSkills(workspaceRoot, attached) {
+  const out = []
+  for (const row of attached || []) {
+    if (!row?.name) continue
+    const merged = { ...row }
+    const hit = listAgentSkills(workspaceRoot, {}).find(
+      (s) => s.name.toLowerCase() === String(row.name).trim().toLowerCase(),
+    )
+    if (hit) {
+      merged.description = merged.description || hit.description || ''
+      merged.source = merged.source || hit.source || 'local'
+      if (hit.body) merged.body = hit.body
+    }
+    out.push(merged)
+  }
+  return out
+}
+
+function connectorHintsForAttachedSkills(localRows, pluginRows, connectors) {
+  const list = Array.isArray(connectors) ? connectors : []
+  const live = list.filter((c) => c?.connected)
+  const lines = []
+  const needsMcp =
+    (localRows || []).some((row) => row.name === 'plugins-mcp') || (pluginRows || []).length > 0
+  if (!needsMcp) return ''
+  if (!live.length) {
+    lines.push(
+      'CONNECTOR STATUS: No MCP connectors are connected yet. If the user attached plugins-mcp or a plugin skill pack, use ask_question to offer opening Settings → Connectors so they can sign in — do not call mcp() until connected.',
+    )
+  }
+  for (const row of pluginRows || []) {
+    const slug = row.pluginId || row.pluginName || row.label || ''
+    const hit = resolveMcpConnector(list, slug) || resolveMcpConnector(list, row.pluginName || row.label || '')
+    if (!hit?.connected) {
+      lines.push(
+        `CONNECTOR STATUS: "${row.pluginName || row.label}" skill is attached but its connector is not connected — tell the user to open Settings → Connectors (or tap Connect on the Installed skills tab) and sign in to ${row.pluginName || row.label} before live mcp() calls.`,
+      )
+    } else if (/figma|canva/i.test(String(row.pluginName || row.pluginId || ''))) {
+      lines.push(
+        `DESIGN: ${row.pluginName || row.label} is connected — use mcp({ server: "${row.pluginId || row.pluginName}", tool: "..." }) to read the user's design, then edit the open project template/code to match.`,
+      )
+    }
+  }
+  return lines.join('\n')
+}
+
+async function enrichAttachedPluginSkills(attached, accountPluginSkills) {
+  const byId = new Map((accountPluginSkills || []).map((row) => [row.id, row]))
+  const out = []
+  for (const row of attached || []) {
+    const meta = byId.get(row.id) || findPluginSkill(accountPluginSkills, row.id) || {}
+    const merged = {
+      ...meta,
+      ...row,
+      description: row.description || meta.description || '',
+      insert: row.insert || meta.insert || '',
+      sourceUrl: row.sourceUrl || meta.sourceUrl || '',
+    }
+    if (!merged.body && merged.sourceUrl) {
+      const body = await fetchGithubSkillMarkdown(merged.sourceUrl)
+      if (body) merged.body = body
+    }
+    out.push(merged)
+  }
+  return out
+}
+
+async function readCloudSkill(toolCtx, name) {
+  const hit = findCloudSkill(toolCtx?.cloudSkills, name)
+  if (!hit) return null
+  if (hit.excerpt) {
+    return { ok: true, text: `SKILL ${hit.name} (cloud)\n\n${String(hit.excerpt).slice(0, 20_000)}` }
+  }
+  const getBuffer = toolCtx?.getBuffer
+  if (typeof getBuffer === 'function' && hit.id) {
+    const res = await getBuffer('GET', `/api/skills/${encodeURIComponent(hit.id)}/file`, 60_000)
+    if (res?.buffer?.length) {
+      const ct = String(res.contentType || '')
+      if (/text|json|markdown|html|xml|csv/i.test(ct) || /\.(md|txt|json|csv|html|skill)$/i.test(hit.file_name || '')) {
+        return { ok: true, text: `SKILL ${hit.name} (cloud)\n\n${res.buffer.toString('utf8').slice(0, 20_000)}` }
+      }
+      return { ok: true, text: `SKILL ${hit.name} (cloud file: ${hit.file_name || 'attachment'}, ${res.buffer.length} bytes). Use the excerpt in system context.` }
+    }
+  }
+  return { ok: false, text: `Skill "${hit.name}" has no readable text excerpt.` }
+}
+
+async function readSkillByNameOrCloud(workspaceRoot, name, toolCtx) {
+  const local = readSkillByName(workspaceRoot, name)
+  if (local.ok) return local
+  const plugin = await readInstalledPluginSkill(toolCtx, name)
+  if (plugin?.ok) return plugin
+  const cloud = await readCloudSkill(toolCtx, name)
+  if (cloud) return cloud
+  return plugin && !plugin.ok ? plugin : local
+}
+
+module.exports = {
+  listAgentSkills,
+  skillsCatalogBlock,
+  readSkillByName,
+  findCloudSkill,
+  readCloudSkill,
+  readSkillByNameOrCloud,
+  fetchGithubSkillMarkdown,
+  skillFromDocument,
+  isSkillLikeFileName,
+  enrichAttachedLocalSkills,
+  enrichAttachedCloudSkills,
+  enrichAttachedPluginSkills,
+  connectorHintsForAttachedSkills,
+  flattenInstalledPluginSkills,
+}

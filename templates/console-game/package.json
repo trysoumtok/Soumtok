@@ -1,0 +1,6 @@
+{
+  "name": "app",
+  "private": true,
+  "type": "module",
+  "scripts": { "start": "node index.js" }
+}

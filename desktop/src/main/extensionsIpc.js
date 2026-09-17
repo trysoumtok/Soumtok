@@ -7,6 +7,7 @@ const {
   listInstalledExtensions,
   uninstallExtension,
   readWorkspaceRecommendations,
+  validateExtensionForHost,
 } = require('./extensionsMarket')
 const { listExtensionActivityContributions } = require('./extensionActivity')
 const {
@@ -15,6 +16,7 @@ const {
   stopSoumtokCodeHost,
   soumtokCodeStatus,
   runHostWorkbenchCommand,
+  isSoumtokCodeInstalled,
 } = require('./extensionHostRuntime')
 const {
   attachExtensionHostView,
@@ -195,7 +197,11 @@ function registerExtensionsIpc(deps) {
           const publisher = payload?.publisher || payload?.namespace
           const name = payload?.name
           if (!publisher || !name) return { ok: false, error: 'Need publisher and name' }
-          return await installFromOpenVsx(publisher, name)
+          stopSoumtokCodeHost()
+          await new Promise((r) => setTimeout(r, 400))
+          const out = await installFromOpenVsx(publisher, name)
+          require('./extensionsMarket').reviveInstalledExtensions()
+          return out
         } catch (error) {
           return { ok: false, error: error instanceof Error ? error.message : 'Install failed' }
         }
@@ -258,20 +264,56 @@ function registerExtensionsIpc(deps) {
     ],
     [
       'extensionHost:ensure',
-      async () => ensureSoumtokCodeInstalled(),
+      async (event) => {
+        const onProgress = (message) => {
+          try {
+            event.sender.send('extensionHost:downloadProgress', { message })
+          } catch {
+            /* ignore */
+          }
+        }
+        return ensureSoumtokCodeInstalled(onProgress)
+      },
     ],
     [
       'extensionHost:start',
       async (event, payload) => {
         const gate = requireSignedInForExtensions()
         if (gate) return gate
+
+        const preflight = validateExtensionForHost(payload || {})
+        if (!preflight.ok) return preflight
+
+        if (!isSoumtokCodeInstalled()) {
+          try {
+            event.sender.send('extensionHost:downloadProgress', {
+              message: 'Downloading Soumtok Code host (~150MB, one-time)…',
+            })
+          } catch {
+            /* ignore */
+          }
+        }
+
+        const onProgress = (message) => {
+          try {
+            event.sender.send('extensionHost:downloadProgress', { message })
+          } catch {
+            /* ignore */
+          }
+        }
+
         try {
           const folder = folderOf(event)
-          return await startSoumtokCodeHost({
-            workspaceFolder: payload?.workspace || folder,
-            extensionsDir: extensionsRoot(),
-            usePlatformWorkspace: payload?.usePlatformWorkspace !== false,
-          })
+          return await startSoumtokCodeHost(
+            {
+              workspaceFolder: payload?.workspace || folder,
+              extensionsDir: extensionsRoot(),
+              usePlatformWorkspace: payload?.usePlatformWorkspace !== false,
+              openCommand: payload?.openCommand || '',
+              embedSurface: payload?.embedSurface || '',
+            },
+            onProgress,
+          )
         } catch (error) {
           return { ok: false, error: error instanceof Error ? error.message : 'Could not start Soumtok Code' }
         }
@@ -300,6 +342,8 @@ function registerExtensionsIpc(deps) {
           extensionId: payload?.extensionId,
           openCommand: payload?.openCommand,
           title: payload?.title,
+          embedSurface: payload?.embedSurface,
+          containerId: payload?.containerId,
         })
       },
     ],

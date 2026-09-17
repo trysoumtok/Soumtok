@@ -1,6 +1,6 @@
 const { BrowserView, session } = require('electron')
 const { scheduleExtensionHostFocus, clearFocusTimers } = require('./extensionHostFocus')
-const { scheduleExtensionHostCommand, clearExtensionHostCommandRun } = require('./extensionHostCommand')
+const { scheduleExtensionHostCommand, clearExtensionHostCommandRun, prepareExtensionHostPage } = require('./extensionHostCommand')
 const { applyHostSessionFixes } = require('./extensionHostSession')
 const { activeUserKey } = require('./userScope')
 
@@ -58,16 +58,22 @@ function attachExtensionHostView(win, url, options = {}) {
     entry = { view, url: '', hooked: false, options: {}, partition }
     views.set(win.webContents.id, entry)
   }
-  entry.options = { extensionId: options.extensionId, openCommand: options.openCommand, title: options.title }
+  const prevExtensionId = entry.options?.extensionId || ''
+  const prevOpenCommand = entry.options?.openCommand || ''
+  const prevEmbedSurface = entry.options?.embedSurface || ''
+  const prevContainerId = entry.options?.containerId || ''
+  entry.options = {
+    extensionId: options.extensionId,
+    openCommand: options.openCommand,
+    title: options.title,
+    embedSurface: options.embedSurface,
+    containerId: options.containerId,
+  }
   const wc = entry.view.webContents
   if (!entry.hooked) {
     entry.hooked = true
     wc.on('did-finish-load', () => {
-      scheduleExtensionHostCommand(wc, {
-        extensionId: entry.options.extensionId,
-        openCommand: entry.options.openCommand,
-        title: entry.options.title,
-      })
+      void prepareExtensionHostPage(wc).then(() => scheduleExtensionHostCommand(wc, entry.options))
     })
     // The workbench reloads itself on some setting changes, which restores its chrome, so the
     // open-once guard is released on every navigation and the next load re-applies everything.
@@ -77,11 +83,20 @@ function attachExtensionHostView(win, url, options = {}) {
       console.warn('[extension-host] load failed', code, desc, url)
     })
   }
+  const contextChanged =
+    prevExtensionId !== entry.options.extensionId ||
+    prevOpenCommand !== (entry.options.openCommand || '') ||
+    prevEmbedSurface !== (entry.options.embedSurface || '') ||
+    prevContainerId !== (entry.options.containerId || '')
   if (entry.url !== u) {
     entry.url = u
     clearExtensionHostCommandRun(wc)
     void wc.loadURL(u).catch(() => {})
-  } else {
+  } else if (contextChanged && !wc.isLoading()) {
+    clearExtensionHostCommandRun(wc)
+    void wc.reload()
+  } else if (!wc.isLoading()) {
+    clearExtensionHostCommandRun(wc)
     scheduleExtensionHostCommand(wc, entry.options)
   }
   return { ok: true }
@@ -90,8 +105,8 @@ function attachExtensionHostView(win, url, options = {}) {
 function layoutExtensionHostView(win, bounds) {
   const entry = getEntry(win)
   if (!entry || !win || win.isDestroyed()) return { ok: false }
-  const x = Math.max(0, Math.round(Number(bounds?.x) || 0))
-  const y = Math.max(0, Math.round(Number(bounds?.y) || 0))
+  const x = Math.round(Number(bounds?.x) || 0)
+  const y = Math.round(Number(bounds?.y) || 0)
   const w = Math.max(0, Math.round(Number(bounds?.width) || 0))
   const h = Math.max(0, Math.round(Number(bounds?.height) || 0))
   if (w < 8 || h < 8) {
@@ -101,10 +116,13 @@ function layoutExtensionHostView(win, bounds) {
   win.setBrowserView(entry.view)
   entry.view.setBounds({ x, y, width: w, height: h })
   entry.view.setAutoResize({ width: false, height: false })
-  try {
-    entry.view.webContents.focus()
-  } catch {
-    /* ignore */
+  const visible = x + w > 8 && y + h > 8 && x < 4000
+  if (visible) {
+    try {
+      entry.view.webContents.focus()
+    } catch {
+      /* ignore */
+    }
   }
   return { ok: true }
 }

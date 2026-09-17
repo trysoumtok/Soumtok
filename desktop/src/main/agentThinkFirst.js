@@ -14,20 +14,66 @@ function compact(text) {
 function isGeneralKnowledgeQuestion(text) {
   const t = compact(repairIntentText(text))
   if (!t) return true
-  if (/^(go|go on|yes|y|ok|okay|sure|do it|please|yep|yeah|go ahead|continue|keep going|proceed|apply it|build it)$/.test(t)) return false
+  if (/^(go|go on|yes|y|ok|okay|sure|do it|please|yep|yeah|go ahead|continue|keep going|proceed|apply it|build it)$/.test(t)) {
+    return false
+  }
   if (/\b(generate|draw|paint|render)\b/.test(t) && /\b(image|picture|photo|danc|man|woman|person|car|eagle|bird)\b/.test(t)) {
     return false
   }
-  if (/^(hi|hello|hey|thanks|thank you|no|yo)$/.test(t)) return true
-  if (/\b(what is|who is|how does|explain|define|why do|tell me about)\b/.test(t) &&
-      !/\b(my |this |the )?(project|repo|codebase|workspace|folder|app|file|bug|code)\b/.test(t)) {
-    return true
+  if (userAskedToBuildSomething(text) || userAskedForLocalhost(text)) return false
+  if (
+    /\b(fix|implement|refactor|scaffold|write|edit|patch|diff|grep|deploy|wipe|delete all|read my|list_dir)\b/.test(t) &&
+    /\b(project|repo|codebase|workspace|folder|file|src|app|bug|code|component|codebase)\b/.test(t)
+  ) {
+    return false
   }
-  if (/\b(soumtok|dashboard|billing|api key|sign in|open folder)\b/.test(t) &&
-      !/\b(apps |src |fix this|implement|my repo)\b/.test(t)) {
+  if (/\b(build|create|make)\b/.test(t) && /\b(app|website|site|landing|dashboard|portfolio|webapp|homepage)\b/.test(t)) {
+    return false
+  }
+  if (/\b(read|open|show)\b/.test(t) && /\b(file|package\.json|readme|src\/|\.ts|\.js)\b/.test(t)) {
+    return false
+  }
+  if (/\b(run|start)\b/.test(t) && /\b(server|dev|npm|localhost|app|project)\b/.test(t)) {
+    return false
+  }
+  // Default: ordinary question / chat / help — not a coding-only task.
+  return true
+}
+
+function messageNeedsProjectFolder(text, opts = {}) {
+  const raw = String(text || '').trim()
+  const attach = Array.isArray(opts.attachments) ? opts.attachments : []
+  const codingAttach = attach.some((f) => {
+    const n = String(f?.name || '').toLowerCase()
+    return /\.(ts|tsx|js|jsx|py|go|rs|java|css|html|vue|svelte|json|yaml|toml)$/.test(n) && !/skill\.md$/i.test(n)
+  })
+  if (codingAttach) return true
+  if (!raw && !attach.length) return false
+  if (isGeneralKnowledgeQuestion(raw)) return false
+  if (userAskedToBuildSomething(raw) || userAskedForLocalhost(raw)) return true
+  const t = compact(repairIntentText(raw))
+  if (
+    /\b(build|fix|implement|refactor|scaffold|write|edit|patch|grep|read my|deploy|npm|terminal|wipe|list_dir|in this project|my repo|this codebase)\b/.test(
+      t,
+    )
+  ) {
     return true
   }
   return false
+}
+
+function composeGeneralAssistantBrief(userMessage, hasFolder) {
+  const raw = String(userMessage || '').trim().slice(0, 280).replace(/"/g, "'")
+  const lines = [
+    'SOUMTOK GENERAL ASSISTANT (read the user request first — typos still count):',
+    'Users can ask ordinary everyday questions here, not only coding.',
+    'You can help with: explanations, writing, math, advice, brainstorming, Soumtok how-to, comparisons, summaries, and normal conversation.',
+    hasFolder
+      ? 'A project folder is open, but this message is general — answer in chat unless they clearly asked to change files in this project.'
+      : 'No project folder is open — do NOT call read, write, grep, terminal, or list_dir. Answer from knowledge. Mention File → Open Folder only if they want code edits on their PC.',
+    raw ? `USER SAID: "${raw}"` : '',
+  ]
+  return lines.filter(Boolean).join('\n')
 }
 
 function userAskedToBuildSomething(text) {
@@ -72,6 +118,7 @@ UNDERSTAND FIRST:
 Restate the job in their words. Then execute only that job.
 
 ROUTE (pick one — do not mix):
+- ordinary question / chat / advice / explain / help (no code change) → answer directly in plain language. No list_dir, read, or grep.
 - generate / draw a still image → generate_image only. Zero repo reads.
 - world knowledge, Soumtok how-to, hello → answer. No list_dir.
 - run localhost → terminal + read_terminal. Do not rewrite the app.
@@ -87,7 +134,7 @@ ${imageNow}
 5. FIX/visual: todo_write, then diff/write the TOUCH THESE / FILE BODIES paths — never README or list_dir first.
 6. Never paste fake <write> XML or markdown-only code as the only action — call write() / terminal().
 7. Never claim you are sandboxed. You have the user's real PC terminal in this IDE.
-8. Never ask permission. Any folder, any file, any task — tools NOW. "Want me to apply?" is forbidden; do it.`
+8. General questions: answer in chat — do not force coding tools. Coding/build tasks: use tools without asking permission; "Want me to apply?" is forbidden; do it.`
 }
 
 function composeWorkLoopBrief(kind) {
@@ -110,6 +157,8 @@ This loop is for EVERY request in EVERY open folder — not one app, not one fil
 module.exports = {
   compact,
   isGeneralKnowledgeQuestion,
+  messageNeedsProjectFolder,
+  composeGeneralAssistantBrief,
   userAskedToBuildSomething,
   userAskedForLocalhost,
   composeThinkFirstBrief,

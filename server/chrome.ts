@@ -138,8 +138,22 @@ function mimeFor(name: string) {
   if (/\.css$/i.test(name)) return 'text/css; charset=utf-8'
   if (/\.js$/i.test(name)) return 'text/javascript; charset=utf-8'
   if (/\.svg$/i.test(name)) return 'image/svg+xml'
+  if (/\.png$/i.test(name)) return 'image/png'
+  if (/\.jpe?g$/i.test(name)) return 'image/jpeg'
+  if (/\.webp$/i.test(name)) return 'image/webp'
+  if (/\.gif$/i.test(name)) return 'image/gif'
+  if (/\.ico$/i.test(name)) return 'image/x-icon'
   if (/\.json$/i.test(name)) return 'application/json; charset=utf-8'
   return 'text/html; charset=utf-8'
+}
+
+function decodeSiteBody(raw: string, fallbackMime: string) {
+  const text = String(raw || '')
+  const match = text.trim().match(/^data:([^;]+);base64,([\s\S]+)$/)
+  if (match) {
+    return { bytes: Buffer.from(match[2], 'base64'), mime: match[1] || fallbackMime }
+  }
+  return { bytes: text, mime: fallbackMime }
 }
 
 type SiteResponder = {
@@ -153,14 +167,25 @@ function serveSiteToken(c: SiteResponder, token: string, rest: string) {
     if (site) sites.delete(token)
     return c.text('Not found', 404)
   }
-  const file = siteFile(site.files, site.html, rest || 'index.html')
-  if (!file) return c.text('Not found', 404)
-  return c.body(file, 200, {
-    'Content-Type': mimeFor(rest || 'index.html'),
+  const path = (rest || 'index.html').replace(/^\//, '')
+  const headers = {
     'Cache-Control': 'no-store, no-cache, must-revalidate',
     Pragma: 'no-cache',
     'X-Frame-Options': 'SAMEORIGIN',
-  })
+  }
+  if (path === 'index.html' || path === '') {
+    const page = siteFile(site.files, site.html, 'index.html') || site.html?.trim()
+    if (page) {
+      return c.body(page, 200, { ...headers, 'Content-Type': 'text/html; charset=utf-8' })
+    }
+  }
+  const file = siteFile(site.files, site.html, path)
+  if (!file) return c.text('Not found', 404)
+  const decoded = decodeSiteBody(file, mimeFor(path))
+  if (typeof decoded.bytes === 'string') {
+    return c.body(decoded.bytes, 200, { ...headers, 'Content-Type': decoded.mime })
+  }
+  return c.body(new Uint8Array(decoded.bytes), 200, { ...headers, 'Content-Type': decoded.mime })
 }
 
 function serveSite(

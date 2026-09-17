@@ -40,18 +40,25 @@ function typeLabel(billedTo: string) {
   return billedTo === 'user' ? 'On-Demand' : 'Included'
 }
 
-function utcStamp(value: Date | string) {
+function localStamp(value: Date | string) {
   const date = typeof value === 'string' ? new Date(value) : value
-  return date.toISOString().replace('T', ' ').replace('.000Z', ' UTC')
+  return date.toLocaleString(undefined, {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  })
 }
 
-function utcDate(value: Date | string) {
+function localDate(value: Date | string) {
   const date = typeof value === 'string' ? new Date(value) : value
-  return date.toISOString().slice(0, 10)
+  return date.toLocaleDateString(undefined, { year: 'numeric', month: '2-digit', day: '2-digit' })
 }
 
-function utcTime(value: string) {
-  return new Date(value).toISOString().slice(11, 19)
+function localTime(value: string) {
+  return new Date(value).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' })
 }
 
 export function buildUsageCsv(input: {
@@ -73,7 +80,7 @@ export function buildUsageCsv(input: {
 
   const byDay = new Map<string, { requests: number; included: number; onDemand: number }>()
   for (const item of input.rows) {
-    const day = utcDate(item.created_at)
+    const day = localDate(item.created_at)
     const current = byDay.get(day) || { requests: 0, included: 0, onDemand: 0 }
     current.requests += 1
     if (item.billed_to === 'user') current.onDemand += item.tokens || 0
@@ -89,10 +96,10 @@ export function buildUsageCsv(input: {
     row(['Product', 'Soumtok']),
     row(['Report', 'Usage']),
     row(['Account', input.account || '']),
-    row(['Period start (UTC)', utcDate(input.from)]),
-    row(['Period end (UTC)', utcDate(inclusiveEnd)]),
-    row(['Timezone', 'UTC']),
-    row(['Generated at', utcStamp(generated)]),
+    row(['Period start', localDate(input.from)]),
+    row(['Period end', localDate(inclusiveEnd)]),
+    row(['Timezone', Intl.DateTimeFormat().resolvedOptions().timeZone || 'local']),
+    row(['Generated at', localStamp(generated)]),
     row(['Requests', input.rows.length]),
     row(['Prompt tokens', promptTotal]),
     row(['Completion tokens', completionTotal]),
@@ -133,7 +140,7 @@ export function buildUsageCsv(input: {
     ...(input.usage.length === 0 ? [row(['No model usage in this period', '', '', '', 0, 0, 0, 0, '0.00'])] : []),
     row([]),
     row(['DAILY BREAKDOWN']),
-    row(['Date (UTC)', 'Requests', 'Included tokens', 'On-demand tokens', 'Total tokens', 'Cost (USD)']),
+    row(['Date (local)', 'Requests', 'Included tokens', 'On-demand tokens', 'Total tokens', 'Cost (USD)']),
     ...[...byDay.entries()]
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([day, item]) =>
@@ -152,8 +159,8 @@ export function buildUsageCsv(input: {
     row([
       '#',
       'Request ID',
-      'Date (UTC)',
-      'Time (UTC)',
+      'Date (local)',
+      'Time (local)',
       'ISO 8601',
       'Type',
       'Surface',
@@ -172,8 +179,8 @@ export function buildUsageCsv(input: {
       return row([
         index + 1,
         item.id,
-        utcDate(item.created_at),
-        utcTime(item.created_at),
+        localDate(item.created_at),
+        localTime(item.created_at),
         new Date(item.created_at).toISOString(),
         typeLabel(item.billed_to),
         item.source === 'desktop' ? 'Desktop' : 'Studio',
@@ -198,5 +205,5 @@ export function buildUsageCsv(input: {
 
 export function usageCsvFilename(from: Date, to: Date) {
   const end = new Date(to.getTime() - 86400000)
-  return `Soumtok-Usage-${utcDate(from)}-to-${utcDate(end)}.csv`
+  return `Soumtok-Usage-${localDate(from)}-to-${localDate(end)}.csv`.replace(/\//g, '-')
 }

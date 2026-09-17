@@ -11,6 +11,7 @@ import {
   type AgentPlan,
   type AgentRunMode,
 } from './agent.ts'
+import { enrichAgentPlan } from './knowledgeBase.ts'
 import { applySlash } from './capabilities.ts'
 import { analyzeUserRequest, repairUserText, type RequestAnalysis } from './requestAnalyze.ts'
 import { type ChatFile } from './chatMedia.ts'
@@ -26,6 +27,7 @@ import {
 } from './desktopAgentPrefs.ts'
 import { parseAgentDriver, type AgentDriver } from './soumtokBot.ts'
 import { compactControlSystem, toolsForIntent } from './agentControlLayer.ts'
+import { parseAgentRuntime, studioWebToolNames } from './studioWeb.ts'
 
 const DESKTOP_READ_ONLY_TOOLS = new Set([
   'read',
@@ -81,6 +83,7 @@ export function assembleDesktopAgentSystemPrompt(input: {
   branch?: string
   mode?: DesktopAgentMode
   driver?: AgentDriver
+  runtime?: ReturnType<typeof parseAgentRuntime>
   files?: ChatFile[]
   plan: AgentPlan
   analysis: RequestAnalysis
@@ -116,6 +119,8 @@ export function prepareDesktopAgentTurn(input: {
   agentPrefs?: Partial<DesktopAgentPrefs>
   model?: string
   analysisKind?: string
+  runtime?: string
+  hasWorkspaceFiles?: boolean
 }): DesktopAgentTurn {
   const agentPrefs = applyRunModeToPrefs(mergeDesktopAgentPrefs(input.agentPrefs))
   const openFiles = openFilesForAgent(input.openFiles, agentPrefs)
@@ -129,7 +134,7 @@ export function prepareDesktopAgentTurn(input: {
         ? fromHistory.content
         : input.userMessage || '')
       .trim()
-  const hasProject = Boolean(input.workspaceRoot)
+  const hasProject = Boolean(input.hasWorkspaceFiles ?? input.workspaceRoot)
   const files = stampAttachmentMeta(input.files || [])
   const hasImage = files.some((f) => f.mime?.startsWith('image/'))
   const userText = applySlash(
@@ -153,9 +158,23 @@ export function prepareDesktopAgentTurn(input: {
   })
   if (input.analysisKind === 'image' && analysis.kind !== 'image') {
     analysis.kind = 'image'
-    analysis.do = ['Call generate_image({ prompt }) NOW', 'Do not list_dir or read the project']
-    analysis.dont = ['Explore the repo', 'Say the image tool is missing']
-    analysis.thought = 'Standalone still — generate_image only.'
+    const imgN = (() => {
+      const t = userText.toLowerCase()
+      const d = t.match(/\b(\d+)\s+(?:images?|pictures?|photos?|stills?)\b/)
+      if (d) return Math.min(6, Math.max(1, Number(d[1]) || 1))
+      const w = t.match(/\b(two|three|four|five|six)\s+(?:images?|pictures?|photos?|stills?)\b/)
+      if (w) return { two: 2, three: 3, four: 4, five: 5, six: 6 }[w[1]] || 1
+      return 1
+    })()
+    analysis.do =
+      imgN > 1
+        ? [
+            `Call generate_image ${imgN} times — different paths (assets/generated/…-1, …-2, etc.)`,
+            'Do not list_dir or read the project',
+          ]
+        : ['Call generate_image({ prompt }) NOW', 'Do not list_dir or read the project']
+    analysis.dont = ['Explore the repo', 'Say the image tool is missing', 'Stop after one image if they asked for more']
+    analysis.thought = imgN > 1 ? `Generate ${imgN} stills.` : 'Standalone still — generate_image only.'
   } else if (
     input.analysisKind &&
     input.analysisKind !== analysis.kind &&
@@ -177,25 +196,33 @@ export function prepareDesktopAgentTurn(input: {
       : analysis.kind
   const analysisForTurn = kind === analysis.kind ? analysis : { ...analysis, kind }
   const runMode: AgentRunMode = input.mode || 'agent'
-  const plan = inferPlan(userText, hasProject, {
-    runMode,
-    analysis: {
-      kind: analysisForTurn.kind,
-      meaning: analysisForTurn.meaning,
-      do: analysisForTurn.do,
-      dont: analysisForTurn.dont,
-    },
-  })
+  const plan = enrichAgentPlan(
+    inferPlan(userText, hasProject, {
+      runMode,
+      analysis: {
+        kind: analysisForTurn.kind,
+        meaning: analysisForTurn.meaning,
+        do: analysisForTurn.do,
+        dont: analysisForTurn.dont,
+      },
+    }),
+    userText,
+  )
   const uiMode = input.mode || 'agent'
   const allToolNames = desktopAgentToolNames(agentPrefs)
   const intentNames = new Set(toolsForIntent({ kind: analysisForTurn.kind, uiMode, prefs: agentPrefs }))
   const pruned = allToolNames.filter((n) => intentNames.has(n))
-  const { toolsEnabled, toolNames } = desktopToolsForTurn({
+  let { toolsEnabled, toolNames } = desktopToolsForTurn({
     uiMode,
     planMode: plan.mode,
     toolNames: pruned.length ? pruned : allToolNames,
     localToolsEnabled: agentPrefs.localToolsEnabled,
   })
+  const runtime = parseAgentRuntime(input.runtime, input.workspaceRoot)
+  if (runtime === 'studio-web') {
+    toolNames = studioWebToolNames(toolNames)
+    if (!toolNames.length) toolsEnabled = false
+  }
   const driver = parseAgentDriver(input.driver)
   const systemPrompt = assembleDesktopAgentSystemPrompt({
     workspaceRoot: input.workspaceRoot,
@@ -203,10 +230,11 @@ export function prepareDesktopAgentTurn(input: {
     branch: input.branch,
     mode: uiMode,
     driver,
+    runtime,
     files,
     plan,
     analysis: analysisForTurn,
-    enabledTools: toolsEnabled ? toolNames : allToolNames,
+    enabledTools: toolsEnabled ? toolNames : studioWebToolNames(allToolNames),
     model: input.model,
     userText,
   })

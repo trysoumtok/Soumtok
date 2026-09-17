@@ -1,16 +1,30 @@
 import { useEffect, useState } from 'react'
 import { authorizeConnectDevice, pollConnectDevice, type ConnectDeviceSession } from '../lib/api'
-import { signIn } from '../lib/auth-client'
+import { signInSocial, useSession } from '../lib/auth-client'
 import { formatUserCode } from '../../shared/connectLinks'
 import { navigate } from '../lib/nav'
 import { BrandMark } from './ui'
 import { PluginLogo } from './dashboard/PluginLogos'
 
 export function ConnectDevicePage({ code }: { code: string }) {
+  const { data: authSession } = useSession()
   const [session, setSession] = useState<ConnectDeviceSession | null>(null)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const [copied, setCopied] = useState<'link' | 'code' | ''>('')
   const display = formatUserCode(code)
+  const pageLink =
+    typeof window !== 'undefined' ? `${window.location.origin}/connect/${display}` : `/connect/${display}`
+
+  async function copyText(text: string, kind: 'link' | 'code') {
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopied(kind)
+      window.setTimeout(() => setCopied(''), 2000)
+    } catch {
+      window.prompt(kind === 'link' ? 'Copy link' : 'Copy code', text)
+    }
+  }
 
   useEffect(() => {
     let cancelled = false
@@ -34,6 +48,11 @@ export function ConnectDevicePage({ code }: { code: string }) {
   }, [code])
 
   async function authorize() {
+    if (!authSession) {
+      sessionStorage.setItem('soumtok-next', `${window.location.pathname}${window.location.search}`)
+      navigate('/login')
+      return
+    }
     setBusy(true)
     setError('')
     try {
@@ -53,7 +72,7 @@ export function ConnectDevicePage({ code }: { code: string }) {
   async function github() {
     setBusy(true)
     try {
-      await signIn.social({ provider: 'github', callbackURL: `/connect/${display}` })
+      await signInSocial({ provider: 'github', callbackURL: `/connect/${display}` })
     } catch {
       setError('GitHub sign-in failed')
       setBusy(false)
@@ -63,7 +82,7 @@ export function ConnectDevicePage({ code }: { code: string }) {
   async function google() {
     setBusy(true)
     try {
-      await signIn.social({ provider: 'google', callbackURL: `/connect/${display}` })
+      await signInSocial({ provider: 'google', callbackURL: `/connect/${display}` })
     } catch {
       setError('Google sign-in failed')
       setBusy(false)
@@ -72,6 +91,7 @@ export function ConnectDevicePage({ code }: { code: string }) {
 
   const done = session?.status === 'authorized'
   const provider = session?.provider || 'service'
+  const loading = !session && !error
 
   return (
     <div className="theme-app min-h-svh bg-[#0b0b0a] text-white">
@@ -83,11 +103,24 @@ export function ConnectDevicePage({ code }: { code: string }) {
       </header>
       <main className="mx-auto max-w-[440px] px-5 py-16">
         <div className="flex items-center gap-3">
-          <PluginLogo id={provider} className="h-10 w-10" />
+          {loading ? (
+            <span className="plugin-logo h-10 w-10 shrink-0 animate-pulse bg-white/[0.08]" aria-hidden="true" />
+          ) : (
+            <PluginLogo
+              id={provider}
+              logo={session?.logo}
+              logos={session?.logos}
+              className="h-10 w-10"
+            />
+          )}
           <div>
             <p className="text-[12px] uppercase tracking-[0.12em] text-[#f54e00]/80">Connect</p>
             <h1 className="text-[22px] font-semibold tracking-[-0.03em]">
-              {done ? `${session?.name || 'Service'} is connected` : `Connect ${session?.name || 'this service'}`}
+              {done
+                ? `${session?.name || 'Service'} is connected`
+                : loading
+                  ? 'Connect'
+                  : `Connect ${session?.name || 'this service'}`}
             </h1>
           </div>
         </div>
@@ -95,20 +128,45 @@ export function ConnectDevicePage({ code }: { code: string }) {
         <p className="mt-3 text-[14px] leading-6 text-white/55">
           {done
             ? 'You can close this tab and go back to Studio.'
-            : session?.detail ||
-              'Sign in below, or open the provider link and enter this code. Then return to the chat and tap I’ve connected.'}
+            : 'Copy the link or code below to finish on another device. Sign in here when you are ready.'}
         </p>
+        {!done && (
+          <div className="mt-5 rounded-xl border border-white/10 bg-white/[0.03] p-3.5">
+            <p className="text-[11px] uppercase tracking-[0.08em] text-white/35">Connect link</p>
+            <p className="mt-1.5 break-all font-mono text-[12px] leading-5 text-white/72">{pageLink}</p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => void copyText(pageLink, 'link')}
+                className="rounded-md border border-white/15 px-3 py-1.5 text-[13px] text-white/85 hover:bg-white/[0.06]"
+              >
+                {copied === 'link' ? 'Link copied' : 'Copy link'}
+              </button>
+              <button
+                type="button"
+                onClick={() => void copyText(display, 'code')}
+                className="rounded-md border border-white/15 px-3 py-1.5 text-[13px] text-white/85 hover:bg-white/[0.06]"
+              >
+                {copied === 'code' ? 'Code copied' : 'Copy code'}
+              </button>
+            </div>
+            <p className="mt-2.5 text-[12px] leading-5 text-white/40">
+              Paste the link in any browser, open it, and enter <span className="font-mono text-white/55">{display}</span>{' '}
+              if asked.
+            </p>
+          </div>
+        )}
         {error && <p className="mt-3 text-[13px] text-[#ff8a70]">{error}</p>}
         <div className="mt-6 flex flex-col gap-2">
-          {!done && session?.url && (
-            <a
-              href={session.url}
-              target="_blank"
-              rel="noreferrer"
-              className="rounded-lg bg-white py-3 text-center text-[15px] font-medium text-[#111110]"
+          {!done && (
+            <button
+              type="button"
+              onClick={() => void authorize()}
+              disabled={busy}
+              className="rounded-lg bg-white py-3 text-center text-[15px] font-medium text-[#111110] disabled:opacity-60"
             >
-              Open {session.name || 'link'}
-            </a>
+              {busy ? 'Opening sign-in…' : `Sign in to ${session?.name || 'service'}`}
+            </button>
           )}
           {!done && provider === 'github' && (
             <button

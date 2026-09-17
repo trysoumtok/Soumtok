@@ -92,6 +92,8 @@ try {
       'plan block message is clear',
     )
     ok(isWriteBlockedInUiMode('plan', 'write'), 'plan write gate helper')
+    ok(!isWriteBlockedInUiMode('plan', 'write', 'PLAN.md'), 'plan mode allows PLAN.md')
+    ok(!isWriteBlockedInUiMode('plan', 'write', 'CANVAS.md'), 'plan mode allows CANVAS.md')
   }
 
   // 2) Ask question end-to-end

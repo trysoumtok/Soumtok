@@ -82,6 +82,21 @@ export function parseStillRequest(text: string): { prompt: string; aspect: Still
   return { prompt: prompt || 'image', aspect }
 }
 
+/** Infer aspect when the model omitted aspect — hero/banner paths default to landscape. */
+export function stillAspectForImageUse(prompt: string, pathHint?: string | null): StillAspect {
+  const combined = `${String(prompt || '')} ${String(pathHint || '')}`.toLowerCase()
+  const explicit = stillAspectFromText(combined)
+  if (explicit !== DEFAULT_STILL_ASPECT) return explicit
+  if (
+    /\b(hero|banner|cover|header[\s-]?image|landing|og[\s-]?image|wide[\s-]?shot|background[\s-]?image)\b/.test(
+      combined,
+    )
+  ) {
+    return '16:9'
+  }
+  return DEFAULT_STILL_ASPECT
+}
+
 export function falImageSize(aspect?: string): string {
   const a = normalizeStillAspect(aspect)
   if (a === '1:1') return 'square_hd'

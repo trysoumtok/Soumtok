@@ -66,12 +66,14 @@ function createCheckpoint(root, relPaths) {
   return { id, paths: Object.keys(files) }
 }
 
-function restoreCheckpoint(root, id) {
+function restoreCheckpoint(root, id, onlyPaths) {
   const file = resolveCheckpointFile(root, id)
   if (!fs.existsSync(file)) return { ok: false, text: 'Checkpoint not found' }
   const payload = JSON.parse(fs.readFileSync(file, 'utf8'))
+  const filter = Array.isArray(onlyPaths) && onlyPaths.length ? new Set(onlyPaths.map(String)) : null
   let restored = 0
   for (const [rel, content] of Object.entries(payload.files || {})) {
+    if (filter && !filter.has(rel)) continue
     const full = path.join(root, rel)
     if (content === null) {
       if (fs.existsSync(full)) {
@@ -87,4 +89,33 @@ function restoreCheckpoint(root, id) {
   return { ok: true, text: `Restored ${restored} file(s)`, paths: Object.keys(payload.files || {}) }
 }
 
-module.exports = { createCheckpoint, restoreCheckpoint, checkpointDir, workspaceKey }
+function listCheckpoints(root) {
+  const dir = checkpointDir(root)
+  const legacy = legacyCheckpointDir(root)
+  const out = []
+  for (const base of [dir, legacy]) {
+    try {
+      if (!fs.existsSync(base)) continue
+      for (const f of fs.readdirSync(base).filter((n) => n.endsWith('.json'))) {
+        const full = path.join(base, f)
+        const payload = JSON.parse(fs.readFileSync(full, 'utf8'))
+        out.push({
+          id: payload.id || f.replace(/\.json$/, ''),
+          at: payload.at || '',
+          paths: Object.keys(payload.files || {}),
+        })
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  out.sort((a, b) => String(b.at).localeCompare(String(a.at)))
+  const seen = new Set()
+  return out.filter((row) => {
+    if (seen.has(row.id)) return false
+    seen.add(row.id)
+    return true
+  })
+}
+
+module.exports = { createCheckpoint, restoreCheckpoint, listCheckpoints, checkpointDir, workspaceKey }

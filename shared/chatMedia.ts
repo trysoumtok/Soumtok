@@ -312,6 +312,12 @@ export function guessMime(name: string, mime = '') {
   if (/\.webm$/.test(lower)) return 'video/webm'
   if (/\.mov$/.test(lower)) return 'video/quicktime'
   if (/\.pdf$/.test(lower)) return 'application/pdf'
+  if (/\.docx$/.test(lower)) return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+  if (/\.xlsx$/.test(lower)) return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+  if (/\.pptx$/.test(lower)) return 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+  if (/\.rtf$/.test(lower)) return 'text/rtf'
+  if (/\.epub$/.test(lower)) return 'application/epub+zip'
+  if (/\.zip$/.test(lower)) return 'application/zip'
   return 'application/octet-stream'
 }
 
@@ -343,7 +349,10 @@ export function analyzeAttachment(input: {
   } else if (kind === 'video') {
     lines.push('', 'Video stored in your documents. Gemini can watch it.')
   } else if (kind === 'pdf') {
-    lines.push('', 'PDF stored in your documents. Claude, Gemini, or GPT can open it.')
+    lines.push(
+      '',
+      'PDF attached — Soumtok extracts text for text-only models. If Extracted text is empty, the PDF may be scanned; ask for .txt export or page images.',
+    )
   } else {
     lines.push('', 'File stored in your documents and attached to this chat.')
   }
@@ -406,7 +415,13 @@ function textForUnsupported(files: ChatFile[], media: ModelMedia) {
       continue
     }
     if ((file.mime === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) && !media.pdf) {
-      bits.push(`Attached PDF ${file.name}. This model cannot open PDFs. Claude, Gemini, or GPT can.`)
+      if (file.analysis?.trim()) {
+        bits.push(`Attached PDF ${file.name} (Soumtok extracted text — read ATTACHMENTS):\n${file.analysis.trim()}`)
+      } else {
+        bits.push(
+          `Attached PDF ${file.name}. Soumtok extracts text into ATTACHMENTS for text-only models — use that content; do not say you cannot open PDFs.`,
+        )
+      }
       continue
     }
     if (!file.dataUrl || !isProviderMediaUrl(file.dataUrl)) {
