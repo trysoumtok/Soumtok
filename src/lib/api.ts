@@ -1,4 +1,5 @@
 import type { ChatFile } from '../../shared/chatMedia'
+import { GITHUB_APP_INSTALL_URL } from '../../shared/githubApp.ts'
 
 export type DocumentRow = {
   id: string
@@ -928,7 +929,7 @@ export async function fetchGithubRepos() {
     expired: Boolean(data.expired),
     login: data.login || null,
     repos: data.repos || [],
-    installUrl: data.installUrl || 'https://github.com/apps/soumtok/installations/new',
+    installUrl: data.installUrl || GITHUB_APP_INSTALL_URL,
   }
 }
 
@@ -1240,7 +1241,7 @@ export async function streamStudio(
     const hint =
       failed.error ||
       (raw && /<!doctype html/i.test(raw) ? 'Server returned a page instead of a stream — redeploy or sign in again.' : '') ||
-      (res.status === 402 ? 'Your free trial ended. Upgrade to Pro to keep coding.' : '') ||
+      (res.status === 402 ? 'Subscribe to Start ($5/mo) or upgrade your plan to keep coding.' : '') ||
       (res.status === 401 ? 'Sign in with your Soumtok account.' : '') ||
       (res.status === 403 ? 'Finish account setup first.' : '') ||
       (res.status ? `Model request failed (${res.status})` : 'Model request failed')
@@ -1410,7 +1411,9 @@ export async function fetchMpesaOrder(orderId: string) {
   const data = (await res.json()) as {
     status?: string
     error?: string
+    message?: string
     plan?: string
+    planLabel?: string
     amount?: string
     currency?: string
     cycle?: string
@@ -1419,6 +1422,7 @@ export async function fetchMpesaOrder(orderId: string) {
     periodStart?: string | null
     periodEnd?: string | null
     receiptUrl?: string | null
+    receiptEmailed?: boolean
   }
   if (!res.ok) throw new Error(data.error || 'Could not check M-Pesa')
   return data

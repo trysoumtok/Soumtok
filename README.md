@@ -99,6 +99,18 @@ npm run test:desktop
 
 ---
 
+## Pricing
+
+| Plan | Price | Included |
+| --- | --- | --- |
+| **Start** | $5 / mo | $5 Everyday pool — DeepSeek Flash, DeepSeek Pro, GPT-4.1 Mini |
+| **Pro** | $20 / mo | $10 Everyday + $10 Additional (Opus, GPT-6, Sonnet, Grok) |
+| **Pro Plus** | $48 / mo | $24 Everyday + $24 Additional |
+
+No free tier. Checkout via M-Pesa or PayPal. See [soumtok.com](https://soumtok.com/#pricing).
+
+---
+
 ## Repository map
 
 ```

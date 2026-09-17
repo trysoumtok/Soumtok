@@ -1,0 +1,16 @@
+{
+  "name": "@soumtok/cli",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Soumtok Agent in your terminal — sign in, pick a model, code with the same tools as Desktop.",
+  "type": "module",
+  "bin": {
+    "soumtok": "./bin/soumtok.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node ./bin/soumtok.mjs"
+  }
+}

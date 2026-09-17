@@ -4,6 +4,7 @@ import { useSession } from '../../lib/auth-client'
 import { navigate, openTab } from '../../lib/nav'
 import { buildUsageCsv, usageCsvFilename, type UsageCsvRow, type UsageCsvUsage } from '../../lib/usage-csv'
 import { usageRowCostUsd, usageRowKind } from '../../../shared/imageBilling.ts'
+import { catalogModelId, usageModelLabel } from '../../../shared/models.ts'
 
 type Preset = '1d' | '7d' | '30d' | 'mtd' | 'last' | 'custom'
 type SeriesPoint = { day: string; model: string; tokens: number }
@@ -33,9 +34,33 @@ function rangeFor(preset: Exclude<Preset, 'custom'>, now = new Date()) {
 
 function formatRange(from: Date, to: Date) {
   const end = addDays(to, -1)
-  const a = from.toLocaleDateString('en-US', { month: 'short', day: '2-digit', timeZone: 'UTC' })
-  const b = end.toLocaleDateString('en-US', { month: 'short', day: '2-digit', timeZone: 'UTC' })
+  const a = from.toLocaleDateString('en-US', { month: 'short', day: '2-digit' })
+  const b = end.toLocaleDateString('en-US', { month: 'short', day: '2-digit' })
   return `${a} - ${b}`
+}
+
+function localTimeZoneLabel() {
+  try {
+    const parts = new Intl.DateTimeFormat(undefined, { timeZoneName: 'short' }).formatToParts(new Date())
+    return parts.find((part) => part.type === 'timeZoneName')?.value || 'local'
+  } catch {
+    return 'local'
+  }
+}
+
+function formatUsageWhen(iso: string) {
+  return new Date(iso).toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  })
+}
+
+function rangeIncludesNow(from: Date, to: Date) {
+  const now = Date.now()
+  return from.getTime() <= now && to.getTime() > now
 }
 
 function formatTokens(n: number) {
@@ -330,21 +355,41 @@ export function UsagePanel() {
   const [series, setSeries] = useState<SeriesPoint[]>([])
   const [usage, setUsage] = useState<UsageCsvUsage[]>([])
   const [rows, setRows] = useState<UsageRow[]>([])
+  const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null)
   const rangeRef = useRef<HTMLDivElement>(null)
+  const tzLabel = useMemo(() => localTimeZoneLabel(), [])
 
   useEffect(() => {
-    fetchAnalytics({ from: from.toISOString(), to: to.toISOString() })
-      .then((data) => {
-        setSeries(data.series || [])
-        setUsage(data.usage || [])
-        setRows(data.rows || [])
-      })
-      .catch(() => {
-        setSeries([])
-        setUsage([])
-        setRows([])
-      })
-  }, [from, to])
+    let cancelled = false
+    const load = () =>
+      fetchAnalytics({ from: from.toISOString(), to: to.toISOString() })
+        .then((data) => {
+          if (cancelled) return
+          setSeries(data.series || [])
+          setUsage(data.usage || [])
+          setRows(data.rows || [])
+          setLastSyncedAt(Date.now())
+        })
+        .catch(() => {
+          if (cancelled) return
+          setSeries([])
+          setUsage([])
+          setRows([])
+        })
+
+    void load()
+    if (!rangeIncludesNow(from, to)) return () => { cancelled = true }
+
+    const pollMs = preset === '1d' ? 5000 : 10000
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'hidden') return
+      void load()
+    }, pollMs)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [from, to, preset])
 
   useEffect(() => {
     function onDoc(event: MouseEvent) {
@@ -358,7 +403,8 @@ export function UsagePanel() {
   const models = useMemo(() => {
     const seen: string[] = []
     for (const row of series) {
-      if (!seen.includes(row.model)) seen.push(row.model)
+      const label = usageModelLabel(row.model)
+      if (!seen.includes(label)) seen.push(label)
     }
     return seen
   }, [series])
@@ -367,14 +413,15 @@ export function UsagePanel() {
     for (const day of days) map[day] = {}
     for (const row of series) {
       if (!map[row.day]) map[row.day] = {}
-      map[row.day][row.model] = (map[row.day][row.model] || 0) + row.tokens
+      const label = usageModelLabel(row.model)
+      map[row.day][label] = (map[row.day][label] || 0) + row.tokens
     }
     return map
   }, [days, series])
 
   const included = rows.filter((row) => row.billed_to !== 'user').reduce((sum, row) => sum + (row.tokens || 0), 0)
-  const onDemand = rows.filter((row) => row.billed_to === 'user').reduce((sum, row) => sum + (row.tokens || 0), 0)
-  const total = included + onDemand
+  const byok = rows.filter((row) => row.billed_to === 'user').reduce((sum, row) => sum + (row.tokens || 0), 0)
+  const total = included + byok
 
   function applyPreset(next: Exclude<Preset, 'custom'>) {
     const range = rangeFor(next)
@@ -461,7 +508,7 @@ export function UsagePanel() {
         {[
           ['Total tokens', total],
           ['Included', included],
-          ['On-demand', onDemand],
+          ['Your keys (BYOK)', byok],
         ].map(([label, value]) => (
           <div key={String(label)} className="rounded-xl border border-white/[0.06] bg-[#141413] px-5 py-4">
             <p className="text-[12px] text-white/40">{label}</p>
@@ -474,7 +521,14 @@ export function UsagePanel() {
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <p className="text-[15px] font-medium">Your Usage</p>
-            <p className="mt-1 text-[12px] text-white/40">Your usage per day across this billing period.</p>
+            <p className="mt-1 text-[12px] text-white/40">
+              Your usage per day across this billing period.
+              {lastSyncedAt ? (
+                <span className="ml-2 text-white/30">
+                  Updated {new Date(lastSyncedAt).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                </span>
+              ) : null}
+            </p>
           </div>
           <span className="rounded-md border border-white/10 px-2.5 py-1 text-[12px] text-white/50">Group By: Model</span>
         </div>
@@ -509,7 +563,7 @@ export function UsagePanel() {
           <table className="w-full min-w-[640px] text-left text-[13px]">
             <thead className="text-[12px] text-white/40">
               <tr className="border-b border-white/[0.06]">
-                <th className="py-3 font-normal">Date (UTC)</th>
+                <th className="py-3 font-normal">Date ({tzLabel})</th>
                 <th className="py-3 font-normal">Type</th>
                 <th className="py-3 font-normal">Surface</th>
                 <th className="py-3 font-normal">Model</th>
@@ -527,9 +581,10 @@ export function UsagePanel() {
               )}
               {rows.map((row) => {
                 const includedRow = row.billed_to !== 'user'
-                const kind = usageRowKind(row.model, row.prompt_tokens || 0, row.completion_tokens || 0)
+                const catalogModel = catalogModelId(row.model)
+                const kind = usageRowKind(catalogModel, row.prompt_tokens || 0, row.completion_tokens || 0)
                 const costUsd = usageRowCostUsd(
-                  row.model,
+                  catalogModel,
                   row.tokens || 0,
                   row.billed_to || 'platform',
                   row.prompt_tokens || 0,
@@ -537,20 +592,16 @@ export function UsagePanel() {
                 )
                 return (
                   <tr key={row.id} className="border-b border-white/[0.06]">
-                    <td className="py-3 text-white/80">
-                      {new Date(row.created_at).toLocaleString('en-US', {
-                        month: 'short',
-                        day: 'numeric',
-                        hour: '2-digit',
-                        minute: '2-digit',
-                        timeZone: 'UTC',
-                      })}
-                    </td>
+                    <td className="py-3 text-white/80">{formatUsageWhen(row.created_at)}</td>
                     <td className="py-3 text-white/70">
-                      {kind === 'image' ? 'Image' : includedRow ? 'Included' : 'On-Demand'}
+                      {kind === 'image' ? 'Image' : includedRow ? 'Included' : 'BYOK'}
                     </td>
-                    <td className="py-3 text-white/70 capitalize">{row.source === 'desktop' ? 'Desktop' : 'Studio'}</td>
-                    <td className="py-3 text-white/80">{row.model}</td>
+                    <td className="py-3 text-white/70 capitalize">
+                      {row.source === 'cli' ? 'Terminal' : row.source === 'desktop' ? 'Desktop' : 'Studio'}
+                    </td>
+                    <td className="py-3 text-white/80" title={catalogModel}>
+                      {usageModelLabel(row.model)}
+                    </td>
                     <td className="py-3 text-right text-white/70">{formatTokens(row.tokens || 0)}</td>
                     <td className="py-3 text-right text-white/70">
                       {includedRow

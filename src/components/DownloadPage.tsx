@@ -15,6 +15,7 @@ import { Footer } from './Footer'
 import { Nav } from './Nav'
 import { DownloadIcon, PillButton } from './ui'
 import { WindowsSmartScreenGuide } from './WindowsSmartScreenGuide.tsx'
+import { TerminalCliGuide } from './TerminalCliGuide.tsx'
 
 function fetchManifest() {
   return fetch('/api/desktop/releases')
@@ -606,6 +607,8 @@ export function DownloadPage() {
             </article>
           </div>
         </div>
+
+        <TerminalCliGuide />
 
         {/* All builds */}
         <div id="all-builds" className="mt-16 sm:mt-20">

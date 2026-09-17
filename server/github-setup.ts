@@ -67,7 +67,7 @@ export function registerGithubSetup(app: Hono) {
       page(
         'Connect Soumtok GitHub',
         `<h1>Connect the Soumtok GitHub</h1>
-         <p>In the next tab, GitHub will ask you to create the Soumtok app. Sign in as <strong>Soumtok</strong>, not another personal account.</p>
+         <p>In the next tab, GitHub will ask you to create the Soumtok app. Sign in as the <strong>trysoumtok</strong> org (or your org admin account), not a random personal account.</p>
          <form action="https://github.com/settings/apps/new" method="post">
            <input type="hidden" name="manifest" value='${JSON.stringify(manifest)}' />
            <button type="submit">Connect Soumtok GitHub</button>
@@ -128,7 +128,7 @@ export function registerGithubSetup(app: Hono) {
       page(
         'GitHub connected',
         `<h1>Soumtok GitHub is connected</h1>
-         <p>App owner: <strong>${data.owner?.login || 'Soumtok'}</strong>. Restart the Soumtok server, then people can sign in with GitHub.</p>
+         <p>App owner: <strong>${data.owner?.login || 'trysoumtok'}</strong>. Restart the Soumtok server, then people can sign in with GitHub.</p>
          <a class="btn" href="/login">Back to sign in</a>`,
       ),
     )

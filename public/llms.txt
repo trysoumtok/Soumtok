@@ -17,7 +17,7 @@ Soumtok is Africa's #1 AI coding platform. The most affordable powerful coding a
 - Docs: https://soumtok.com/docs
 - Help: https://soumtok.com/help
 - Contact: https://soumtok.com/contact
-- GitHub: https://github.com/Soumtok
+- GitHub: https://github.com/trysoumtok/Soumtok
 - Email: support@soumtok.com
 
 ## Docs

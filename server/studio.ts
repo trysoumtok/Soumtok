@@ -9,11 +9,13 @@ import {
   desktopCodingModels,
   openaiOmitsTemperature,
   soumtokCodingModels,
+  soumtokPickerModels,
   SOUMTOK_CODING_PROVIDERS,
   PROVIDER_LABEL,
   isAutoModel,
   isTrialModel,
   TRIAL_MODEL_NAMES,
+  catalogModelId,
   modelById,
   pickAutoModel,
   sortModelsByPower,
@@ -73,10 +75,21 @@ import {
   PLAN_CREDIT,
   TOKENS_PER_CREDIT,
   TRIAL_TOKEN_QUOTA,
+  canUseByok,
+  isUnpaidPlan,
   paidPlan,
   planLabel,
   planPriceLine,
 } from '../shared/plans.ts'
+import { vendorUsdForTokens } from '../shared/modelPricing.ts'
+import {
+  checkPoolAccess,
+  cheapModelsOnlyPlan,
+  isEverydayModel,
+  modelUsagePool,
+  planPoolSummary,
+  sumPoolUsageUsd,
+} from '../shared/usagePools.ts'
 import { normalizeUsername, usernameError } from '../shared/username.ts'
 import { auth } from './auth.ts'
 import { pool } from './db.ts'
@@ -88,14 +101,19 @@ import { deleteFromBunny, downloadFromBunny, safeFileName, uploadToBunny } from 
 import { consumeCode, issueCode } from './verify.ts'
 import { registerChrome } from './chrome.ts'
 import { registerStudioTools, runStudioTools, sanitizeToolFiles } from './studioTools.ts'
+import { ensureProfile } from './account-sync.ts'
 import { flagDeletedEmail, normalizeEmail } from './blocked-emails.ts'
 import { imageChargeTokens, imageChargeUsd } from '../shared/imageBilling.ts'
 import { assertPlatformTokenBudget, recordImageUsage } from './imageUsage.ts'
 
+type SessionUser = { user: { id: string; email?: string | null; name?: string | null } }
+
 type ReadyFn = (c: { req: { raw: Request } }) => Promise<{
-  session: { user: { id: string; email?: string | null; name?: string | null } } | null
+  session: SessionUser | null
   ready: boolean
 }>
+
+type UserFn = (c: { req: { raw: Request } }) => Promise<SessionUser | null>
 
 function parseIsoDate(value?: string) {
   if (!value) return null
@@ -684,6 +702,7 @@ function mapProject(row: Record<string, unknown>, opts?: { list?: boolean }) {
 export function registerStudio(
   app: Hono,
   requireReadyUser: ReadyFn,
+  requireUser: UserFn,
 ) {
   registerChrome(app, requireReadyUser)
   registerStudioTools(app, requireReadyUser)
@@ -848,10 +867,10 @@ export function registerStudio(
     const have = new Set(keys.rows.map((row: { provider: string }) => row.provider))
     const profile = await pool.query(`SELECT plan FROM profiles WHERE user_id = $1`, [session.user.id])
     const planId = String(profile.rows[0]?.plan || 'hobby')
-    const base = soumtokCodingModels()
+    const base = soumtokPickerModels()
     const catalog =
-      !openAccessForBuilding() && (planId === 'hobby' || planId === 'trial')
-        ? base.filter((model) => isTrialModel(model.id))
+      !openAccessForBuilding() && cheapModelsOnlyPlan(planId)
+        ? base.filter((model) => isEverydayModel(model.id))
         : base
     return c.json({
       models: sortModelsByPower(catalog).map((model) => {
@@ -916,10 +935,11 @@ export function registerStudio(
     const row = profile.rows[0] || {}
     const planRaw = String(row.plan || 'hobby')
     const planId = planRaw === 'teams' ? 'team' : planRaw
-    const isTrial = planId === 'hobby' || planId === 'trial'
-    const credit = PLAN_CREDIT[planId] || PLAN_CREDIT.hobby
-    const quota = isTrial ? TRIAL_TOKEN_QUOTA : credit * TOKENS_PER_CREDIT
+    const credit = PLAN_CREDIT[planId] || 0
+    const quota = credit * TOKENS_PER_CREDIT
     const currentPaid = paidPlan(planId)
+    const poolMeta = planPoolSummary(planId)
+    const poolUsed = await platformPoolUsage(session.user.id, planId)
 
     const usage = await pool.query(
       `SELECT billed_to,
@@ -959,14 +979,14 @@ export function registerStudio(
         Boolean(platformKey(id)),
     }))
 
-    const upgradeOrder = ['hobby', 'trial', 'pro', 'pro_plus', 'ultra'] as const
+    const upgradeOrder = ['hobby', 'trial', 'start', 'pro', 'pro_plus'] as const
     let upgrade: { id: string; name: string; price: string; tagline: string } | null = null
     const idx = upgradeOrder.indexOf(planRaw as (typeof upgradeOrder)[number])
     const nextId =
       idx >= 0 && idx < upgradeOrder.length - 1
         ? upgradeOrder[idx + 1]
-        : planId === 'hobby' || planId === 'trial'
-          ? 'pro'
+        : isUnpaidPlan(planId)
+          ? 'start'
           : null
     if (nextId && nextId !== 'trial') {
       const next = paidPlan(nextId)
@@ -992,12 +1012,27 @@ export function registerStudio(
       planCycle: row.plan_cycle === 'annual' ? 'annual' : 'monthly',
       planRenewsAt: row.plan_renews_at || null,
       planLabel: planLabel(planRaw),
-      planPrice: currentPaid ? planPriceLine(currentPaid) : 'Free',
+      planPrice: currentPaid ? planPriceLine(currentPaid) : null,
+      byokAllowed: canUseByok(planId),
       quota,
       includedTokens,
       byokTokens,
       includedPct: Math.min(100, Math.round((includedTokens / Math.max(quota, 1)) * 100)),
       byokPct: byokTokens > 0 ? Math.min(100, Math.round((byokTokens / Math.max(quota, 1)) * 100)) : 0,
+      pools: {
+        cheapDisplayUsd: poolMeta.cheapDisplayUsd,
+        premiumDisplayUsd: poolMeta.premiumDisplayUsd,
+        cheapUsedUsd: poolUsed.cheap,
+        premiumUsedUsd: poolUsed.premium,
+        cheapPct: Math.min(
+          100,
+          Math.round((poolUsed.cheap / Math.max(poolMeta.cheapBudgetUsd, 0.0001)) * 100),
+        ),
+        premiumPct: poolMeta.premiumBudgetUsd
+          ? Math.min(100, Math.round((poolUsed.premium / poolMeta.premiumBudgetUsd) * 100))
+          : 0,
+        cheapOnly: poolMeta.cheapOnly,
+      },
       topModels: topModels.rows,
       providers,
       upgrade,
@@ -1037,16 +1072,14 @@ export function registerStudio(
     if (billedTo === 'platform' && !openAccessForBuilding()) {
       const profile = await pool.query(`SELECT plan FROM profiles WHERE user_id = $1`, [session.user.id])
       const planId = String(profile.rows[0]?.plan || 'hobby')
-      if (planId === 'hobby' || planId === 'trial') {
-        const used = await pool.query(
-          `SELECT coalesce(sum(prompt_tokens + completion_tokens), 0)::int AS tokens
-           FROM usage_events
-           WHERE user_id = $1 AND billed_to = 'platform' AND created_at >= date_trunc('month', now())`,
-          [session.user.id],
+      if (isUnpaidPlan(planId)) {
+        return c.json(
+          {
+            error:
+              'Subscribe to Start ($5/mo) to use voice on platform keys — or add your OpenAI key in Settings → Keys.',
+          },
+          402,
         )
-        if ((used.rows[0]?.tokens || 0) >= TRIAL_TOKEN_QUOTA) {
-          return c.json({ error: 'Your free trial ended. Upgrade to Pro to keep using voice.' }, 402)
-        }
       }
     }
 
@@ -1099,7 +1132,15 @@ export function registerStudio(
     }
   })
 
-  /** One agent round for Soumtok Desktop — model + tools; tools execute on the client. */
+  function agentUsageSource(c: { req: { header: (name: string) => string | undefined } }, body?: { client?: string }) {
+    const explicit = String(body?.client || c.req.header('X-Soumtok-Client') || '').toLowerCase()
+    if (explicit === 'cli' || explicit === 'terminal') return 'cli' as const
+    const ua = c.req.header('User-Agent') || ''
+    if (/SoumtokCLI/i.test(ua)) return 'cli' as const
+    return 'desktop' as const
+  }
+
+  /** One agent round for Soumtok Desktop / CLI — model + tools; tools execute on the client. */
   const desktopAgentRound = async (c) => {
     const { session, ready } = await requireReadyUser(c)
     if (!session || !pool) return c.json({ error: 'Unauthorized' }, 401)
@@ -1116,7 +1157,9 @@ export function registerStudio(
       files?: ChatFile[]
       agentPrefs?: Record<string, unknown>
       analysisKind?: string
+      client?: string
     }>()
+    const usageSource = agentUsageSource(c, body)
 
     const agentPrefs = applyRunModeToPrefs(mergeDesktopAgentPrefs(body.agentPrefs))
     const openFiles = openFilesForAgent(body.openFiles, agentPrefs)
@@ -1224,10 +1267,10 @@ export function registerStudio(
       })
       await recordRun(
         session.user.id,
-        { provider, requestModel, billedTo },
+        { provider, requestModel, billedTo, catalogModel },
         { promptTokens: ran.promptTokens, completionTokens: ran.completionTokens },
         started,
-        'desktop',
+        usageSource,
       )
       return c.json({
         text: ran.text,
@@ -1235,6 +1278,7 @@ export function registerStudio(
         model: requestModel,
         provider,
         billedTo,
+        client: usageSource,
         promptTokens: ran.promptTokens,
         completionTokens: ran.completionTokens,
         thought: prep.analysis.thought,
@@ -1275,6 +1319,15 @@ export function registerStudio(
       return c.json({ error: 'Unknown provider' }, 400)
     }
     if (key.length < 12) return c.json({ error: 'That key looks too short' }, 400)
+
+    const profile = await pool.query(`SELECT plan FROM profiles WHERE user_id = $1`, [session.user.id])
+    const planId = String(profile.rows[0]?.plan || 'hobby')
+    if (!canUseByok(planId)) {
+      return c.json(
+        { error: 'Bring your own API keys requires Pro ($20/mo) or higher. Upgrade in Billing.' },
+        403,
+      )
+    }
 
     await pool.query(
       `INSERT INTO provider_keys (id, user_id, provider, label, key_ciphertext, last4)
@@ -1398,6 +1451,22 @@ export function registerStudio(
         maxTokens?: number
       }
 
+  async function platformPoolUsage(userId: string, planId: string) {
+    const profile = await pool!.query(`SELECT plan_started_at FROM profiles WHERE user_id = $1`, [userId])
+    const started = profile.rows[0]?.plan_started_at
+    const since =
+      started && !isUnpaidPlan(planId)
+        ? new Date(started)
+        : new Date(new Date().getFullYear(), new Date().getMonth(), 1)
+    const rows = await pool!.query(
+      `SELECT model, prompt_tokens, completion_tokens, billed_to
+       FROM usage_events
+       WHERE user_id = $1 AND billed_to = 'platform' AND created_at >= $2`,
+      [userId, since.toISOString()],
+    )
+    return sumPoolUsageUsd(rows.rows as { model: string; prompt_tokens?: number; completion_tokens?: number; billed_to?: string }[])
+  }
+
   async function resolveRun(
     userId: string,
     body: { model?: string; messages?: StudioMessage[]; temperature?: number; maxTokens?: number },
@@ -1413,9 +1482,9 @@ export function registerStudio(
     const planId = String(profile.rows[0]?.plan || 'hobby')
     const desktopRun = (body as { mode?: AgentRunMode; workspaceRoot?: string }).mode
     const autoCatalog =
-      !openAccessForBuilding() && (planId === 'hobby' || planId === 'trial')
-        ? soumtokCodingModels().filter((item) => isTrialModel(item.id))
-        : soumtokCodingModels()
+      !openAccessForBuilding() && cheapModelsOnlyPlan(planId)
+        ? soumtokPickerModels().filter((item) => isEverydayModel(item.id))
+        : soumtokPickerModels()
     const hasFiles = Boolean((body as { workspaceRoot?: string }).workspaceRoot)
     const hasImage =
       (lastUser?.files || []).some((file) => /image\//.test(file.mime || '')) ||
@@ -1437,15 +1506,15 @@ export function registerStudio(
     const model = modelById(requested)
     if (
       !openAccessForBuilding() &&
-      (planId === 'hobby' || planId === 'trial') &&
+      cheapModelsOnlyPlan(planId) &&
       !isAutoModel(body.model) &&
       body.model &&
-      !isTrialModel(body.model)
+      modelUsagePool(body.model) === 'premium'
     ) {
       return {
         ok: false,
         status: 402,
-        error: `Trial includes ${TRIAL_MODEL_NAMES} only. Upgrade to Pro or pick Soumtok Agent.`,
+        error: `Your plan includes Everyday models only (DeepSeek Flash, DeepSeek Pro, GPT-4.1 Mini). Upgrade to Pro ($20) for Additional models, or add your own API key.`,
       }
     }
     const attached = (lastUser?.files || []).flatMap((file) => [file.text || '', file.analysis || ''])
@@ -1499,17 +1568,27 @@ export function registerStudio(
       }
     }
 
-    if (!openAccessForBuilding() && (planId === 'hobby' || planId === 'trial')) {
-      const used = await pool!.query(
-        `SELECT coalesce(sum(prompt_tokens + completion_tokens), 0)::int AS tokens
-         FROM usage_events
-         WHERE user_id = $1
-           AND billed_to = 'platform'
-           AND created_at >= date_trunc('month', now())`,
-        [userId],
-      )
-      if ((used.rows[0]?.tokens || 0) >= TRIAL_TOKEN_QUOTA) {
-        return { ok: false, status: 402, error: 'Your free trial ended. Upgrade to Pro to keep coding.' }
+    if (!openAccessForBuilding() && billedTo === 'user' && !canUseByok(planId)) {
+      return {
+        ok: false,
+        status: 402,
+        error:
+          'Using your own API keys requires Pro ($20/mo) or higher. Upgrade in Billing, or use Everyday models on your included pool.',
+      }
+    }
+
+    if (!openAccessForBuilding() && billedTo === 'platform') {
+      const pools = await platformPoolUsage(userId, planId)
+      const estTurnUsd = vendorUsdForTokens(model.id, 4000, Math.min(body.maxTokens || 4096, 4096))
+      const gate = checkPoolAccess({
+        planId,
+        modelId: model.id,
+        usedCheapUsd: pools.cheap,
+        usedPremiumUsd: pools.premium,
+        estTurnUsd,
+      })
+      if (!gate.ok) {
+        return { ok: false, status: gate.status, error: gate.error }
       }
     }
 
@@ -1518,11 +1597,12 @@ export function registerStudio(
 
   async function recordRun(
     userId: string,
-    run: { provider: ModelProvider; requestModel: string; billedTo: 'user' | 'platform' },
+    run: { provider: ModelProvider; requestModel: string; billedTo: 'user' | 'platform'; catalogModel?: string },
     tokens: { promptTokens: number; completionTokens: number },
     started: number,
-    source: 'studio' | 'desktop' = 'studio',
+    source: 'studio' | 'desktop' | 'cli' = 'studio',
   ) {
+    const storedModel = catalogModelId(run.catalogModel || run.requestModel)
     await pool!.query(
       `INSERT INTO usage_events (id, user_id, provider, model, prompt_tokens, completion_tokens, billed_to, source)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
@@ -1530,15 +1610,18 @@ export function registerStudio(
         crypto.randomUUID(),
         userId,
         run.provider,
-        run.requestModel,
+        storedModel,
         tokens.promptTokens,
         tokens.completionTokens,
         run.billedTo,
         source,
       ],
     )
-    await track(userId, source === 'desktop' ? 'desktop_agent_round' : 'studio_complete', source === 'desktop' ? '/desktop' : '/dashboard/studio', {
-      model: run.requestModel,
+    const eventName =
+      source === 'cli' ? 'cli_agent_round' : source === 'desktop' ? 'desktop_agent_round' : 'studio_complete'
+    const eventPath = source === 'cli' ? '/cli' : source === 'desktop' ? '/desktop' : '/dashboard/studio'
+    await track(userId, eventName, eventPath, {
+      model: storedModel,
       provider: run.provider,
       billedTo: run.billedTo,
       ms: Date.now() - started,
@@ -1601,7 +1684,7 @@ export function registerStudio(
     const promptTokens = data.usage?.prompt_tokens || data.usage?.input_tokens || 0
     const completionTokens = data.usage?.completion_tokens || data.usage?.output_tokens || 0
 
-    await recordRun(session.user.id, { provider, requestModel, billedTo }, { promptTokens, completionTokens }, started)
+    await recordRun(session.user.id, { provider, requestModel, billedTo, catalogModel }, { promptTokens, completionTokens }, started)
 
     const shownModel = isAutoModel(payload.model) ? 'auto' : modelById(payload.model ?? '').id
     return c.json({
@@ -1814,7 +1897,7 @@ export function registerStudio(
           await removeSandboxDir(sandboxDir)
         }
 
-        await recordRun(userId, { provider, requestModel, billedTo }, { promptTokens, completionTokens }, started).catch(
+        await recordRun(userId, { provider, requestModel, billedTo, catalogModel }, { promptTokens, completionTokens }, started).catch(
           () => undefined,
         )
         if (!failed) {
@@ -1840,7 +1923,12 @@ export function registerStudio(
     if (!ready) return c.json({ error: 'Finish account setup first' }, 403)
 
     const body = await c.req.json<{ prompt?: string; model?: string; aspect?: string; source?: string }>()
-    const usageSource = body.source === 'desktop' ? 'desktop' : 'studio'
+    const usageSource =
+      body.source === 'cli' || /SoumtokCLI/i.test(c.req.header('User-Agent') || '')
+        ? 'cli'
+        : body.source === 'desktop'
+          ? 'desktop'
+          : 'studio'
     const prompt = body.prompt?.trim() ?? ''
     const started = Date.now()
     const modelId = body.model?.trim() || IMAGE_MODEL.id
@@ -1932,10 +2020,10 @@ export function registerStudio(
   })
 
   app.put('/api/me/photo/:kind', async (c) => {
-    const { session, ready } = await requireReadyUser(c)
+    const session = await requireUser(c)
     if (!session || !pool) return c.json({ error: 'Unauthorized' }, 401)
-    if (!ready) return c.json({ error: 'Finish account setup first' }, 403)
     if (!hasBunny()) return c.json({ error: 'Storage is not connected' }, 503)
+    await ensureProfile(session.user.id)
 
     const kind = c.req.param('kind')
     if (kind !== 'avatar' && kind !== 'company') return c.json({ error: 'Unknown photo' }, 400)
@@ -1959,9 +2047,8 @@ export function registerStudio(
   })
 
   app.get('/api/me/photo/:kind', async (c) => {
-    const { session, ready } = await requireReadyUser(c)
+    const session = await requireUser(c)
     if (!session || !pool) return c.json({ error: 'Unauthorized' }, 401)
-    if (!ready) return c.json({ error: 'Finish account setup first' }, 403)
 
     const kind = c.req.param('kind')
     const column = kind === 'company' ? 'company_logo_path' : 'avatar_path'

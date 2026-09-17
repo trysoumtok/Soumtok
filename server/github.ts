@@ -2,6 +2,7 @@ import type { Hono } from 'hono'
 import { mkdtemp, readdir, readFile, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import nodePath from 'node:path'
+import { githubAppInstallUrl } from '../shared/githubApp.ts'
 import { isSecretPath } from '../shared/secretsGuard.ts'
 import { pool } from './db.ts'
 import { env } from './env.ts'
@@ -413,7 +414,7 @@ export function registerGithub(app: Hono, requireReadyUser: ReadyFn) {
         connected: false,
         login: null,
         repos: [],
-        installUrl: 'https://github.com/apps/soumtok/installations/new',
+        installUrl: githubAppInstallUrl(env.githubAppSlug),
         reconnectUrl: `https://github.com/settings/connections/applications/${env.githubClientId}`,
       })
     }
@@ -424,7 +425,7 @@ export function registerGithub(app: Hono, requireReadyUser: ReadyFn) {
         expired: true,
         login: synced.login,
         repos: [],
-        installUrl: 'https://github.com/apps/soumtok/installations/new',
+        installUrl: githubAppInstallUrl(env.githubAppSlug),
         reconnectUrl: `https://github.com/settings/connections/applications/${env.githubClientId}`,
       })
     }
@@ -436,7 +437,7 @@ export function registerGithub(app: Hono, requireReadyUser: ReadyFn) {
         expired: true,
         login: synced.login,
         repos: [],
-        installUrl: 'https://github.com/apps/soumtok/installations/new',
+        installUrl: githubAppInstallUrl(env.githubAppSlug),
         reconnectUrl: `https://github.com/settings/connections/applications/${env.githubClientId}`,
       })
     }
@@ -462,7 +463,7 @@ export function registerGithub(app: Hono, requireReadyUser: ReadyFn) {
         language: repo.language,
         updatedAt: repo.updated_at,
       })),
-      installUrl: 'https://github.com/apps/soumtok/installations/new',
+      installUrl: githubAppInstallUrl(env.githubAppSlug),
     })
   })
 

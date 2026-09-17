@@ -1,20 +1,22 @@
 export const SITE_URL = 'https://soumtok.com'
 export const SITE_NAME = 'Soumtok'
 export const SITE_TAGLINE = "Africa's #1 AI coding platform"
-export const SITE_TITLE = "Africa's #1 AI Coding Platform from $13.99 | Soumtok"
+export const SITE_TITLE = "Africa's #1 AI Coding Platform from $5 | Soumtok"
 export const SITE_DESCRIPTION =
-  "The most affordable powerful AI coding platform in Africa. Start coding from $13.99 a month — agents, GitHub, frontier models. Built in Nairobi."
+  "The most affordable powerful AI coding platform in Africa. Start coding from $5 a month — Everyday models, dual pools on Pro, GitHub agents. Built in Nairobi."
 export const SITE_IMAGE = '/og.jpg'
-export const SITE_IMAGE_ALT = "Soumtok — Africa's #1 AI coding platform. Start from $13.99."
+export const SITE_IMAGE_ALT = "Soumtok — Africa's #1 AI coding platform. Start from $5."
 export const SITE_EMAIL = 'support@soumtok.com'
-export const SITE_GITHUB = 'https://github.com/Soumtok'
+import { SITE_GITHUB_REPO } from './githubApp.ts'
+
+export const SITE_GITHUB = SITE_GITHUB_REPO
 export const SITE_LOCALE = 'en_KE'
 export const SITE_THEME = '#0b0b0a'
 
 export const FAQ = [
   {
     q: 'What is the cheapest AI coding platform in Africa?',
-    a: 'Soumtok. Trial is free. Pro starts at $13.99 a month — less than the $20 desks — with frontier models, GitHub, and a coding agent that ships. Built in Nairobi.',
+    a: 'Soumtok Start is $5 a month for Everyday models (DeepSeek Flash, DeepSeek Pro, GPT-4.1 Mini). Pro is $20 with separate Everyday and Additional pools — same dual-pool idea as Cursor, with M-Pesa and PayPal checkout. Built in Nairobi.',
   },
   {
     q: 'Is Soumtok Africa’s #1 coding platform?',
@@ -22,11 +24,11 @@ export const FAQ = [
   },
   {
     q: 'How much does it cost to start coding with an AI agent?',
-    a: 'Open Studio free on Trial. Upgrade to Pro at $13.99 a month when you want daily coding, premium models, and cloud agents.',
+    a: 'Subscribe to Start at $5 a month for Everyday models. Upgrade to Pro at $20 when you want Additional models (Opus, GPT-6, Sonnet) on a separate monthly pool.',
   },
   {
     q: 'Is there a cheaper alternative to Cursor?',
-    a: 'Soumtok is a full coding agent at $13.99 a month. Same job — attach a repo, pick a model, hand the work over — without the $20 bill.',
+    a: 'Soumtok Start is $5 a month. Pro is $20 with $10 Everyday + $10 Additional pools. Same job — attach a repo, pick a model, hand the work over.',
   },
   {
     q: 'Best AI coding agent for Kenya and African developers?',
@@ -123,12 +125,12 @@ const DOC_PAGES: { id: string; title: string; description: string }[] = [
   {
     id: 'billing',
     title: 'Billing',
-    description: 'Plans, usage, included tokens, and how billing works on Soumtok.',
+    description: 'Start $5, Pro $20, Pro Plus $48. Everyday vs Additional pools, M-Pesa and PayPal checkout, and how to read Spending.',
   },
   {
     id: 'pricing-usage',
     title: 'Pricing & usage',
-    description: 'Unified Studio + Desktop metering, per-model tokens, image charges, and how Soumtok compares to Cursor.',
+    description: 'One meter for Studio and Desktop. Everyday vs Additional pools, Soumtok Agent free, images, BYOK, and on-demand.',
   },
   {
     id: 'settings',
@@ -143,12 +145,12 @@ const DOC_PAGES: { id: string; title: string; description: string }[] = [
   {
     id: 'cli',
     title: 'CLI',
-    description: 'Run Soumtok locally with Vite, Neon, and the same Studio desk you use in production.',
+    description: 'Soumtok Desktop download, local dev with Vite, and what is not a product CLI yet.',
   },
   {
     id: 'plans',
     title: 'Plans',
-    description: 'Pro from $13.99 a month. Trial is free. What is included and how to upgrade.',
+    description: 'Start $5, Pro $20, Pro Plus $48. Everyday models, dual pools, Soumtok Agent free, and upgrade path.',
   },
   {
     id: 'company',
@@ -199,7 +201,7 @@ const PAGES: Record<string, SeoPage> = {
   },
   '/signup': {
     title: `Create account | ${SITE_NAME}`,
-    description: 'Open Studio, attach GitHub, and start coding. Trial is free. Pro is $13.99 a month.',
+    description: 'Open Studio, attach GitHub, and start coding. Start is $5 a month. Pro is $20 with dual pools.',
     path: '/signup',
     noindex: true,
   },
@@ -391,7 +393,7 @@ export function llmsTxt() {
 
 > ${SITE_TAGLINE}.
 
-Soumtok is Africa's #1 AI coding platform. The most affordable powerful coding agent — start from $13.99 a month. Open Studio, attach a repo, pick a model, and ship.
+Soumtok is Africa's #1 AI coding platform. The most affordable powerful coding agent — start from $5 a month. Open Studio, attach a repo, pick a model, and ship.
 
 ## Product
 
@@ -417,7 +419,7 @@ ${docs}
 
 export function jsonLd(page: SeoPage, origin = SITE_URL) {
   const url = absoluteUrl(page.path, origin)
-  const logo = absoluteUrl('/images/soumtok-mark.png', origin)
+  const logo = absoluteUrl('/images/soumtok-oauth.png', origin)
   const image = absoluteUrl(page.image || SITE_IMAGE, origin)
   const orgId = `${origin}/#organization`
   const appId = `${origin}/#app`
@@ -456,24 +458,31 @@ export function jsonLd(page: SeoPage, origin = SITE_URL) {
       operatingSystem: 'Web',
       offers: {
         '@type': 'AggregateOffer',
-        lowPrice: '0',
-        highPrice: '13.99',
+        lowPrice: '5',
+        highPrice: '48',
         priceCurrency: 'USD',
-        offerCount: '2',
+        offerCount: '3',
         offers: [
           {
             '@type': 'Offer',
-            name: 'Trial',
-            price: '0',
+            name: 'Start',
+            price: '5',
             priceCurrency: 'USD',
-            description: 'Start coding free.',
+            description: 'Everyday models — DeepSeek Flash, DeepSeek Pro, GPT-4.1 Mini.',
           },
           {
             '@type': 'Offer',
             name: 'Pro',
-            price: '13.99',
+            price: '20',
             priceCurrency: 'USD',
-            description: 'Daily coding on Africa’s #1 AI coding platform.',
+            description: '$10 Everyday + $10 Additional model pools.',
+          },
+          {
+            '@type': 'Offer',
+            name: 'Pro Plus',
+            price: '48',
+            priceCurrency: 'USD',
+            description: '$24 Everyday + $24 Additional model pools.',
           },
         ],
       },

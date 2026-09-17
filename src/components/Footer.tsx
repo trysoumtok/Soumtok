@@ -1,3 +1,4 @@
+import { SITE_GITHUB } from '../../shared/seo.ts'
 import { useSession } from '../lib/auth-client'
 import { navigate } from '../lib/nav'
 import { Logo, PillButton } from './ui'
@@ -97,7 +98,7 @@ export function Footer() {
           </div>
           <div className="flex flex-wrap items-center gap-4">
             <a
-              href="https://github.com/Soumtok"
+              href={SITE_GITHUB}
               target="_blank"
               rel="noreferrer"
               className="text-white/40 no-underline hover:text-white/70"
