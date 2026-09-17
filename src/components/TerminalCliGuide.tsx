@@ -1,10 +1,11 @@
 import { useState } from 'react'
 import { PlatformIcon } from './PlatformIcon.tsx'
 
+const RAW = 'https://raw.githubusercontent.com/trysoumtok/Soumtok/main/public/install'
 const INSTALL = {
-  windows: "irm 'https://soumtok.com/install/cli.ps1' | iex",
-  macos: 'curl -fsSL https://soumtok.com/install/cli-macos.sh | bash',
-  linux: 'curl -fsSL https://soumtok.com/install/cli-linux.sh | bash',
+  windows: `irm '${RAW}/cli.ps1' | iex`,
+  macos: `curl -fsSL ${RAW}/cli-macos.sh | bash`,
+  linux: `curl -fsSL ${RAW}/cli-linux.sh | bash`,
 } as const
 
 type PlatformTab = keyof typeof INSTALL
@@ -71,7 +72,7 @@ export function TerminalCliGuide() {
                     : 'border-white/10 bg-[#111110] text-white/70 hover:border-white/20 hover:text-white'
                 }`}
               >
-                <PlatformIcon platform={key} size={18} />
+                <PlatformIcon platform={key} size={key === 'linux' ? 22 : 18} />
                 {label}
               </button>
             ))}
