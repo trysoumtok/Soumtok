@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import type { Hono } from 'hono'
-import { env, hasGithub } from './env.ts'
+import { env, hasGithub, isProductionDeploy } from './env.ts'
 
 const CALLBACK = `${env.betterAuthUrl}/api/auth/callback/github`
 const SETUP_REDIRECT = `${env.betterAuthUrl}/api/setup/github`
@@ -29,6 +29,18 @@ function upsertEnv(key: string, value: string) {
   writeFileSync(file, text)
 }
 
+function esc(text: string) {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}
+
+function setupAllowed() {
+  return !isProductionDeploy()
+}
+
 function page(title: string, body: string) {
   return `<!doctype html>
 <html lang="en">
@@ -52,6 +64,7 @@ function page(title: string, body: string) {
 
 export function registerGithubSetup(app: Hono) {
   app.get('/api/setup/github/start', (c) => {
+    if (!setupAllowed()) return c.text('Not found', 404)
     if (hasGithub()) {
       return c.html(
         page(
@@ -78,6 +91,7 @@ export function registerGithubSetup(app: Hono) {
   })
 
   app.get('/api/setup/github', async (c) => {
+    if (!setupAllowed()) return c.text('Not found', 404)
     const code = c.req.query('code')
     if (!code) {
       return c.html(
@@ -112,7 +126,7 @@ export function registerGithubSetup(app: Hono) {
         page(
           'GitHub setup failed',
           `<h1>Could not finish GitHub setup</h1>
-           <p>${data.message || 'GitHub did not return app credentials.'}</p>
+           <p>${esc(data.message || 'GitHub did not return app credentials.')}</p>
            <a class="btn" href="/api/setup/github/start">Try again</a>`,
         ),
         400,

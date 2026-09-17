@@ -23,10 +23,12 @@ function openBrowser(url) {
   spawn('xdg-open', [url], { detached: true, stdio: 'ignore' }).unref()
 }
 
-async function pollLogin(base, id, maxMs = 900_000) {
+async function pollLogin(base, id, verifier, maxMs = 900_000) {
   const started = Date.now()
   while (Date.now() - started < maxMs) {
-    const res = await fetch(`${base}/api/desktop/poll/${id}`, {
+    const res = await fetch(
+      `${base}/api/desktop/poll/${encodeURIComponent(id)}?verifier=${encodeURIComponent(verifier)}`,
+      {
       headers: { Accept: 'application/json', 'User-Agent': 'SoumtokCLI/0.1' },
     })
     const data = await res.json().catch(() => ({}))
@@ -42,17 +44,19 @@ export async function loginCommand({ api: apiOverride, signup = false } = {}) {
   saveConfig({ api: base })
   const client = createApiClient(base)
   const start = await client.api('POST', '/api/desktop/start', signup ? { mode: 'up' } : {})
-  if (start.status !== 200 || !start.data?.id || !start.data?.url) {
+  if (start.status !== 200 || !start.data?.id || !start.data?.url || !start.data?.verifier) {
     throw new Error(start.data?.error || 'Could not start sign-in')
   }
+  const verifier = String(start.data.verifier)
   console.log('')
   console.log(brand('Soumtok') + c.dim(' · sign in'))
   console.log(c.dim('Opening your browser… finish sign-in there, then return here.'))
   console.log('')
-  console.log(c.cyan(start.data.url))
+  const browserUrl = `${start.data.url}#dv=${encodeURIComponent(verifier)}`
+  console.log(c.cyan(browserUrl))
   console.log('')
-  openBrowser(start.data.url)
-  const token = await pollLogin(base, start.data.id)
+  openBrowser(browserUrl)
+  const token = await pollLogin(base, start.data.id, verifier)
   saveCredentials({ token, api: base })
   let user = null
   for (let attempt = 0; attempt < 5; attempt++) {

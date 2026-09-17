@@ -3,7 +3,7 @@ import { deleteCookie, getCookie, setCookie } from 'hono/cookie'
 import type { Context } from 'hono'
 import { auth } from './auth.ts'
 import { pool } from './db.ts'
-import { env } from './env.ts'
+import { authCrossSubDomainCookies, env } from './env.ts'
 
 const COOKIE = 'soumtok_2fa'
 const MAX_AGE = 60 * 60 * 24 * 30
@@ -18,17 +18,20 @@ export function twoFactorCookieOk(c: Context, sessionToken: string) {
 }
 
 export function grantTwoFactorCookie(c: Context, sessionToken: string) {
+  const cross = authCrossSubDomainCookies()
   setCookie(c, COOKIE, stamp(sessionToken), {
     path: '/',
     httpOnly: true,
     sameSite: 'Lax',
     secure: env.betterAuthUrl.startsWith('https'),
     maxAge: MAX_AGE,
+    ...(cross ? { domain: cross.domain } : {}),
   })
 }
 
 export function clearTwoFactorCookie(c: Context) {
-  deleteCookie(c, COOKIE, { path: '/' })
+  const cross = authCrossSubDomainCookies()
+  deleteCookie(c, COOKIE, { path: '/', ...(cross ? { domain: cross.domain } : {}) })
 }
 
 export async function userTwoFactorEnabled(userId: string) {
@@ -89,6 +92,8 @@ export function registerTwoFactorGate(
   })
 
   app.post('/api/me/2fa/clear', async (c: Context) => {
+    const session = await requireUser(c)
+    if (!session) return c.json({ error: 'Unauthorized' }, 401)
     clearTwoFactorCookie(c)
     return c.json({ ok: true })
   })

@@ -36,6 +36,7 @@ export type DesktopControlFile = DesktopControlPolicy & {
 export type DesktopClientConfig = DesktopControlPolicy & {
   currentVersion: string
   updateRequired: boolean
+  updateAvailable: boolean
   updatedAt: string | null
 }
 
@@ -146,6 +147,7 @@ export function buildClientConfig(control: DesktopControlFile, currentVersion: s
     releasesManifestUrl: control.releasesManifestUrl,
     currentVersion,
     updateRequired: belowMin || (control.forceUpdate && belowLatest),
+    updateAvailable: belowLatest,
     updatedAt: control.updatedAt || null,
   }
 }

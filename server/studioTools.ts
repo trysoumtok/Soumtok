@@ -1,6 +1,7 @@
 import type { Hono } from 'hono'
 import { brandLogoFetchUrls, isRawFetchBody, wantsBrandAsset } from '../shared/brandLogo.ts'
 import { extractUrls, lookupQuery } from '../shared/capabilities.ts'
+import { resolveMcpConnector } from '../shared/connectors.ts'
 import { formatToolResults, isEditTool, runLocalTool, type StudioTool, type ToolOutcome } from '../shared/tools.ts'
 import { pool } from './db.ts'
 import { callMcpTool, connectorBearer } from './connectors.ts'
@@ -12,24 +13,15 @@ import { commitRepoFiles, fetchRepoSnapshot } from './github.ts'
 import { createSandboxDir, isGitPushCommand, removeSandboxDir, runSandboxed } from './sandbox.ts'
 import { redactSecrets } from '../shared/secretsGuard.ts'
 import { resolveToolName } from '../shared/typoIntent.ts'
+import { isBinaryWorkspaceFile } from '../shared/preview.ts'
+import { hasBunny } from './env.ts'
+import { uploadToBunny } from './storage.ts'
+import { publicHttpsUrl, safeHttpsFetch } from '../shared/ssrfGuard.ts'
 
 type ReadyFn = (c: { req: { raw: Request } }) => Promise<{
   session: { user: { id: string } } | null
   ready: boolean
 }>
-
-const PRIVATE_HOST = /^(localhost|127\.|10\.|192\.168\.|0\.|::1|\[::1\])/i
-
-function publicHttps(raw: string) {
-  try {
-    const url = new URL(raw.trim())
-    if (url.protocol !== 'https:') return null
-    if (PRIVATE_HOST.test(url.hostname) || url.hostname.endsWith('.local')) return null
-    return url
-  } catch {
-    return null
-  }
-}
 
 function htmlToText(html: string) {
   return html
@@ -47,10 +39,9 @@ function htmlToText(html: string) {
 }
 
 async function fetchPage(url: string) {
-  const parsed = publicHttps(url)
+  const parsed = publicHttpsUrl(url)
   if (!parsed) throw new Error('Only public https URLs can be fetched')
-  const res = await fetch(parsed, {
-    redirect: 'follow',
+  const res = await safeHttpsFetch(parsed, {
     headers: {
       'User-Agent': 'SownStudio/1.0 (research fetch)',
       Accept: 'text/html,application/json,image/svg+xml,text/plain;q=0.9,*/*;q=0.8',
@@ -104,7 +95,12 @@ export function sanitizeToolFiles(files: Record<string, string> | undefined) {
     if (typeof content !== 'string') continue
     const parts = filePath.replace(/\\/g, '/').split('/').filter(Boolean)
     if (parts.length === 0 || parts.some((part) => part === '..')) continue
-    safe[parts.join('/')] = content.slice(0, 80_000)
+    const rel = parts.join('/')
+    if (isBinaryWorkspaceFile(rel, content)) {
+      safe[rel] = content.startsWith('/api/studio/images/') ? content : `[binary image at ${rel} — reference in HTML, do not paste bytes]`
+      continue
+    }
+    safe[rel] = content.slice(0, 80_000)
   }
   return safe
 }
@@ -147,20 +143,54 @@ export async function fetchStudioPages(input: { url?: string; query?: string; ur
   return pages
 }
 
+function applyToolOutcome(files: Record<string, string>, out: ToolOutcome) {
+  let next = { ...files }
+  if (out.deleted?.length) {
+    for (const path of out.deleted) delete next[path]
+  }
+  if (out.files) next = { ...next, ...out.files }
+  return next
+}
+
+async function readStudioSkill(userId: string, args: Record<string, string>) {
+  if (!pool) return 'Database is not connected'
+  const needle = String(args.name || args.skill || args.id || '').trim()
+  if (!needle) return 'read_skill needs name'
+  const row = await pool.query(
+    `SELECT name, file_name, content FROM user_skills WHERE user_id = $1 AND (LOWER(name) = LOWER($2) OR LOWER(file_name) = LOWER($2) OR id::text = $2) LIMIT 1`,
+    [userId, needle],
+  )
+  const skill = row.rows[0] as { name?: string; file_name?: string; content?: string } | undefined
+  if (!skill?.content) return `No skill named "${needle}". Attach skills in Studio or upload a .skill file.`
+  return `# ${skill.name || skill.file_name}\n\n${String(skill.content).slice(0, 24_000)}`
+}
+
 export async function executeStudioTool(
   userId: string,
   tool: StudioTool,
   files: Record<string, string>,
-  ctx: { repo?: string; sandboxDir?: string } = {},
+  ctx: { repo?: string; sandboxDir?: string; fileDeletionProtection?: boolean } = {},
 ): Promise<ToolOutcome> {
   const name = resolveToolName(tool.name)
   const args = tool.args || {}
   const toolResolved = name === tool.name ? tool : { ...tool, name }
-  if (
-    (name === 'read' || name === 'grep' || name === 'write' || isEditTool(name)) &&
-    name !== 'generate_image'
-  ) {
-    return runLocalTool(toolResolved, files)
+  const localNames = new Set([
+    'read',
+    'grep',
+    'glob',
+    'list_dir',
+    'write',
+    'delete',
+    'wipe_workspace',
+    'clear_workspace',
+    'read_lints',
+    'readlints',
+    'codebase_search',
+    'codebasesearch',
+    'semantic_search',
+  ])
+  if ((localNames.has(name) || isEditTool(name)) && name !== 'generate_image') {
+    return runLocalTool(toolResolved, files, { fileDeletionProtection: ctx.fileDeletionProtection })
   }
   if (name === 'fetch') {
     const pages = await fetchStudioPages({ url: args.url, query: args.query || args.q, urls: extractUrls(`${args.url || ''} ${args.query || ''}`) })
@@ -199,10 +229,10 @@ export async function executeStudioTool(
   }
   if (name === 'mcp') {
     if (!pool) return { name, ok: false, text: 'Database is not connected' }
-    const listed = await pool.query(`SELECT id, name, mcp_url FROM user_connectors WHERE user_id = $1`, [userId])
-    const conn = listed.rows.find(
-      (row) => row.name === args.server || row.id === args.server || row.name === args.connector || row.id === args.connector,
-    ) as { id: string; name: string; mcp_url: string } | undefined
+    const listed = await pool.query(`SELECT id, name, plugin_id, mcp_url FROM user_connectors WHERE user_id = $1`, [userId])
+    const conn = resolveMcpConnector(listed.rows, String(args.server || args.connector || '')) as
+      | { id: string; name: string; mcp_url: string }
+      | undefined
     if (!conn) {
       return {
         name,
@@ -232,8 +262,21 @@ export async function executeStudioTool(
           return { name, ok: false, text: budget.error }
         }
       }
-      const generated = await generateStillImage(prompt, args.model)
+      const generated = await generateStillImage(prompt, args.model, args.aspect)
       const rel = String(args.path || `assets/generated/${Date.now().toString(36)}.${generated.ext}`).replace(/^\/+/, '')
+      let fileValue: string
+      if (hasBunny()) {
+        const id = crypto.randomUUID()
+        await uploadToBunny(
+          `users/${userId}/studio/${id}.${generated.ext}`,
+          generated.bytes,
+          generated.contentType || 'image/jpeg',
+        )
+        fileValue = `/api/studio/images/${id}.${generated.ext}`
+      } else {
+        const b64 = Buffer.from(generated.bytes).toString('base64')
+        fileValue = `data:${generated.contentType || 'image/jpeg'};base64,${b64}`
+      }
       let billing = ''
       if (pool) {
         const billed = await recordImageUsage(pool, userId, generated.model.id, generated.model.provider)
@@ -242,10 +285,71 @@ export async function executeStudioTool(
       return {
         name,
         ok: true,
-        text: `Generated still image (${generated.model.id}, ${generated.bytes.length} bytes). Save as ${rel} on Desktop.${billing}`,
+        text: `Saved still to ${rel} (${generated.aspect || '1:1'}, ${generated.bytes.length} bytes, ${generated.model.id}).${billing}`,
+        files: { [rel]: fileValue },
       }
     } catch (error) {
       return { name, ok: false, text: error instanceof Error ? error.message : 'Image generation failed' }
+    }
+  }
+  if (name === 'git') {
+    const action = String(args.action || args.command || 'status').toLowerCase()
+    const cmd =
+      action === 'diff'
+        ? `git diff ${args.staged === 'true' ? '--staged' : ''} ${args.path || ''}`.trim()
+        : action === 'log'
+          ? `git log --oneline -n ${Math.min(20, Number(args.max) || 10)}`
+          : action === 'branch'
+            ? 'git branch -a'
+            : action === 'show'
+              ? `git show ${args.rev || 'HEAD'} --stat`
+              : action === 'commit'
+                ? `git add -A && git commit -m ${JSON.stringify(String(args.message || 'Update from Studio'))}`
+                : 'git status -sb'
+    const ran = await runSandboxed(cmd, files, { persistDir: ctx.sandboxDir })
+    return { name, ok: ran.ok, text: ran.text.slice(0, 12_000) }
+  }
+  if (name === 'read_skill' || name === 'readskill') {
+    try {
+      const text = await readStudioSkill(userId, args)
+      return { name, ok: !text.startsWith('No skill'), text }
+    } catch (error) {
+      return { name, ok: false, text: error instanceof Error ? error.message : 'read_skill failed' }
+    }
+  }
+  if (name === 'browser' || name === 'browser_snapshot' || name === 'screenshot') {
+    const url = String(args.url || '').trim()
+    if (!url) return { name, ok: false, text: 'browser needs url (https:// or http://localhost after npm run dev)' }
+    if (/^https:\/\//i.test(url)) {
+      try {
+        const page = await fetchPage(url)
+        return {
+          name,
+          ok: page.ok,
+          text: `Browser snapshot: ${page.title}\n${page.url}\n\n${page.text.slice(0, 8000)}`,
+        }
+      } catch (error) {
+        return { name, ok: false, text: error instanceof Error ? error.message : 'browser fetch failed' }
+      }
+    }
+    return {
+      name,
+      ok: false,
+      text: 'Web Studio cannot reach localhost on your machine. Use terminal output or open Preview after npm run dev.',
+    }
+  }
+  if (name === 'task') {
+    return {
+      name,
+      ok: false,
+      text: 'Subagent Task spawning is not available in Web Studio. Use read/grep/codebase_search and terminal directly.',
+    }
+  }
+  if (name === 'read_terminal' || name === 'readterminal') {
+    return {
+      name,
+      ok: true,
+      text: 'Web Studio has no integrated terminal log. The Preview panel already shows index.html with inlined CSS/JS after write(). Use terminal only for npm test or node -e one-shots — not dev servers.',
     }
   }
   if (name === 'examine_media') {
@@ -275,7 +379,7 @@ export async function runStudioTools(
   userId: string,
   tools: StudioTool[],
   files: Record<string, string>,
-  ctx: { repo?: string; sandboxDir?: string } = {},
+  ctx: { repo?: string; sandboxDir?: string; fileDeletionProtection?: boolean } = {},
 ) {
   const owned = !ctx.sandboxDir
   const sandboxDir = ctx.sandboxDir || (await createSandboxDir())
@@ -286,7 +390,7 @@ export async function runStudioTools(
       try {
         const out = await executeStudioTool(userId, tool, next, { ...ctx, sandboxDir })
         outcomes.push(out)
-        if (out.files) next = { ...next, ...out.files }
+        next = applyToolOutcome(next, out)
       } catch (error) {
         outcomes.push({ name: tool.name, ok: false, text: error instanceof Error ? error.message : 'Tool failed' })
       }
@@ -345,11 +449,19 @@ export function registerStudioTools(app: Hono, requireReadyUser: ReadyFn) {
     const { session, ready } = await requireReadyUser(c)
     if (!session) return c.json({ error: 'Unauthorized' }, 401)
     if (!ready) return c.json({ error: 'Finish account setup first' }, 403)
-    const body = await c.req.json<{ tools?: StudioTool[]; files?: Record<string, string>; repo?: string }>()
+    const body = await c.req.json<{
+      tools?: StudioTool[]
+      files?: Record<string, string>
+      repo?: string
+      agentPrefs?: { fileDeletionProtection?: boolean }
+    }>()
     const tools = Array.isArray(body.tools) ? body.tools.filter((item) => item && item.kind === 'tool' && item.name).slice(0, 8) : []
     if (tools.length === 0) return c.json({ error: 'No tools to run' }, 400)
     try {
-      const ran = await runStudioTools(session.user.id, tools, sanitizeToolFiles(body.files), { repo: body.repo })
+      const ran = await runStudioTools(session.user.id, tools, sanitizeToolFiles(body.files), {
+        repo: body.repo,
+        fileDeletionProtection: body.agentPrefs?.fileDeletionProtection,
+      })
       return c.json(ran)
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : 'Tools failed' }, 400)
@@ -377,8 +489,13 @@ export function registerStudioTools(app: Hono, requireReadyUser: ReadyFn) {
       pool.query(`SELECT id, name, file_name, excerpt FROM user_skills WHERE user_id = $1 ORDER BY created_at DESC LIMIT 40`, [
         session.user.id,
       ]),
-      pool.query(`SELECT name, skills, mcps FROM user_plugins WHERE user_id = $1 AND enabled IS DISTINCT FROM false`, [session.user.id]),
-      pool.query(`SELECT id, name, connected, mcp_url, last_check FROM user_connectors WHERE user_id = $1`, [session.user.id]),
+      pool.query(
+        `SELECT plugin_id, name, skills, mcps FROM user_plugins WHERE user_id = $1 AND enabled IS DISTINCT FROM false`,
+        [session.user.id],
+      ),
+      pool.query(`SELECT id, name, plugin_id, connected, mcp_url, last_check FROM user_connectors WHERE user_id = $1`, [
+        session.user.id,
+      ]),
       pool.query(`SELECT id, title, folder, left(content, 280) AS snippet FROM documents WHERE user_id = $1 ORDER BY updated_at DESC LIMIT 20`, [
         session.user.id,
       ]),
@@ -391,6 +508,7 @@ export function registerStudioTools(app: Hono, requireReadyUser: ReadyFn) {
         return {
           id: row.id,
           name: row.name,
+          plugin_id: row.plugin_id,
           connected: row.connected,
           mcpUrl: row.mcp_url,
           tools: check.mcp?.tools || [],

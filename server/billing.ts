@@ -1,4 +1,4 @@
-import type { Hono } from 'hono'
+import type { Context, Hono } from 'hono'
 import {
   kesFromUsd,
   paidPlan,
@@ -23,6 +23,7 @@ import {
   createPaypalSubscription,
   getPaypalSubscription,
   verifyPaypalWebhook,
+  waitForActivePaypalSubscription,
 } from './paypal.ts'
 
 type ReadyFn = (c: { req: { raw: Request } }) => Promise<{
@@ -211,7 +212,7 @@ export function registerBilling(app: Hono, requireReadyUser: ReadyFn) {
     const id = c.req.param('id')
     const row = await pool.query(
       `SELECT id, plan, status, amount, currency, cycle, reference, checkout_id,
-              receipt_number, paid_at, period_start, period_end
+              receipt_number, paid_at, period_start, period_end, created_at, receipt_sent_at
        FROM billing_orders WHERE id = $1 AND user_id = $2`,
       [id, session.user.id],
     )
@@ -229,12 +230,16 @@ export function registerBilling(app: Hono, requireReadyUser: ReadyFn) {
           paid_at: Date | string | null
           period_start: Date | string | null
           period_end: Date | string | null
+          created_at: Date | string
+          receipt_sent_at: Date | string | null
         }
       | undefined
     if (!order) return c.json({ error: 'Order not found' }, 404)
 
+    let providerHint = ''
+
     if (order.status === 'pending') {
-      const refs = [order.reference, order.checkout_id, order.id].filter(Boolean) as string[]
+      const refs = [...new Set([order.id, order.reference, order.checkout_id].filter(Boolean))] as string[]
       let remote: PayheroLookup = { status: 'unknown' }
       for (const ref of refs) {
         remote = await payheroStatus(ref)
@@ -248,26 +253,40 @@ export function registerBilling(app: Hono, requireReadyUser: ReadyFn) {
         const fulfilled = await fulfillPaidOrder({ expectedUserId: session.user.id, orderId: id })
         if (fulfilled.ok) {
           const fresh = await pool.query(
-            `SELECT receipt_number, paid_at, period_start, period_end FROM billing_orders WHERE id = $1`,
+            `SELECT status, receipt_number, paid_at, period_start, period_end, receipt_sent_at
+             FROM billing_orders WHERE id = $1`,
             [id],
           )
-          order.status = 'paid'
+          order.status = fresh.rows[0]?.status || 'paid'
           order.receipt_number = fresh.rows[0]?.receipt_number || order.receipt_number
           order.paid_at = fresh.rows[0]?.paid_at || order.paid_at
           order.period_start = fresh.rows[0]?.period_start || order.period_start
           order.period_end = fresh.rows[0]?.period_end || order.period_end
+          order.receipt_sent_at = fresh.rows[0]?.receipt_sent_at || order.receipt_sent_at
         }
       } else if (remote.status === 'failed') {
-        await pool.query(`UPDATE billing_orders SET status = 'failed', updated_at = NOW() WHERE id = $1`, [
-          id,
-        ])
-        order.status = 'failed'
+        const created = asDate(order.created_at)
+        const ageMs = created ? Date.now() - created.getTime() : 0
+        // PayHero often returns "failed/not found" while the STK is still open — wait before closing the order.
+        if (ageMs > 120_000) {
+          await pool.query(`UPDATE billing_orders SET status = 'failed', updated_at = NOW() WHERE id = $1`, [
+            id,
+          ])
+          order.status = 'failed'
+          providerHint =
+            'M-Pesa reported the payment as cancelled or failed. If you entered your PIN, tap Recheck payment.'
+        } else {
+          providerHint = 'Still waiting for M-Pesa confirmation…'
+        }
+      } else {
+        providerHint = 'Waiting for M-Pesa. Enter your PIN on the STK prompt if you have not yet.'
       }
     }
 
     return c.json({
       orderId: order.id,
       plan: order.plan,
+      planLabel: planLabel(order.plan),
       status: order.status,
       amount: order.amount,
       currency: order.currency,
@@ -277,6 +296,8 @@ export function registerBilling(app: Hono, requireReadyUser: ReadyFn) {
       periodStart: order.period_start,
       periodEnd: order.period_end,
       receiptUrl: order.status === 'paid' ? `/api/billing/receipt/${order.id}` : null,
+      receiptEmailed: Boolean(order.receipt_sent_at),
+      message: providerHint || undefined,
     })
   })
 
@@ -323,6 +344,15 @@ export function registerBilling(app: Hono, requireReadyUser: ReadyFn) {
   app.post('/api/billing/mpesa/callback', async (c) => {
     const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>
     if (!pool) return c.json({ ok: true })
+    const expected = env.payheroBasicToken?.trim()
+    if (expected) {
+      const auth = c.req.header('Authorization') || ''
+      const token = auth.startsWith('Bearer ') ? auth.slice(7).trim() : auth.trim()
+      if (token !== expected) return c.json({ error: 'Unauthorized' }, 401)
+    } else if (process.env.NODE_ENV === 'production' || process.env.RAILWAY_ENVIRONMENT) {
+      console.warn('[billing/mpesa/callback] rejected — PAYHERO_BASIC_TOKEN not configured')
+      return c.json({ error: 'Callback auth not configured' }, 503)
+    }
     const reference = mpesaCallbackReference(body)
     if (reference) {
       await pool.query(
@@ -332,9 +362,10 @@ export function registerBilling(app: Hono, requireReadyUser: ReadyFn) {
       )
     }
     if (reference && mpesaCallbackPaid(body)) {
-      const found = await pool.query(`SELECT user_id FROM billing_orders WHERE id = $1`, [reference])
-      const owner = found.rows[0]?.user_id as string | undefined
-      if (owner) await fulfillPaidOrder({ expectedUserId: owner, orderId: reference })
+      const match = await loadOrderByReference(reference)
+      if (match && match.status !== 'paid') {
+        await fulfillPaidOrder({ expectedUserId: match.user_id, orderId: match.id })
+      }
     }
     return c.json({ ok: true })
   })
@@ -346,89 +377,117 @@ export function registerBilling(app: Hono, requireReadyUser: ReadyFn) {
     if (!subscriptionId) return c.redirect('/dashboard/billing?paypal=cancel')
 
     try {
-      const sub = await getPaypalSubscription(subscriptionId)
-      const status = String(sub.status || '').toUpperCase()
+      const waited = await waitForActivePaypalSubscription(subscriptionId)
+      const sub = waited.sub || (await getPaypalSubscription(subscriptionId))
       const paypalUser = String(sub.custom_id || '')
       const order = await loadOrder({ subscriptionId })
       const owner = order?.user_id || paypalUser
       if (!owner || owner !== session.user.id) {
-        return c.redirect('/dashboard/billing?paypal=error')
+        return c.redirect('/checkout?paypal=error')
       }
       if (paypalUser && paypalUser !== session.user.id) {
-        return c.redirect('/dashboard/billing?paypal=error')
+        return c.redirect('/checkout?paypal=error')
       }
-      if (status !== 'ACTIVE' && status !== 'APPROVED') {
-        return c.redirect('/dashboard/billing?paypal=error')
+      if (!waited.ok) {
+        return c.redirect('/checkout?paypal=error')
       }
       const fulfilled = await fulfillPaidOrder({
         expectedUserId: session.user.id,
         subscriptionId,
       })
-      if (!fulfilled.ok) return c.redirect('/dashboard/billing?paypal=error')
-      return c.redirect('/dashboard/billing?paypal=success')
+      if (!fulfilled.ok) return c.redirect('/checkout?paypal=error')
+      const orderQuery = fulfilled.orderId ? `&order=${encodeURIComponent(fulfilled.orderId)}` : ''
+      const planQuery = fulfilled.plan ? `&plan=${encodeURIComponent(fulfilled.plan)}` : ''
+      return c.redirect(`/checkout?paypal=success${planQuery}${orderQuery}`)
     } catch {
-      return c.redirect('/dashboard/billing?paypal=error')
+      return c.redirect('/checkout?paypal=error')
     }
   })
 
-  app.post('/api/paypal/webhook', async (c) => {
-    if (!pool) return c.json({ error: 'Database is not connected' }, 503)
-    const event = (await c.req.json().catch(() => ({}))) as Record<string, unknown>
-    const verified = await verifyPaypalWebhook(c.req.raw.headers, event)
-    if (!verified) return c.json({ error: 'Invalid webhook signature' }, 400)
+  /** Browser GET shows alive; PayPal delivers subscription events via POST. */
+  app.get('/api/paypal/webhook', (c) =>
+    c.json({
+      ok: true,
+      endpoint: 'paypal-webhook',
+      method: 'POST',
+      mode: env.paypalMode,
+      webhookConfigured: Boolean(env.paypalWebhookId),
+      message: 'PayPal sends billing webhooks here with POST. Configure this URL in PayPal Developer.',
+    }),
+  )
 
-    const type = String(event.event_type || '')
-    const resource = (event.resource || {}) as Record<string, unknown>
-    const subscriptionId = resourceId(resource)
-    const customUser = resourceUser(resource)
-    const order = await loadOrder({ subscriptionId })
-    const userId = order?.user_id || customUser || (await userFromSubscription(subscriptionId))
+  app.post('/api/paypal/webhook', (c) => handlePaypalWebhook(c))
+}
 
+async function handlePaypalWebhook(c: Context) {
+  if (!pool) return c.json({ error: 'Database is not connected' }, 503)
+  const event = (await c.req.json().catch(() => ({}))) as Record<string, unknown>
+  const verified = await verifyPaypalWebhook(c.req.raw.headers, event)
+  if (!verified) return c.json({ error: 'Invalid webhook signature' }, 400)
+
+  const type = String(event.event_type || '')
+  const resource = (event.resource || {}) as Record<string, unknown>
+  const subscriptionId = resourceId(resource)
+  const customUser = resourceUser(resource)
+  const order = await loadOrder({ subscriptionId })
+  const userId = order?.user_id || customUser || (await userFromSubscription(subscriptionId))
+
+  await pool.query(
+    `INSERT INTO billing_events (id, user_id, provider, event_type, paypal_id, payload)
+     VALUES ($1, $2, 'paypal', $3, $4, $5::jsonb)`,
+    [crypto.randomUUID(), userId, type, subscriptionId || null, JSON.stringify(event)],
+  )
+
+  if (!userId) return c.json({ ok: true, ignored: true })
+
+  if (
+    type === 'BILLING.SUBSCRIPTION.ACTIVATED' ||
+    type === 'BILLING.SUBSCRIPTION.CREATED' ||
+    type === 'BILLING.SUBSCRIPTION.RE-ACTIVATED' ||
+    type === 'CHECKOUT.ORDER.APPROVED' ||
+    type === 'CHECKOUT.ORDER.COMPLETED' ||
+    type === 'PAYMENT.CAPTURE.COMPLETED' ||
+    type === 'PAYMENT.SALE.COMPLETED'
+  ) {
+    await fulfillPaidOrder({ expectedUserId: userId, subscriptionId })
+  }
+
+  if (
+    type === 'BILLING.SUBSCRIPTION.CANCELLED' ||
+    type === 'BILLING.SUBSCRIPTION.EXPIRED' ||
+    type === 'BILLING.SUBSCRIPTION.SUSPENDED'
+  ) {
     await pool.query(
-      `INSERT INTO billing_events (id, user_id, provider, event_type, paypal_id, payload)
-       VALUES ($1, $2, 'paypal', $3, $4, $5::jsonb)`,
-      [crypto.randomUUID(), userId, type, subscriptionId || null, JSON.stringify(event)],
+      `UPDATE profiles
+       SET plan = 'hobby',
+           plan_status = $2,
+           plan_cycle = 'monthly',
+           plan_started_at = NULL,
+           plan_renews_at = NULL,
+           updated_at = NOW()
+       WHERE user_id = $1`,
+      [userId, type.toLowerCase()],
     )
+    await pool.query(
+      `UPDATE billing_orders SET status = $2, updated_at = NOW()
+       WHERE paypal_subscription_id = $1`,
+      [subscriptionId, type.toLowerCase()],
+    )
+  }
 
-    if (!userId) return c.json({ ok: true, ignored: true })
+  return c.json({ ok: true })
+}
 
-    if (
-      type === 'BILLING.SUBSCRIPTION.ACTIVATED' ||
-      type === 'BILLING.SUBSCRIPTION.CREATED' ||
-      type === 'BILLING.SUBSCRIPTION.RE-ACTIVATED' ||
-      type === 'CHECKOUT.ORDER.APPROVED' ||
-      type === 'CHECKOUT.ORDER.COMPLETED' ||
-      type === 'PAYMENT.CAPTURE.COMPLETED' ||
-      type === 'PAYMENT.SALE.COMPLETED'
-    ) {
-      await fulfillPaidOrder({ expectedUserId: userId, subscriptionId })
-    }
-
-    if (
-      type === 'BILLING.SUBSCRIPTION.CANCELLED' ||
-      type === 'BILLING.SUBSCRIPTION.EXPIRED' ||
-      type === 'BILLING.SUBSCRIPTION.SUSPENDED'
-    ) {
-      await pool.query(
-        `UPDATE profiles
-         SET plan = 'hobby',
-             plan_status = $2,
-             plan_cycle = 'monthly',
-             plan_started_at = NULL,
-             plan_renews_at = NULL,
-             updated_at = NOW()
-         WHERE user_id = $1`,
-        [userId, type.toLowerCase()],
-      )
-      await pool.query(
-        `UPDATE billing_orders SET status = $2, updated_at = NOW()
-         WHERE paypal_subscription_id = $1`,
-        [subscriptionId, type.toLowerCase()],
-      )
-    }
-
-    return c.json({ ok: true })
-  })
+async function loadOrderByReference(reference: string) {
+  if (!pool || !reference) return null
+  const result = await pool.query(
+    `SELECT * FROM billing_orders
+     WHERE id = $1 OR reference = $1 OR checkout_id = $1
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [reference],
+  )
+  return (result.rows[0] as OrderRow | undefined) || null
 }
 
 async function loadOrder(opts: { orderId?: string; subscriptionId?: string }) {
@@ -522,7 +581,7 @@ async function fulfillPaidOrder(opts: {
     period_end: periodEnd,
   })
 
-  return { ok: true as const, plan: order.plan }
+  return { ok: true as const, plan: order.plan, orderId: order.id }
 }
 
 async function sendReceiptOnce(order: {
@@ -563,6 +622,7 @@ async function sendReceiptOnce(order: {
       })
     : order.amount
 
+  const origin = env.betterAuthUrl.replace(/\/$/, '')
   const mail = receiptEmail({
     receiptNumber: order.receipt_number,
     planName: planLabel(order.plan),
@@ -573,11 +633,30 @@ async function sendReceiptOnce(order: {
     paidAt: order.paid_at,
     periodStart: order.period_start,
     periodEnd: order.period_end,
-    invoiceUrl: `${env.betterAuthUrl.replace(/\/$/, '')}/dashboard/billing`,
+    invoiceUrl: `${origin}/dashboard/billing`,
+  })
+
+  const pdf = receiptPdf({
+    receiptNumber: order.receipt_number,
+    planName: planLabel(order.plan),
+    cycle: order.cycle,
+    amount: formatted,
+    currency: order.currency === 'KES' ? 'KES' : 'USD',
+    method: order.provider === 'payhero' ? 'M-Pesa' : 'PayPal or card',
+    paidAt: order.paid_at.toLocaleString('en-US', { dateStyle: 'long', timeStyle: 'short' }),
+    periodStart: order.period_start.toLocaleDateString('en-US', { dateStyle: 'long' }),
+    periodEnd: order.period_end.toLocaleDateString('en-US', { dateStyle: 'long' }),
+    email,
   })
 
   try {
-    await sendMail(email, mail.subject, mail.text, mail.html)
+    await sendMail(email, mail.subject, mail.text, mail.html, undefined, [
+      {
+        filename: `${order.receipt_number}.pdf`,
+        content: pdf,
+        contentType: 'application/pdf',
+      },
+    ])
   } catch (error) {
     await pool.query(`UPDATE billing_orders SET receipt_sent_at = NULL WHERE id = $1`, [order.id])
     console.error('[billing] receipt email failed', error)

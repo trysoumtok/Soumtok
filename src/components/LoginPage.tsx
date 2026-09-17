@@ -92,6 +92,9 @@ export function LoginPage({ mode, force2fa }: { mode: 'in' | 'up'; force2fa?: bo
     try {
       const desktop = new URLSearchParams(window.location.search).get('desktop')
       if (desktop) sessionStorage.setItem('soumtok-desktop', desktop)
+      const hash = window.location.hash.replace(/^#/, '')
+      const dv = new URLSearchParams(hash).get('dv')
+      if (dv) sessionStorage.setItem('soumtok-desktop-verifier', dv)
       const stored = sessionStorage.getItem('soumtok-auth-error')
       if (stored) {
         setError(stored)

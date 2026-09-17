@@ -1,13 +1,40 @@
-const { app, ipcMain, dialog } = require('electron')
+const { app, ipcMain, dialog, shell } = require('electron')
 const { getDesktopConfig } = require('./desktopControl')
 
 let autoUpdater = null
 let mainWindow = null
 let forceUpdateMode = false
+let fallbackShown = false
 
 function isForceUpdateMode() {
   const config = getDesktopConfig()
   return forceUpdateMode || Boolean(config?.updateRequired)
+}
+
+function notifyUpdateRequiredFallback() {
+  if (!isForceUpdateMode() || fallbackShown) return
+  const config = getDesktopConfig()
+  if (!config?.updateRequired) return
+  fallbackShown = true
+  const win = mainWindow?.()
+  const latest = config?.latestVersion || ''
+  const detail =
+    'This version includes required security fixes. Download the update, or use Settings → Check for updates.'
+  const show =
+    win && !win.isDestroyed()
+      ? (opts) => dialog.showMessageBox(win, opts)
+      : (opts) => dialog.showMessageBox(opts)
+  void show({
+    type: 'warning',
+    title: 'Update required',
+    message: latest ? `Soumtok ${latest} is required.` : 'A Soumtok update is required.',
+    detail,
+    buttons: ['Open download page', 'Later'],
+    defaultId: 0,
+    cancelId: 1,
+  }).then(({ response }) => {
+    if (response === 0) void shell.openExternal('https://soumtok.com/download')
+  })
 }
 
 function initAutoUpdater(getMainWindow, options = {}) {
@@ -45,13 +72,15 @@ function initAutoUpdater(getMainWindow, options = {}) {
     if (forced) {
       void autoUpdater.downloadUpdate()
       if (win && !win.isDestroyed()) {
-        dialog.showMessageBox(win, {
-          type: 'info',
-          title: 'Update required',
-          message: `Soumtok ${info?.version || ''} is required.`,
-          detail: 'Downloading the update now. Soumtok will restart when it is ready.',
-          buttons: ['OK'],
-        }).catch(() => {})
+        dialog
+          .showMessageBox(win, {
+            type: 'info',
+            title: 'Update required',
+            message: `Soumtok ${info?.version || ''} is required.`,
+            detail: 'Downloading the update now. Soumtok will restart when it is ready.',
+            buttons: ['OK'],
+          })
+          .catch(() => {})
       }
       return
     }
@@ -95,11 +124,12 @@ function initAutoUpdater(getMainWindow, options = {}) {
   })
 
   autoUpdater.on('update-not-available', () => {
-    /* manual check uses IPC return value */
+    notifyUpdateRequiredFallback()
   })
 
   autoUpdater.on('error', (err) => {
     console.warn('[Soumtok] autoUpdater', err?.message || err)
+    if (isForceUpdateMode()) notifyUpdateRequiredFallback()
   })
 
   registerUpdateIpc(async () => {
@@ -108,14 +138,18 @@ function initAutoUpdater(getMainWindow, options = {}) {
       const result = await autoUpdater.checkForUpdates()
       return { ok: true, updateInfo: result?.updateInfo || null, forceUpdate: isForceUpdateMode() }
     } catch (err) {
+      if (isForceUpdateMode()) notifyUpdateRequiredFallback()
       return { ok: false, error: String(err?.message || err) }
     }
   })
 
+  const startupDelay = isForceUpdateMode() ? 3_000 : 12_000
   setTimeout(() => {
     autoUpdater.autoDownload = isForceUpdateMode()
-    autoUpdater.checkForUpdates().catch(() => {})
-  }, 12_000)
+    autoUpdater.checkForUpdates().catch(() => {
+      if (isForceUpdateMode()) notifyUpdateRequiredFallback()
+    })
+  }, startupDelay)
 }
 
 function registerUpdateIpc(checkFn) {

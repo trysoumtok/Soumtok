@@ -2,14 +2,31 @@ import { config } from 'dotenv'
 
 config()
 
+function resolveBetterAuthUrl() {
+  const raw = (process.env.BETTER_AUTH_URL?.trim() || 'http://localhost:5173').replace(/\/$/, '')
+  // Production URL in .env while running locally (common after Railway sync) breaks OAuth redirects.
+  if (process.env.RAILWAY_ENVIRONMENT || process.env.NODE_ENV === 'production') return raw
+  try {
+    const hostname = new URL(raw).hostname
+    if (isProductionHost(hostname)) {
+      const port = process.env.VITE_PORT || process.env.PORT || '5173'
+      return `http://localhost:${port}`
+    }
+  } catch {
+    /* ignore */
+  }
+  return raw
+}
+
 export const env = {
   databaseUrl: process.env.DATABASE_URL?.trim() ?? '',
   betterAuthSecret: process.env.BETTER_AUTH_SECRET?.trim() ?? '',
-  betterAuthUrl: (process.env.BETTER_AUTH_URL?.trim() || 'http://localhost:5173').replace(/\/$/, ''),
+  betterAuthUrl: resolveBetterAuthUrl(),
   googleClientId: process.env.GOOGLE_CLIENT_ID?.trim() ?? '',
   googleClientSecret: process.env.GOOGLE_CLIENT_SECRET?.trim() ?? '',
   githubClientId: process.env.GITHUB_CLIENT_ID?.trim() ?? '',
   githubClientSecret: process.env.GITHUB_CLIENT_SECRET?.trim() ?? '',
+  githubAppSlug: process.env.GITHUB_APP_SLUG?.trim() || 'soumtok',
   bunnyZone: process.env.BUNNY_STORAGE_ZONE?.trim() ?? '',
   bunnyAccessKey: process.env.BUNNY_ACCESS_KEY?.trim() ?? '',
   bunnyEndpoint: process.env.BUNNY_STORAGE_HOST?.trim() || 'storage.bunnycdn.com',
@@ -18,7 +35,15 @@ export const env = {
   smtpUser: process.env.SMTP_USER?.trim() ?? '',
   smtpPass: process.env.SMTP_PASS?.trim() ?? '',
   smtpFrom: process.env.SMTP_FROM?.trim() || process.env.SMTP_USER?.trim() || 'Soumtok <info@soumtok.com>',
-  resendApiKey: (process.env.RESEND_API_KEY || process.env.SOUMTOK_RESEND_API_KEY)?.trim() ?? '',
+  neonAuthBaseUrl: (process.env.NEON_AUTH_BASE_URL || process.env.NEON_AUTH_URL)?.trim().replace(/\/$/, '') ?? '',
+  neonMailUrl: (
+    process.env.NEON_MAIL_URL ||
+    process.env.NEON_FUNCTION_MAIL_BASE_URL ||
+    process.env.NEON_MAIL_BASE_URL
+  )
+    ?.trim()
+    .replace(/\/$/, '') ?? '',
+  neonMailSecret: (process.env.NEON_MAIL_SECRET || process.env.MAIL_FUNCTION_SECRET)?.trim() ?? '',
   twilioSid: process.env.TWILIO_ACCOUNT_SID?.trim() ?? '',
   twilioToken: process.env.TWILIO_AUTH_TOKEN?.trim() ?? '',
   twilioFrom: process.env.TWILIO_FROM?.trim() ?? '',
@@ -73,6 +98,18 @@ export function isAllowedOrigin(origin: string) {
 
 export function isProductionHost(hostname: string) {
   return hostname === 'soumtok.com' || hostname === 'www.soumtok.com'
+}
+
+/** True on Railway production or when NODE_ENV=production with a public Soumtok URL. */
+export function isProductionDeploy() {
+  if (process.env.RAILWAY_ENVIRONMENT === 'production') return true
+  if (process.env.NODE_ENV !== 'production') return false
+  try {
+    const hostname = new URL(env.betterAuthUrl).hostname
+    return isProductionHost(hostname) && !isLocalHost(hostname)
+  } catch {
+    return false
+  }
 }
 
 /** Canonical public site host — OAuth cookies and redirects must stay on one origin. */
@@ -152,13 +189,13 @@ export function hasSmtp() {
   return Boolean(env.smtpUser && env.smtpPass)
 }
 
-export function hasResend() {
-  return Boolean(env.resendApiKey)
+export function hasNeonMail() {
+  return Boolean(env.neonMailUrl && env.neonMailSecret)
 }
 
-/** True when the app can deliver email (HTTP API or SMTP). */
+/** True when the app can deliver email (Neon relay or direct SMTP). */
 export function hasMail() {
-  return hasResend() || hasSmtp()
+  return hasNeonMail() || hasSmtp()
 }
 
 export function hasTwilio() {

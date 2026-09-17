@@ -341,9 +341,11 @@ const desktopLoginSql = `
 CREATE TABLE IF NOT EXISTS desktop_login (
   id TEXT PRIMARY KEY,
   session_token TEXT,
+  verifier_hash TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   expires_at TIMESTAMPTZ NOT NULL
 );
+ALTER TABLE desktop_login ADD COLUMN IF NOT EXISTS verifier_hash TEXT;
 `
 
 export async function migrate() {
