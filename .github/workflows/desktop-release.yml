@@ -25,8 +25,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: npm
-      - run: npm ci
+          cache-dependency-path: desktop/package-lock.json
       - working-directory: desktop
         run: npm ci
       - working-directory: desktop
@@ -58,8 +57,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: npm
-      - run: npm ci
+          cache-dependency-path: desktop/package-lock.json
       - uses: actions/download-artifact@v4
         with:
           pattern: soumtok-*
