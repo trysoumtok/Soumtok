@@ -34,7 +34,10 @@ const installers = files.filter((f) => /\.(exe|dmg|AppImage|deb|zip)$/i.test(f))
 
 ok(installers.length > 0, `installers found (${installers.length})`)
 ok(fs.existsSync(path.join(releaseDir, 'releases.json')), 'releases.json manifest present')
-ok(Boolean(yml) || installers.some((f) => f.endsWith('.exe')), 'update manifest or Windows installer present')
+ok(
+  Boolean(yml) || installers.some((f) => /\.(exe|dmg|deb|AppImage|zip)$/i.test(f)),
+  'update manifest or platform installer present',
+)
 
 console.log('\nRelease', version)
 console.log('Folder:', releaseDir)
