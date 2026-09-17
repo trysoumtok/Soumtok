@@ -49,8 +49,18 @@ export async function loginCommand({ api: apiOverride, signup = false } = {}) {
   openBrowser(start.data.url)
   const token = await pollLogin(base, start.data.id)
   saveCredentials({ token, api: base })
-  const user = await client.session()
-  const label = user?.name || user?.email || 'Signed in'
+  let user = null
+  for (let attempt = 0; attempt < 5; attempt++) {
+    user = await createApiClient(base).session()
+    if (user) break
+    await new Promise((r) => setTimeout(r, 400))
+  }
+  if (!user) {
+    throw new Error(
+      'Browser sign-in finished but the CLI session did not stick. Try: soumtok login --api-key <key from Dashboard → Keys>',
+    )
+  }
+  const label = user.name || user.email || 'Signed in'
   console.log(c.green(`✓ ${label}`))
   console.log(c.dim(`Session saved to ~/.soumtok/credentials.json`))
   return { token, user }

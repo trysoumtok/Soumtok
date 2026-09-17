@@ -167,9 +167,25 @@ app.all('/api/auth/*', async (c) => {
   return res
 })
 
+function headersWithCliSession(raw: Headers) {
+  const cliToken = raw.get('X-Soumtok-Session')?.trim()
+  if (!cliToken) return raw
+  const headers = new Headers(raw)
+  const existing = headers.get('Cookie') || ''
+  const pairs = [
+    `__Secure-soumtok.session_token=${cliToken}`,
+    `soumtok.session_token=${cliToken}`,
+    `__Secure-better-auth.session_token=${cliToken}`,
+    `better-auth.session_token=${cliToken}`,
+  ]
+  headers.set('Cookie', existing ? `${existing}; ${pairs.join('; ')}` : pairs.join('; '))
+  return headers
+}
+
 async function requireUser(c: Context) {
   if (!auth) return null
-  return auth.api.getSession({ headers: c.req.raw.headers })
+  const headers = headersWithCliSession(c.req.raw.headers)
+  return auth.api.getSession({ headers })
 }
 
 async function sessionFromApiKey(c: Context) {

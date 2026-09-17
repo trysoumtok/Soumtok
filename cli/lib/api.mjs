@@ -1,10 +1,29 @@
 import { resolveApiBase, resolveAuth } from './config.mjs'
 
-function authHeaders() {
+/** Match shared/session.ts — send every name Better Auth may read (esp. __Secure- on HTTPS). */
+function sessionCookieNames(base) {
+  const secure = String(base || '').startsWith('https://')
+  return secure
+    ? [
+        '__Secure-soumtok.session_token',
+        'soumtok.session_token',
+        '__Secure-better-auth.session_token',
+        'better-auth.session_token',
+      ]
+    : ['soumtok.session_token', 'better-auth.session_token']
+}
+
+export function sessionAuthHeaders(base, token) {
+  const names = sessionCookieNames(base)
+  const cookie = names.map((name) => `${name}=${token}`).join('; ')
+  return { Cookie: cookie, 'X-Soumtok-Session': token }
+}
+
+function authHeaders(base) {
   const auth = resolveAuth()
   if (!auth) return {}
   if (auth.kind === 'apiKey') return { Authorization: `Bearer ${auth.value}` }
-  return { Cookie: `soumtok.session_token=${auth.value}` }
+  return sessionAuthHeaders(base, auth.value)
 }
 
 function parseJson(text) {
@@ -29,7 +48,7 @@ export function createApiClient(baseOverride) {
         'User-Agent': 'SoumtokCLI/0.1',
         'X-Soumtok-Client': 'cli',
         ...(body != null ? { 'Content-Type': 'application/json' } : {}),
-        ...authHeaders(),
+        ...authHeaders(base),
       },
       body: body != null ? JSON.stringify(body) : undefined,
       signal: AbortSignal.timeout(waitMs),
@@ -43,7 +62,7 @@ export function createApiClient(baseOverride) {
     const res = await fetch(url, {
       method,
       headers: {
-        ...authHeaders(),
+        ...authHeaders(base),
         Accept: '*/*',
         'User-Agent': 'SoumtokCLI/0.1',
         'X-Soumtok-Client': 'cli',
@@ -61,7 +80,12 @@ export function createApiClient(baseOverride) {
     getBuffer,
     async session() {
       const res = await request('GET', '/api/auth/get-session')
-      return res.data?.user || res.data?.session?.user || null
+      if (res.status === 200 && res.data?.user) return res.data.user
+      if (res.data?.session?.user) return res.data.session.user
+      if (typeof res.data?.raw === 'string' && res.data.raw.trimStart().startsWith('<!')) {
+        throw new Error('API returned HTML instead of JSON — check SOUMTOK_API / network')
+      }
+      return null
     },
     async models() {
       const res = await request('GET', '/api/desktop/models')

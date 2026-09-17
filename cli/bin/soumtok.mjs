@@ -165,7 +165,7 @@ async function cmdAgent(prompt, opts) {
 }
 
 async function interactiveChat(opts) {
-  await ensureAuth({ apiKeyFlag: opts.values['api-key'] })
+  const authed = await ensureAuth({ apiKeyFlag: opts.values['api-key'] })
   let config = loadConfig()
   if (opts.values.intelligence) config = saveConfig({ intelligence: opts.values.intelligence })
   let cwd = resolveCwd(opts.values.cwd)
@@ -173,7 +173,11 @@ async function interactiveChat(opts) {
   let mode = opts.values.mode || config.mode || 'agent'
   let driver = opts.values.driver || config.driver || 'ide'
   const client = createApiClient(opts.values.api)
-  let user = await client.session()
+  let user = authed || (await client.session())
+  if (!user) {
+    console.error(c.red('Session not active. Run soumtok login again.'))
+    process.exit(1)
+  }
   let thread = loadThread(newThreadId())
   thread.id = thread.id || newThreadId()
   thread.title = thread.title || 'New Agent'

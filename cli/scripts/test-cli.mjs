@@ -124,7 +124,19 @@ try {
   fail('harness mock', err.message)
 }
 
-// 5) Attachments
+// 5) Session auth headers (HTTPS cookie names)
+try {
+  const { sessionAuthHeaders } = await import('../lib/api.mjs')
+  const h = sessionAuthHeaders('https://soumtok.com', 'tok123')
+  if (!h.Cookie?.includes('__Secure-soumtok.session_token=tok123')) fail('secure session cookie', h.Cookie)
+  else ok('secure session cookie names')
+  if (h['X-Soumtok-Session'] !== 'tok123') fail('X-Soumtok-Session header', h['X-Soumtok-Session'])
+  else ok('X-Soumtok-Session header')
+} catch (err) {
+  fail('session auth headers', err.message)
+}
+
+// 6) Attachments
 try {
   const { resolveAttachments } = await import('../lib/attachments.mjs')
   const fs = await import('node:fs')
@@ -144,7 +156,7 @@ try {
   fail('attachments', err.message)
 }
 
-// 6) Usage formatting
+// 7) Usage formatting
 try {
   const { formatTurnUsage, formatTokens } = await import('../lib/usage.mjs')
   const line = formatTurnUsage({
@@ -161,7 +173,7 @@ try {
   fail('usage format', err.message)
 }
 
-// 7) CLI --help exits 0
+// 8) CLI --help exits 0
 try {
   const { spawnSync } = await import('node:child_process')
   const bin = path.join(root, 'cli/bin/soumtok.mjs')
@@ -173,7 +185,7 @@ try {
   fail('cli --help', err.message)
 }
 
-// 8) Optional live API
+// 9) Optional live API
 const liveKey = process.env.SOUMTOK_API_KEY?.trim()
 const liveApi = (process.env.SOUMTOK_API || 'https://soumtok.com').replace(/\/$/, '')
 if (liveKey) {
