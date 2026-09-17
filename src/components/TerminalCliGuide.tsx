@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { PlatformIcon } from './PlatformIcon.tsx'
 
 const INSTALL = {
   windows: "irm 'https://soumtok.com/install/cli.ps1' | iex",
@@ -52,7 +53,7 @@ export function TerminalCliGuide() {
         </div>
 
         <div>
-          <div className="flex flex-wrap gap-2">
+          <div className="grid grid-cols-3 gap-2 sm:gap-3">
             {(
               [
                 ['windows', 'Windows'],
@@ -64,10 +65,13 @@ export function TerminalCliGuide() {
                 key={key}
                 type="button"
                 onClick={() => setTab(key)}
-                className={`rounded-full px-4 py-2 text-[13px] ${
-                  tab === key ? 'bg-white text-black' : 'border border-white/10 text-white/55 hover:text-white/80'
+                className={`flex items-center justify-center gap-2 rounded-xl border px-3 py-3 text-[13px] sm:px-4 sm:py-3.5 sm:text-[14px] ${
+                  tab === key
+                    ? 'border-white/20 bg-white text-black'
+                    : 'border-white/10 bg-[#111110] text-white/70 hover:border-white/20 hover:text-white'
                 }`}
               >
+                <PlatformIcon platform={key} size={18} />
                 {label}
               </button>
             ))}

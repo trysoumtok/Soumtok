@@ -16,6 +16,7 @@ import { Nav } from './Nav'
 import { DownloadIcon, PillButton } from './ui'
 import { WindowsSmartScreenGuide } from './WindowsSmartScreenGuide.tsx'
 import { TerminalCliGuide } from './TerminalCliGuide.tsx'
+import { PlatformIcon } from './PlatformIcon.tsx'
 
 function fetchManifest() {
   return fetch('/api/desktop/releases')
@@ -33,28 +34,6 @@ function fetchDesktopConfig() {
       return res.json() as Promise<DesktopClientConfig>
     })
     .catch(() => null)
-}
-
-function PlatformIcon({ platform }: { platform: 'macos' | 'windows' | 'linux' }) {
-  if (platform === 'macos') {
-    return (
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-        <path d="M16.84 13.13c-.02 2.03 1.78 2.73 1.86 2.77-.02.06-.29.98-.95 1.94-.57.83-1.17 1.66-2.11 1.68-.92.02-1.22-.55-2.28-.55-1.06 0-1.39.53-2.27.57-.91.04-1.6-.91-2.18-1.74-1.18-1.7-2.08-4.8-.87-6.9 1.2-2.08 3.34-2.34 4.04-2.37 1.05-.1 2.04.63 2.68.63.64 0 1.84-.78 3.1-.66.53.02 2.02.21 2.98 1.58-2.58 1.41-2.17 5.05.05 6.24zM14.3 4.2c.57-.69.95-1.65.85-2.6-.82.03-1.81.55-2.4 1.24-.53.61-.99 1.59-.87 2.53.92.07 1.86-.47 2.42-1.17z" />
-      </svg>
-    )
-  }
-  if (platform === 'windows') {
-    return (
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-        <path d="M3 5.5 10.5 4.2v7.6H3V5.5zm8.5-.9L21 2.5v9.2h-9.5V4.6zM3 13.8h7.5v7.6L3 20.1v-6.3zm9.5 0H21v9.2l-8.5-1.5v-7.7z" />
-      </svg>
-    )
-  }
-  return (
-    <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-      <path d="M12.5 3C7.8 3 4 6.8 4 11.5S7.8 20 12.5 20 21 16.2 21 11.5 17.2 3 12.5 3zm0 2c.4 0 .8 0 1.2.1-.6.8-1 1.8-1 2.9 0 1.1.4 2.1 1 2.9-.4.1-.8.1-1.2.1-3.6 0-6.5-2.9-6.5-6.5S8.9 5 12.5 5z" />
-    </svg>
-  )
 }
 
 function firstAvailable(items: DesktopDownloadItem[]) {
@@ -199,8 +178,8 @@ function PlatformSummaryRow({
   return (
     <div className="flex items-center justify-between gap-4 border-t border-white/[0.06] py-5 first:border-t-0 sm:py-6">
       <div className="flex min-w-0 items-center gap-3.5">
-        <span className="text-white/70">
-          <PlatformIcon platform={platform} />
+        <span className="text-white/85">
+          <PlatformIcon platform={platform} size={20} />
         </span>
         <span className="text-[16px] text-white/90 sm:text-[17px]">{label}</span>
       </div>
@@ -261,7 +240,7 @@ function PlatformBuilds({
   return (
     <div className="rounded-2xl border border-white/[0.08] bg-[#111110] p-5 sm:p-6">
       <div className="mb-3 flex items-center gap-2.5 px-1 text-[15px] font-medium text-white/85 sm:text-[16px]">
-        <PlatformIcon platform={platform} />
+        <PlatformIcon platform={platform} size={20} />
         {label}
       </div>
       <div>
