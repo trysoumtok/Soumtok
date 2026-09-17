@@ -21,6 +21,17 @@ export async function uploadToBunny(path: string, body: Uint8Array, contentType:
   }
 }
 
+export async function existsOnBunny(path: string) {
+  if (!hasBunny()) return false
+
+  const res = await fetch(storageUrl(path), {
+    method: 'HEAD',
+    headers: { AccessKey: env.bunnyAccessKey },
+  })
+
+  return res.ok
+}
+
 export async function downloadFromBunny(path: string) {
   if (!hasBunny()) throw new Error('Bunny storage is not configured')
 

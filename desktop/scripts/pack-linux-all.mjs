@@ -37,7 +37,23 @@ if (process.platform === 'linux') {
 
 const releaseDir = path.join(desktopDir, 'release')
 const stageRelease = path.join(desktopDir, 'release/stage-linux')
+const version = JSON.parse(fs.readFileSync(path.join(desktopDir, 'package.json'), 'utf8')).version
+
+function normalizeLinuxNames(dir) {
+  if (!fs.existsSync(dir)) return
+  const renames = [
+    [`Soumtok-Setup-${version}-linux-x64.deb`, `Soumtok-Setup-${version}-linux-amd64.deb`],
+    [`Soumtok-Setup-${version}-linux-x64.AppImage`, `Soumtok-Setup-${version}-linux-x86_64.AppImage`],
+  ]
+  for (const [fromName, toName] of renames) {
+    const from = path.join(dir, fromName)
+    const to = path.join(dir, toName)
+    if (fs.existsSync(from) && !fs.existsSync(to)) fs.renameSync(from, to)
+  }
+}
+
 for (const dir of [stageRelease, releaseDir]) {
+  normalizeLinuxNames(dir)
   if (!fs.existsSync(dir)) continue
   for (const name of fs.readdirSync(dir)) {
     if (/\.(deb|AppImage)$/i.test(name)) {
@@ -47,6 +63,7 @@ for (const dir of [stageRelease, releaseDir]) {
     }
   }
 }
+normalizeLinuxNames(releaseDir)
 
 execSync('node scripts/sync-release-manifest.mjs', { cwd: desktopDir, stdio: 'inherit' })
 console.log('\nOK Linux builds complete')

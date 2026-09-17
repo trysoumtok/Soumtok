@@ -1,7 +1,7 @@
 {
   "name": "Soumtok",
   "short_name": "Soumtok",
-  "description": "Africa's #1 AI coding platform. Start coding from $13.99 a month.",
+  "description": "Africa's cheapest AI coding platform — from $5/mo. Cursor-style agents, Desktop IDE, and Terminal CLI.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

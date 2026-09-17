@@ -19,7 +19,7 @@
     "vscode:fork-bootstrap": "node vscode-fork/bootstrap.mjs",
     "installer:assets": "node scripts/generate-installer-assets.mjs",
     "pack:win": "node scripts/pack-win-all.mjs",
-    "pack:mac": "npm run installer:assets && electron-builder --mac --x64 --arm64",
+    "pack:mac": "node scripts/pack-mac-all.mjs",
     "pack:linux": "node scripts/pack-linux-all.mjs",
     "pack:all": "npm run pack:win && npm run pack:linux",
     "release:sync": "node scripts/sync-release-manifest.mjs",
@@ -48,23 +48,36 @@
       "node_modules/@homebridge/node-pty-prebuilt-multiarch/**/*"
     ],
     "extraResources": [
-      { "from": "node_modules/monaco-editor/min", "to": "monaco" }
+      {
+        "from": "node_modules/monaco-editor/min",
+        "to": "monaco"
+      }
     ],
     "win": {
       "icon": "build/icon.ico",
-      "target": ["nsis", "zip"],
+      "target": [
+        "nsis",
+        "zip"
+      ],
       "legalTrademarks": "Soumtok",
       "verifyUpdateCodeSignature": true,
-      "signExts": [".dll"],
+      "signExts": [
+        ".dll"
+      ],
       "signtoolOptions": {
         "publisherName": "Soumtok",
-        "signingHashAlgorithms": ["sha256"],
+        "signingHashAlgorithms": [
+          "sha256"
+        ],
         "rfc3161TimeStampServer": "http://timestamp.digicert.com"
       }
     },
     "mac": {
       "icon": "build/icon.png",
-      "target": ["dmg", "zip"],
+      "target": [
+        "dmg",
+        "zip"
+      ],
       "category": "public.app-category.developer-tools",
       "hardenedRuntime": true,
       "gatekeeperAssess": false,
@@ -76,16 +89,31 @@
       "background": "build/dmg-background.png",
       "iconSize": 96,
       "title": "${productName} ${version}",
-      "window": { "width": 540, "height": 380 },
+      "window": {
+        "width": 540,
+        "height": 380
+      },
       "contents": [
-        { "x": 130, "y": 200, "type": "file" },
-        { "x": 410, "y": 200, "type": "link", "path": "/Applications" }
+        {
+          "x": 130,
+          "y": 200,
+          "type": "file"
+        },
+        {
+          "x": 410,
+          "y": 200,
+          "type": "link",
+          "path": "/Applications"
+        }
       ]
     },
     "linux": {
       "icon": "build/linux-icon.png",
       "artifactName": "${productName}-Setup-${version}-linux-${arch}.${ext}",
-      "target": ["AppImage", "deb"],
+      "target": [
+        "AppImage",
+        "deb"
+      ],
       "maintainer": "Soumtok <info@soumtok.com>",
       "category": "Development",
       "synopsis": "AI-native IDE with agent, Tab, and terminal",
@@ -120,7 +148,13 @@
     "@homebridge/node-pty-prebuilt-multiarch": "^0.14.1",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
-    "monaco-editor": "^0.52.2"
+    "jszip": "^3.10.2",
+    "mammoth": "^1.12.3",
+    "monaco-editor": "^0.52.2",
+    "pdf-parse": "^2.4.5",
+    "tar": "^7.5.22",
+    "word-extractor": "^1.0.4",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "electron": "^37.2.5",

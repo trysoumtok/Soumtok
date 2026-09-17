@@ -86,20 +86,28 @@ export function detectDesktopPlatform(userAgent = '', platform = '') {
 export function primaryDownloadForPlatform(manifest: DesktopReleaseManifest, platform: DesktopPlatform) {
   const release = manifest.releases.find((item) => item.latest) || manifest.releases[0]
   if (!release) return null
-  const prefer = (items: DesktopDownloadItem[]) =>
-    items.find((item) => item.available && item.id.includes('user')) ||
-    items.find((item) => item.available) ||
-    null
+  const firstAvailable = (items: DesktopDownloadItem[], order: string[] = []) => {
+    for (const id of order) {
+      const hit = items.find((item) => item.available && item.id.includes(id))
+      if (hit) return hit
+    }
+    return items.find((item) => item.available) || null
+  }
 
   if (platform === 'unknown') {
     for (const list of [release.windows, release.macos, release.linux]) {
-      const hit = prefer(list)
+      const hit = firstAvailable(list)
       if (hit) return hit
     }
     return null
   }
-  const list = platform === 'windows' ? release.windows : platform === 'macos' ? release.macos : release.linux
-  return prefer(list)
+  if (platform === 'windows') {
+    return firstAvailable(release.windows, ['user', 'zip'])
+  }
+  if (platform === 'macos') {
+    return firstAvailable(release.macos, ['arm64', 'universal', 'x64'])
+  }
+  return firstAvailable(release.linux, ['appimage-x64', 'deb-x64', 'appimage-arm64', 'deb-arm64'])
 }
 
 export function primaryDownloadLabel(platform: DesktopPlatform) {

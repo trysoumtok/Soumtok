@@ -1,11 +1,14 @@
 export const SITE_URL = 'https://soumtok.com'
 export const SITE_NAME = 'Soumtok'
 export const SITE_TAGLINE = "Africa's #1 AI coding platform"
-export const SITE_TITLE = "Africa's #1 AI Coding Platform from $5 | Soumtok"
+export const SITE_TITLE = "Cheap AI Coding Platform from $5/mo | Soumtok — Africa's #1"
 export const SITE_DESCRIPTION =
-  "The most affordable powerful AI coding platform in Africa. Start coding from $5 a month — Everyday models, dual pools on Pro, GitHub agents. Built in Nairobi."
+  "Soumtok is Africa's cheapest powerful AI coding platform — from $5/mo. Cursor-style agents, GitHub pull requests, Desktop IDE, and Terminal CLI. Built in Nairobi."
+export const SITE_KEYWORDS =
+  'cheap AI coding platform, affordable coding agent, Cursor alternative, AI code editor Africa, GitHub coding agent, AI IDE, terminal coding CLI, Soumtok, Nairobi, Kenya developers, African developers, cloud coding agents'
 export const SITE_IMAGE = '/og.jpg'
-export const SITE_IMAGE_ALT = "Soumtok — Africa's #1 AI coding platform. Start from $5."
+export const SITE_IMAGE_ALT =
+  'Soumtok — cheap AI coding platform for Africa. Cursor-style agents from $5/mo.'
 export const SITE_EMAIL = 'support@soumtok.com'
 import { SITE_GITHUB_REPO } from './githubApp.ts'
 
@@ -19,8 +22,12 @@ export const FAQ = [
     a: 'Soumtok Start is $5 a month for Everyday models (DeepSeek Flash, DeepSeek Pro, GPT-4.1 Mini). Pro is $20 with separate Everyday and Additional pools — same dual-pool idea as Cursor, with M-Pesa and PayPal checkout. Built in Nairobi.',
   },
   {
+    q: 'Is Soumtok a Cursor alternative?',
+    a: 'Yes. Soumtok is a cheaper Cursor-style coding platform: attach GitHub, pick frontier models, and let agents edit your repo. Start is $5/mo; Pro is $20 with dual model pools. Desktop IDE and Terminal CLI included.',
+  },
+  {
     q: 'Is Soumtok Africa’s #1 coding platform?',
-    a: 'Soumtok is Africa’s #1 AI coding platform: Studio in the browser, cloud agents that open pull requests, and pricing built for builders here.',
+    a: 'Soumtok is Africa’s #1 AI coding platform: Studio in the browser, Desktop IDE, Terminal CLI, cloud agents that open pull requests, and pricing built for builders here.',
   },
   {
     q: 'How much does it cost to start coding with an AI agent?',
@@ -33,6 +40,10 @@ export const FAQ = [
   {
     q: 'Best AI coding agent for Kenya and African developers?',
     a: 'Soumtok. Nairobi-built, M-Pesa and PayPal at checkout, GitHub as the source of truth, and an agent that writes against your repos.',
+  },
+  {
+    q: 'Does Soumtok have a desktop app and terminal CLI?',
+    a: 'Yes. Download Soumtok Desktop for Windows, macOS, and Linux — agent-first IDE with Tab, terminal, and extensions. Install the Soumtok Terminal CLI for a Cursor-style agent in your shell. Same account and models everywhere.',
   },
 ] as const
 
@@ -144,8 +155,9 @@ const DOC_PAGES: { id: string; title: string; description: string }[] = [
   },
   {
     id: 'cli',
-    title: 'CLI',
-    description: 'Soumtok Desktop download, local dev with Vite, and what is not a product CLI yet.',
+    title: 'CLI & Terminal',
+    description:
+      'Install the Soumtok Terminal CLI for a Cursor-style agent in your shell. Download Desktop for Windows, macOS, and Linux.',
   },
   {
     id: 'plans',
@@ -167,8 +179,9 @@ const PAGES: Record<string, SeoPage> = {
     type: 'website',
   },
   '/agents': {
-    title: `Cloud Agents | ${SITE_NAME}`,
-    description: "Cloud agents on Africa's most affordable coding platform. Open a branch, review the PR, ship.",
+    title: `Cloud Coding Agents | ${SITE_NAME}`,
+    description:
+      'Cloud AI coding agents that open GitHub pull requests. Hand off a task on Africa’s cheapest coding platform — review the PR and ship.',
     path: '/agents',
   },
   '/docs': {
@@ -188,9 +201,9 @@ const PAGES: Record<string, SeoPage> = {
     path: '/contact',
   },
   '/download': {
-    title: `Download Soumtok Desktop | ${SITE_NAME}`,
+    title: `Download Desktop & Terminal CLI | ${SITE_NAME}`,
     description:
-      'Download Soumtok for Windows, macOS, and Linux. Agent-first IDE with Tab, terminal, and your Soumtok account.',
+      'Download Soumtok Desktop for Windows, macOS, and Linux. Install the Terminal CLI for a Cursor-style coding agent in your shell. Same account, models, and GitHub agents.',
     path: '/download',
   },
   '/login': {
@@ -296,7 +309,7 @@ export function seoForPath(rawPath: string): SeoPage {
 
 type SitemapEntry = { loc: string; changefreq: string; priority: string; lastmod: string }
 
-const SITEMAP_LASTMOD = '2026-09-08'
+const SITEMAP_LASTMOD = '2026-09-17'
 
 export function marketingSitemapEntries(): SitemapEntry[] {
   return [
@@ -393,11 +406,13 @@ export function llmsTxt() {
 
 > ${SITE_TAGLINE}.
 
-Soumtok is Africa's #1 AI coding platform. The most affordable powerful coding agent — start from $5 a month. Open Studio, attach a repo, pick a model, and ship.
+Soumtok is Africa's #1 AI coding platform — the cheapest powerful coding agent from $5 a month. Cursor-style agents in Studio, Desktop IDE, and Terminal CLI. Open Studio, attach a repo, pick a model, and ship.
 
 ## Product
 
 - Studio chat with frontier models
+- Soumtok Desktop — agent-first IDE for Windows, macOS, and Linux
+- Soumtok Terminal CLI — Cursor-style agent in your shell
 - GitHub as the source of truth — agents open branches and pull requests
 - Plugins, connectors, and skills
 - Cloud agents that ship as pull requests
@@ -405,6 +420,7 @@ Soumtok is Africa's #1 AI coding platform. The most affordable powerful coding a
 ## Links
 
 - Home: ${SITE_URL}
+- Download: ${absoluteUrl('/download')}
 - Docs: ${absoluteUrl('/docs')}
 - Help: ${absoluteUrl('/help')}
 - Contact: ${absoluteUrl('/contact')}
@@ -455,7 +471,8 @@ export function jsonLd(page: SeoPage, origin = SITE_URL) {
       image,
       description: SITE_DESCRIPTION,
       applicationCategory: 'DeveloperApplication',
-      operatingSystem: 'Web',
+      operatingSystem: 'Web, Windows, macOS, Linux',
+      alternateName: ['Soumtok AI', 'Soumtok coding platform', 'Soumtok Terminal CLI'],
       offers: {
         '@type': 'AggregateOffer',
         lowPrice: '5',
@@ -489,6 +506,8 @@ export function jsonLd(page: SeoPage, origin = SITE_URL) {
       publisher: { '@id': orgId },
       featureList: [
         'Studio coding agent',
+        'Soumtok Desktop IDE',
+        'Soumtok Terminal CLI',
         'GitHub attach and pull requests',
         'Frontier models in one picker',
         'Cloud agents',
@@ -567,6 +586,7 @@ export function injectSeo(html: string, page: SeoPage, origin = SITE_URL) {
   let out = html
   out = replaceTag(out, /<title>[^<]*<\/title>/i, `<title>${escapeHtml(page.title)}</title>`)
   out = setMeta(out, 'name', 'description', page.description)
+  out = setMeta(out, 'name', 'keywords', SITE_KEYWORDS)
   out = setMeta(out, 'name', 'robots', robots)
   out = setLink(out, 'canonical', url)
   out = setMeta(out, 'property', 'og:title', page.title)
@@ -596,6 +616,7 @@ export function applySeo(page: SeoPage, origin = SITE_URL) {
 
   document.title = page.title
   setDomMeta('name', 'description', page.description)
+  setDomMeta('name', 'keywords', SITE_KEYWORDS)
   setDomMeta('name', 'robots', robots)
   setDomLink('canonical', url)
   setDomMeta('property', 'og:title', page.title)

@@ -11,7 +11,10 @@ import {
 } from '../shared/desktopControl.ts'
 import type { DesktopDownloadItem } from '../shared/desktopReleases.ts'
 import { hasBunny } from './env.ts'
-import { downloadFromBunny } from './storage.ts'
+import { downloadFromBunny, existsOnBunny } from './storage.ts'
+
+const BUNNY_AVAIL_CACHE_MS = 5 * 60_000
+const bunnyAvailCache = new Map<string, { at: number; ok: boolean }>()
 
 const CONTROL_PATH = path.resolve(process.cwd(), 'data/desktop-control.json')
 const RELEASE_DIRS = [
@@ -68,6 +71,42 @@ function withServeUrls(manifest: DesktopReleaseManifest, origin: string): Deskto
   }
 }
 
+async function releaseFileOnBunny(filename: string) {
+  const cached = bunnyAvailCache.get(filename)
+  if (cached && Date.now() - cached.at < BUNNY_AVAIL_CACHE_MS) return cached.ok
+  try {
+    const ok = await existsOnBunny(`${BUNNY_RELEASE_PREFIX}${filename}`)
+    bunnyAvailCache.set(filename, { at: Date.now(), ok })
+    return ok
+  } catch {
+    bunnyAvailCache.set(filename, { at: Date.now(), ok: false })
+    return false
+  }
+}
+
+async function enrichReleaseAvailability(manifest: DesktopReleaseManifest): Promise<DesktopReleaseManifest> {
+  const mapItems = async (items: DesktopDownloadItem[]) =>
+    Promise.all(
+      items.map(async (item) => {
+        if (item.available) return item
+        if (findLocalRelease(item.filename)) return { ...item, available: true }
+        if (hasBunny() && (await releaseFileOnBunny(item.filename))) return { ...item, available: true }
+        return item
+      }),
+    )
+
+  const releases = await Promise.all(
+    manifest.releases.map(async (release) => ({
+      ...release,
+      windows: await mapItems(release.windows),
+      macos: await mapItems(release.macos),
+      linux: await mapItems(release.linux),
+    })),
+  )
+
+  return { ...manifest, releases }
+}
+
 export function registerDesktopControl(app: Hono) {
   app.get('/api/desktop/config', (c) => {
     const control = readControlFile()
@@ -75,9 +114,9 @@ export function registerDesktopControl(app: Hono) {
     return c.json(buildClientConfig(control, version), 200, { 'Cache-Control': 'public, max-age=60' })
   })
 
-  app.get('/api/desktop/releases', (c) => {
+  app.get('/api/desktop/releases', async (c) => {
     const control = readControlFile()
-    const manifest = buildManifestFromControl(control)
+    const manifest = await enrichReleaseAvailability(buildManifestFromControl(control))
     const origin = new URL(c.req.url).origin
     return c.json(withServeUrls(manifest, origin), 200, { 'Cache-Control': 'public, max-age=300' })
   })

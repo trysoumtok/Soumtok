@@ -2,11 +2,13 @@
 
 > Africa's #1 AI coding platform.
 
-Soumtok is Africa's #1 AI coding platform. The most affordable powerful coding agent — start from $13.99 a month. Open Studio, attach a repo, pick a model, and ship.
+Soumtok is Africa's #1 AI coding platform — the cheapest powerful coding agent from $5 a month. Cursor-style agents in Studio, Desktop IDE, and Terminal CLI. Open Studio, attach a repo, pick a model, and ship.
 
 ## Product
 
 - Studio chat with frontier models
+- Soumtok Desktop — agent-first IDE for Windows, macOS, and Linux
+- Soumtok Terminal CLI — Cursor-style agent in your shell
 - GitHub as the source of truth — agents open branches and pull requests
 - Plugins, connectors, and skills
 - Cloud agents that ship as pull requests
@@ -14,6 +16,7 @@ Soumtok is Africa's #1 AI coding platform. The most affordable powerful coding a
 ## Links
 
 - Home: https://soumtok.com
+- Download: https://soumtok.com/download
 - Docs: https://soumtok.com/docs
 - Help: https://soumtok.com/help
 - Contact: https://soumtok.com/contact
@@ -37,9 +40,10 @@ Soumtok is Africa's #1 AI coding platform. The most affordable powerful coding a
 - [Connectors](https://soumtok.com/docs/connectors): Link Slack, Linear, Figma, and the rest. Soumtok talks to the stack you already pay for.
 - [Skills](https://soumtok.com/docs/skills): Packaged instructions the agent can load. Built-in skills plus the ones you upload.
 - [API keys](https://soumtok.com/docs/keys): Platform keys and bring-your-own keys for OpenAI, Anthropic, Google, DeepSeek, and xAI.
-- [Billing](https://soumtok.com/docs/billing): Plans, usage, included tokens, and how billing works on Soumtok.
+- [Billing](https://soumtok.com/docs/billing): Start $5, Pro $20, Pro Plus $48. Everyday vs Additional pools, M-Pesa and PayPal checkout, and how to read Spending.
+- [Pricing & usage](https://soumtok.com/docs/pricing-usage): One meter for Studio and Desktop. Everyday vs Additional pools, Soumtok Agent free, images, BYOK, and on-demand.
 - [Settings & security](https://soumtok.com/docs/settings): Profile, appearance, two-factor, sessions, and how Soumtok handles your account.
 - [API](https://soumtok.com/docs/api): Auth, Studio, GitHub, and billing endpoints for the Soumtok HTTP API.
-- [CLI](https://soumtok.com/docs/cli): Run Soumtok locally with Vite, Neon, and the same Studio desk you use in production.
-- [Plans](https://soumtok.com/docs/plans): Pro from $13.99 a month. Trial is free. What is included and how to upgrade.
+- [CLI & Terminal](https://soumtok.com/docs/cli): Install the Soumtok Terminal CLI for a Cursor-style agent in your shell. Download Desktop for Windows, macOS, and Linux.
+- [Plans](https://soumtok.com/docs/plans): Start $5, Pro $20, Pro Plus $48. Everyday models, dual pools, Soumtok Agent free, and upgrade path.
 - [Company](https://soumtok.com/docs/company): Soumtok is built in Nairobi. Contact, GitHub org, and how we talk about the product.

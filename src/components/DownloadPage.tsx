@@ -15,6 +15,8 @@ import { Footer } from './Footer'
 import { Nav } from './Nav'
 import { DownloadIcon, PillButton } from './ui'
 import { WindowsSmartScreenGuide } from './WindowsSmartScreenGuide.tsx'
+import { MacInstallGuide } from './MacInstallGuide.tsx'
+import { LinuxInstallGuide } from './LinuxInstallGuide.tsx'
 import { TerminalCliGuide } from './TerminalCliGuide.tsx'
 import { PlatformIcon } from './PlatformIcon.tsx'
 
@@ -440,8 +442,18 @@ export function DownloadPage() {
   const disabled = Boolean(config?.disabled)
 
   const winAlt =
-    latest?.windows.find((item) => item.id.includes('arm64')) ||
-    latest?.windows.find((item) => item.id.includes('zip')) ||
+    latest?.windows.find((item) => item.id.includes('arm64') && item.available) ||
+    latest?.windows.find((item) => item.id.includes('zip') && item.available) ||
+    null
+  const macAlt =
+    latest?.macos.find((item) => item.id.includes('x64') && item.available && !primary?.id?.includes('x64')) ||
+    latest?.macos.find((item) => item.id.includes('arm64') && item.available && !primary?.id?.includes('arm64')) ||
+    null
+  const linuxAlt =
+    latest?.linux.find(
+      (item) => item.id.includes('appimage') && item.available && !primary?.id?.includes('appimage'),
+    ) ||
+    latest?.linux.find((item) => item.id.includes('deb') && item.available && !primary?.id?.includes('deb')) ||
     null
 
   return (
@@ -505,7 +517,7 @@ export function DownloadPage() {
                 See all builds
               </PillButton>
             )}
-            {platform === 'windows' && winAlt && winAlt.available && !disabled && (
+            {platform === 'windows' && winAlt && !disabled && (
               <HeroDownloadButton
                 item={winAlt}
                 label={winAlt.label.includes('ARM') ? 'Windows (ARM64)' : winAlt.label}
@@ -515,12 +527,42 @@ export function DownloadPage() {
                 icon={<PlatformIcon platform="windows" />}
               />
             )}
+            {platform === 'macos' && macAlt && !disabled && (
+              <HeroDownloadButton
+                item={macAlt}
+                label={macAlt.label.includes('x64') ? 'Mac (Intel x64)' : macAlt.label}
+                variant="outline"
+                pending={pendingFilename === macAlt.filename}
+                onDownload={startDownload}
+                icon={<PlatformIcon platform="macos" />}
+              />
+            )}
+            {platform === 'linux' && linuxAlt && !disabled && (
+              <HeroDownloadButton
+                item={linuxAlt}
+                label={linuxAlt.label.includes('AppImage') ? 'Linux AppImage' : 'Linux .deb'}
+                variant="outline"
+                pending={pendingFilename === linuxAlt.filename}
+                onDownload={startDownload}
+                icon={<PlatformIcon platform="linux" />}
+              />
+            )}
           </div>
 
           <p className="mt-8 text-[14px] text-white/35 sm:text-[15px]">
             Available for macOS, Windows, and Linux · v{latest?.version || config?.latestVersion || '…'}
           </p>
 
+          {!disabled && platform === 'macos' && (
+            <div className="mx-auto mt-10 max-w-[820px] text-left">
+              <MacInstallGuide />
+            </div>
+          )}
+          {!disabled && platform === 'linux' && (
+            <div className="mx-auto mt-10 max-w-[820px] text-left">
+              <LinuxInstallGuide />
+            </div>
+          )}
           {(platform === 'windows' || platform === 'unknown') && !disabled && (
             <div className="mx-auto mt-10 max-w-[820px] text-left">
               <WindowsSmartScreenGuide />
@@ -598,6 +640,11 @@ export function DownloadPage() {
             Every platform and architecture for each release.
           </p>
 
+          <div className="mt-6 grid gap-6 lg:grid-cols-2">
+            <MacInstallGuide />
+            <LinuxInstallGuide />
+          </div>
+
           <div className="mt-6">
             <WindowsSmartScreenGuide />
           </div>
@@ -615,6 +662,15 @@ export function DownloadPage() {
             <p className="mt-2">
               <strong className="font-medium text-white/70">Portable (.zip)</strong> — unzip and run; nothing is
               installed. Good for testing or a USB stick.
+            </p>
+            <p className="mt-2">
+              <strong className="font-medium text-white/70">macOS</strong> — open the <span className="text-white/60">.dmg</span>,
+              drag Soumtok to Applications. Apple Silicon → ARM64; Intel → x64.
+            </p>
+            <p className="mt-2">
+              <strong className="font-medium text-white/70">Linux</strong> — install the <span className="text-white/60">.deb</span>{' '}
+              on Ubuntu/Debian, or run the <span className="text-white/60">AppImage</span> on other distros (
+              <code className="text-white/60">chmod +x</code> first).
             </p>
           </div>
 

@@ -32,6 +32,12 @@ jobs:
       - working-directory: desktop
         run: npm run ${{ matrix.pack }}
         env:
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
       - working-directory: desktop
         run: npm run release:sync
@@ -42,3 +48,49 @@ jobs:
           name: soumtok-${{ matrix.os }}
           path: desktop/release/
           retention-days: 30
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: soumtok-*
+          path: artifacts
+          merge-multiple: true
+      - name: Merge installers
+        run: |
+          mkdir -p desktop/release
+          find artifacts -type f \( \
+            -name '*.exe' -o -name '*.zip' -o -name '*.dmg' -o \
+            -name '*.deb' -o -name '*.AppImage' -o -name '*.yml' -o \
+            -name 'releases.json' \
+          \) -exec cp -n {} desktop/release/ \;
+          ls -la desktop/release/
+      - working-directory: desktop
+        run: npm ci && npm run release:sync && npm run release:verify
+      - name: Upload to Bunny CDN
+        env:
+          BUNNY_STORAGE_ZONE: ${{ secrets.BUNNY_STORAGE_ZONE }}
+          BUNNY_ACCESS_KEY: ${{ secrets.BUNNY_ACCESS_KEY }}
+          BUNNY_STORAGE_HOST: ${{ secrets.BUNNY_STORAGE_HOST }}
+        run: |
+          if [ -z "$BUNNY_STORAGE_ZONE" ] || [ -z "$BUNNY_ACCESS_KEY" ]; then
+            echo "Bunny secrets not set — skip CDN upload"
+            exit 0
+          fi
+          node desktop/scripts/upload-releases.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: soumtok-release-bundle
+          path: |
+            desktop/release/
+            data/desktop-control.json
+          retention-days: 90

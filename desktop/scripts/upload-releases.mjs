@@ -18,7 +18,9 @@ if (!zone || !key) {
 }
 
 const files = fs.existsSync(releaseDir)
-  ? fs.readdirSync(releaseDir).filter((n) => /\.(exe|zip|dmg|deb|AppImage)$/i.test(n))
+  ? fs.readdirSync(releaseDir).filter((n) =>
+      /\.(exe|zip|dmg|deb|AppImage|yml|yaml|json)$/i.test(n) && n !== 'builder-debug.yml',
+    )
   : []
 
 if (!files.length) {

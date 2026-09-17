@@ -5,11 +5,12 @@ import { FAQ, docsSitemapXml, injectSeo, jsonLd, seoForPath, sitemapIndexXml, si
 test('home seo ranks cheap Africa coding platform from $5', () => {
   const page = seoForPath('/')
   assert.equal(page.noindex, undefined)
-  assert.match(page.title, /Africa's #1 AI Coding Platform from \$5/)
+  assert.match(page.title, /Cheap AI Coding Platform from \$5/)
   assert.match(page.description, /\$5/)
   assert.match(page.description, /Africa/)
+  assert.match(page.description, /Cursor/)
   assert.doesNotMatch(page.description, /M-Pesa|PayPal/)
-  assert.ok(FAQ.length >= 4)
+  assert.ok(FAQ.length >= 6)
 })
 
 test('home json-ld includes FAQ and Start price', () => {
@@ -44,9 +45,17 @@ test('sitemap index splits marketing and docs', () => {
   assert.match(docs, /https:\/\/soumtok\.com\/docs\/studio/)
 })
 
-test('injectSeo rewrites title and og image', () => {
+test('injectSeo rewrites title, keywords, and og image', () => {
   const html = `<html><head><title>old</title><meta name="description" content="x" /></head></html>`
   const out = injectSeo(html, seoForPath('/'))
-  assert.match(out, /<title>Africa's #1 AI Coding Platform from \$5 \| Soumtok<\/title>/)
+  assert.match(out, /<title>Cheap AI Coding Platform from \$5\/mo \| Soumtok — Africa's #1<\/title>/)
+  assert.match(out, /name="keywords" content="[^"]*Cursor alternative/)
   assert.match(out, /property="og:image" content="https:\/\/soumtok.com\/og.jpg"/)
+})
+
+test('download page mentions desktop and terminal cli', () => {
+  const page = seoForPath('/download')
+  assert.match(page.title, /Download/)
+  assert.match(page.description, /Terminal CLI/)
+  assert.match(page.description, /Desktop/)
 })
