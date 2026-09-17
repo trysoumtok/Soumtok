@@ -9,7 +9,8 @@ const zlib = require('zlib')
 const { pathToFileURL, URL } = require('url')
 const { spawn, spawnSync } = require('child_process')
 const { runAgentHarness, pushAgentSteer, resolveAskReply } = require('./agentHarness')
-const { restoreCheckpoint } = require('./checkpoints')
+const { restoreCheckpoint, listCheckpoints } = require('./checkpoints')
+const { getWorkspaceTerminalState } = require('./terminalState')
 const { runEditorAiAssist } = require('./inlineEditorAi')
 const { watchIndex, unwatchIndex, getIndex } = require('./semanticIndex')
 const { detectInstallations, launchExternalCode, forkBuildHint } = require('./codeBridge')
@@ -205,6 +206,12 @@ function createWindow() {
   }
   win.on('moved', persistBounds)
   win.on('resized', persistBounds)
+  const pushMaxState = () => {
+    if (!win.isDestroyed()) win.webContents.send('window:maximized', win.isMaximized())
+  }
+  win.on('maximize', pushMaxState)
+  win.on('unmaximize', pushMaxState)
+  win.webContents.on('did-finish-load', pushMaxState)
   const webContentsId = win.webContents.id
   win.on('close', () => {
     persistBounds()
@@ -461,7 +468,10 @@ function reachError(err, base = API) {
   const host = String(base || PRODUCTION_API).replace(/\/$/, '')
   if (/timed?\s*out/i.test(detail)) return `Soumtok at ${host} timed out.`
   if (/ECONNREFUSED|ERR_CONNECTION_REFUSED/i.test(detail)) {
-    return `Could not reach Soumtok at ${host}. Start the API (npm start or npm run dev) or check SOUMTOK_API.`
+    return `Could not reach Soumtok at ${host}. Start the API (npm run dev from repo root) or set SOUMTOK_API=http://localhost:5173 in .env.`
+  }
+  if (/ERR_INVALID_ARGUMENT/i.test(detail)) {
+    return `Could not reach Soumtok API at ${host} (net:ERR_INVALID_ARGUMENT). Run npm run dev from the Soumtok repo root (not your project folder). Your app's Vite server also uses :5173 — only one can run. Use https://soumtok.com or start the Soumtok dev server first.`
   }
   if (/ENOTFOUND|ERR_NAME_NOT_RESOLVED/i.test(detail)) return `Could not resolve ${host}. Check your network.`
   if (/CERT|UNABLE_TO_VERIFY|ERR_CERT|SSL/i.test(detail)) return `TLS error reaching ${host}.`
@@ -537,7 +547,7 @@ async function probeApiHealth(base) {
   const url = `${String(base || '').replace(/\/$/, '')}/api/health`
   try {
     const res = await nodeRequestJsonRetry('GET', url, { timeoutMs: 3500 })
-    return res.status === 200 && res.data && res.data.ok === true
+    return res.status === 200 && res.data && res.data.ok === true && res.data.coding != null
   } catch {
     return false
   }
@@ -547,7 +557,12 @@ async function resolveSoumtokApi() {
   const explicit = (process.env.SOUMTOK_API || readSoumtokApiFromEnvFile() || '').replace(/\/$/, '')
   if (explicit) return explicit
   if (!app.isPackaged) {
-    for (const base of ['http://127.0.0.1:5173', 'http://127.0.0.1:3000']) {
+    for (const base of [
+      'http://localhost:5173',
+      'http://127.0.0.1:5173',
+      'http://localhost:3000',
+      'http://127.0.0.1:3000',
+    ]) {
       if (await probeApiHealth(base)) return base
     }
   }
@@ -605,11 +620,17 @@ async function api(method, pathname, body, timeoutMs = 15000) {
   } catch {
     cookie = ''
   }
+  const isLocalApi = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i.test(url)
+  const agentRound = /\/api\/(studio\/)?desktop\/agent\/round/.test(pathname)
+  const waitMs = agentRound ? Math.max(timeoutMs, 510_000) : timeoutMs
   try {
-    return await nodeRequestJsonRetry(method, url, { cookie, body, timeoutMs })
+    return await nodeRequestJsonRetry(method, url, { cookie, body, timeoutMs: waitMs })
   } catch (err) {
+    if (isLocalApi) {
+      return { status: 0, data: { error: reachError(err, API) } }
+    }
     try {
-      return await electronNetJson(method, url, { cookie, body, timeoutMs })
+      return await electronNetJson(method, url, { cookie, body, timeoutMs: waitMs })
     } catch (netErr) {
       return { status: 0, data: { error: reachError(netErr?.message ? netErr : err) } }
     }
@@ -975,6 +996,25 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
 
+let appQuitFlushDone = false
+
+app.on('before-quit', (event) => {
+  if (appQuitFlushDone) return
+  const wins = BrowserWindow.getAllWindows().filter((w) => !w.isDestroyed())
+  if (!wins.length) return
+  event.preventDefault()
+  Promise.all(
+    wins.map((win) =>
+      win.webContents
+        .executeJavaScript('window.__soumtokFlushWorkspace?.()', true)
+        .catch(() => null),
+    ),
+  ).finally(() => {
+    appQuitFlushDone = true
+    app.quit()
+  })
+})
+
 app.on('will-quit', () => {
   try {
     require('./terminalLog').flushAllWorkspaceLogs()
@@ -1002,18 +1042,36 @@ ipcMain.handle('workspace:load', (event) => {
   return loadWorkspaceCache(folder)
 })
 
-ipcMain.handle('workspace:save', (event, payload) => {
+function resolveWorkspaceSaveFolder(event, payload) {
   const raw = payload?.path || payload?.folder
   let folder = folderOf(event)
   if (raw && typeof raw === 'string' && fs.existsSync(raw)) {
     folder = path.resolve(raw)
   }
+  return folder || null
+}
+
+ipcMain.handle('workspace:save', (event, payload) => {
+  const folder = resolveWorkspaceSaveFolder(event, payload)
   if (!folder) return false
   const body = { ...(payload && typeof payload === 'object' ? payload : {}) }
   delete body.path
   delete body.folder
   saveWorkspaceCache(folder, body)
   return true
+})
+
+ipcMain.on('workspace:saveSync', (event, payload) => {
+  const folder = resolveWorkspaceSaveFolder(event, payload)
+  if (!folder) {
+    event.returnValue = false
+    return
+  }
+  const body = { ...(payload && typeof payload === 'object' ? payload : {}) }
+  delete body.path
+  delete body.folder
+  saveWorkspaceCache(folder, body)
+  event.returnValue = true
 })
 
 ipcMain.handle('window:control', (event, action) => {
@@ -1025,6 +1083,11 @@ ipcMain.handle('window:control', (event, action) => {
     else win.maximize()
   }
   if (action === 'close') win.close()
+})
+
+ipcMain.handle('window:isMaximized', (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender)
+  return win?.isMaximized() ?? false
 })
 
 ipcMain.handle('window:new', () => createWindow())
@@ -1322,18 +1385,28 @@ const ATTACH_SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', '.nex
 const ATTACH_TEXT_EXT =
   /\.(txt|md|json|js|ts|tsx|jsx|css|html|xml|yaml|yml|toml|env|svg|py|go|rs|java|kt|sql|sh|ps1|vue|svelte|csv|ini|cfg|conf|log|c|cpp|h|hpp|rb|php|swift|dart)$/i
 
-function readAttachFile(filePath) {
+async function readAttachFile(filePath) {
   const stat = fs.statSync(filePath)
-  if (!stat.isFile() || stat.size > 2_000_000) return null
   const name = path.basename(filePath)
-  const ext = path.extname(name)
-  let text = ''
-  if (ATTACH_TEXT_EXT.test(ext) || stat.size < 512_000) {
-    text = fs.readFileSync(filePath, 'utf8').slice(0, ATTACH_TEXT_MAX)
-  } else {
-    text = `[binary file ${name}, ${stat.size} bytes — contents not included]`
+  const ext = path.extname(name).toLowerCase()
+  const cap = /\.(pdf|docx?|xlsx?|pptx?|odt|ods|odp|epub|rtf|zip)$/i.test(ext) ? 8_000_000 : 2_000_000
+  if (!stat.isFile() || stat.size > cap) return null
+  const { extractFileContent } = require('../../../shared/fileExtract.cjs')
+  const bytes = fs.readFileSync(filePath)
+  const extracted = await extractFileContent(name, '', bytes)
+  if (extracted.text) {
+    return { name, text: extracted.text.slice(0, ATTACH_TEXT_MAX), mime: 'text/plain' }
   }
-  return { name, text, mime: 'text/plain' }
+  if (ATTACH_TEXT_EXT.test(ext) || stat.size < 512_000) {
+    try {
+      const text = fs.readFileSync(filePath, 'utf8').slice(0, ATTACH_TEXT_MAX)
+      return { name, text, mime: 'text/plain' }
+    } catch {
+      /* fall through */
+    }
+  }
+  const note = extracted.hint || extracted.error || `binary file, ${stat.size} bytes`
+  return { name, text: `[${name}: ${note}]`, mime: 'application/octet-stream' }
 }
 
 function collectAttachPaths(dir, depth = 0, out = []) {
@@ -1354,6 +1427,20 @@ function collectAttachPaths(dir, depth = 0, out = []) {
   return out
 }
 
+ipcMain.handle('documents:extract', async (_e, payload) => {
+  const { enrichAttachmentText } = require('./documentExtract')
+  const name = String(payload?.name || '')
+  const mime = String(payload?.mime || '')
+  const dataUrl = String(payload?.dataUrl || '')
+  if (!dataUrl) return { error: 'Missing file data' }
+  try {
+    const enriched = await enrichAttachmentText({ name, mime, dataUrl })
+    return { text: enriched.text || '', analysis: enriched.analysis || '' }
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : 'Could not extract document text' }
+  }
+})
+
 ipcMain.handle('files:pickAttach', async (event) => {
   const folder = folderOf(event)
   const win = BrowserWindow.fromWebContents(event.sender)
@@ -1366,7 +1453,7 @@ ipcMain.handle('files:pickAttach', async (event) => {
   for (const filePath of picked.filePaths) {
     if (out.length >= 6) break
     try {
-      const row = readAttachFile(filePath)
+      const row = await readAttachFile(filePath)
       if (row) out.push(row)
     } catch {
       /* skip */
@@ -1384,7 +1471,7 @@ ipcMain.handle('folder:pickAttach', async (event) => {
   for (const filePath of paths) {
     if (out.length >= 6) break
     try {
-      const row = readAttachFile(filePath)
+      const row = await readAttachFile(filePath)
       if (row) out.push(row)
     } catch {
       /* skip */
@@ -1948,6 +2035,136 @@ ipcMain.handle('testhub:deploys:delete', async (_e, payload) => {
   return res.data || { ok: true }
 })
 
+async function uploadSkillMultipart(filePath, displayName) {
+  let buf
+  try {
+    buf = fs.readFileSync(filePath)
+  } catch {
+    return { error: 'Could not read that file' }
+  }
+  if (buf.length > 25 * 1024 * 1024) return { error: 'File must be under 25 MB' }
+  const name = path.basename(filePath)
+  const ext = path.extname(name).toLowerCase()
+  const mime =
+    ext === '.pdf'
+      ? 'application/pdf'
+      : ext === '.json'
+        ? 'application/json'
+        : ext === '.zip'
+          ? 'application/zip'
+          : ext === '.png'
+            ? 'image/png'
+            : ext === '.jpg' || ext === '.jpeg'
+              ? 'image/jpeg'
+              : ext === '.webp'
+                ? 'image/webp'
+                : ext === '.gif'
+                  ? 'image/gif'
+                  : 'text/plain'
+  try {
+    const cookie = await cookieHeader()
+    const blob = new Blob([buf], { type: mime })
+    const form = new FormData()
+    form.append('file', blob, name)
+    if (displayName) form.append('name', displayName)
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 120000)
+    const res = await fetch(`${API}/api/skills`, {
+      method: 'POST',
+      headers: { Cookie: cookie, Accept: 'application/json' },
+      body: form,
+      signal: controller.signal,
+    })
+    clearTimeout(timer)
+    const data = await res.json().catch(() => ({}))
+    if (res.status === 401) return { error: 'Sign in required' }
+    if (res.status === 403) return { error: data.error || 'Finish account setup first' }
+    if (!res.ok) return { error: data.error || 'Could not save skill' }
+    return { skill: data.skill }
+  } catch (err) {
+    if (err?.name === 'AbortError') return { error: 'Upload timed out' }
+    return { error: 'Could not reach Soumtok' }
+  }
+}
+
+ipcMain.handle('agent:listLocalSkills', async (event) => {
+  const { listAgentSkills } = require('./agentSkills')
+  const folder = folderOf(event)
+  const skills = listAgentSkills(folder || '', { thirdPartyImports: true }).map((row) => ({
+    name: row.name,
+    description: row.description,
+    source: row.source,
+  }))
+  return { skills }
+})
+
+ipcMain.handle('skills:list', async () => {
+  const res = await api('GET', '/api/skills')
+  if (res.status === 401) return { error: 'Sign in required', skills: [] }
+  if (res.status === 403) return { error: res.data?.error || 'Finish account setup first', skills: [] }
+  if (res.status >= 400) return { error: res.data?.error || 'Could not load skills', skills: [] }
+  return { skills: res.data?.skills || [] }
+})
+
+ipcMain.handle('skills:upload', async (event, payload) => {
+  const win = BrowserWindow.fromWebContents(event.sender)
+  const filePath = String(payload?.path || '').trim()
+  if (filePath) {
+    return uploadSkillMultipart(filePath, payload?.name)
+  }
+  const picked = await dialog.showOpenDialog(win, {
+    properties: ['openFile'],
+    filters: [
+      {
+        name: 'Skills',
+        extensions: ['pdf', 'md', 'txt', 'json', 'csv', 'html', 'zip', 'png', 'jpg', 'jpeg', 'webp', 'gif', 'docx', 'skill'],
+      },
+    ],
+  })
+  if (picked.canceled || !picked.filePaths[0]) return { cancelled: true }
+  return uploadSkillMultipart(picked.filePaths[0], payload?.name)
+})
+
+ipcMain.handle('skills:remove', async (_e, payload) => {
+  const id = String(payload?.id || '').trim()
+  if (!id) return { error: 'Missing skill id' }
+  const res = await api('DELETE', `/api/skills/${encodeURIComponent(id)}`)
+  if (res.status === 401) return { error: 'Sign in required' }
+  if (res.status >= 400) return { error: res.data?.error || 'Could not remove skill' }
+  return { ok: true }
+})
+
+ipcMain.handle('plugins:list', async () => {
+  const res = await api('GET', '/api/plugins')
+  if (res.status === 401) return { error: 'Sign in required', catalog: [], installed: [] }
+  if (res.status === 403) return { error: res.data?.error || 'Finish account setup first', catalog: [], installed: [] }
+  if (res.status >= 400) return { error: res.data?.error || 'Could not load plugins', catalog: [], installed: [] }
+  return { catalog: res.data?.catalog || [], installed: res.data?.installed || [] }
+})
+
+ipcMain.handle('plugins:install', async (_e, payload) => {
+  const pluginId = String(payload?.pluginId || '').trim()
+  const name = String(payload?.name || '').trim()
+  const mcpUrl = String(payload?.mcpUrl || '').trim()
+  const body = pluginId ? { pluginId } : name && mcpUrl ? { name, mcpUrl } : null
+  if (!body) return { error: 'Pick a plugin or name your MCP server' }
+  const res = await api('POST', '/api/plugins', body)
+  if (res.status === 401) return { error: 'Sign in required' }
+  if (res.status === 402) return { error: res.data?.error || 'Upgrade to add more plugins' }
+  if (res.status === 403) return { error: res.data?.error || 'Finish account setup first' }
+  if (res.status >= 400) return { error: res.data?.error || 'Could not install plugin' }
+  return { plugin: res.data?.plugin, stored: res.data?.stored }
+})
+
+ipcMain.handle('plugins:remove', async (_e, payload) => {
+  const id = String(payload?.id || '').trim()
+  if (!id) return { error: 'Missing plugin id' }
+  const res = await api('DELETE', `/api/plugins/${encodeURIComponent(id)}`)
+  if (res.status === 401) return { error: 'Sign in required' }
+  if (res.status >= 400) return { error: res.data?.error || 'Could not remove plugin' }
+  return { ok: true }
+})
+
 ipcMain.handle('testhub:export:folder', async (event, payload) => {
   const win = BrowserWindow.fromWebContents(event.sender)
   const files = payload?.files || {}
@@ -2009,9 +2226,97 @@ async function apiBuffer(method, pathname, timeoutMs = 20000) {
   }
 }
 
-async function uploadAvatarMultipart(filePath) {
-  const buf = fs.readFileSync(filePath)
-  if (buf.length > 6 * 1024 * 1024) return { error: 'Image must be under 6 MB' }
+function emitAvatarUploadProgress(sendProgress, percent, stage = 'upload') {
+  try {
+    sendProgress?.({ percent: Math.max(0, Math.min(100, Math.round(percent))), stage })
+  } catch {
+    /* ignore */
+  }
+}
+
+async function uploadAvatarViaNet(filePath, buf, mime, name, sendProgress) {
+  const boundary = `----Soumtok${crypto.randomBytes(8).toString('hex')}`
+  const head = `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${name}"\r\nContent-Type: ${mime}\r\n\r\n`
+  const tail = `\r\n--${boundary}--\r\n`
+  const body = Buffer.concat([Buffer.from(head, 'utf8'), buf, Buffer.from(tail, 'utf8')])
+
+  const cookie = await cookieHeader()
+  return await new Promise((resolve) => {
+    let settled = false
+    const finish = (result) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve(result)
+    }
+    const request = net.request({
+      method: 'PUT',
+      url: `${API}/api/me/photo/avatar`,
+      session: authSession(),
+    })
+    const timer = setTimeout(() => {
+      try {
+        request.abort()
+      } catch {
+        /* ignore */
+      }
+      finish({ ok: false, error: 'Upload timed out' })
+    }, 120000)
+    request.setHeader('Cookie', cookie)
+    request.setHeader('Accept', 'application/json')
+    request.setHeader('Content-Type', `multipart/form-data; boundary=${boundary}`)
+    request.setHeader('Content-Length', String(body.length))
+    request.on('uploadProgress', (_event, bytesSent, totalBytes) => {
+      if (totalBytes > 0) emitAvatarUploadProgress(sendProgress, Math.min(92, 12 + (bytesSent / totalBytes) * 80))
+    })
+    const chunks = []
+    request.on('response', (response) => {
+      emitAvatarUploadProgress(sendProgress, 94, 'save')
+      response.on('data', (chunk) => chunks.push(chunk))
+      response.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8')
+        let data = {}
+        try {
+          data = JSON.parse(text)
+        } catch {
+          data = { error: text || 'Upload failed' }
+        }
+        if (response.statusCode === 401) finish({ ok: false, error: 'Sign in required' })
+        else if (response.statusCode === 503) finish({ ok: false, error: data.error || 'Photo storage is not connected' })
+        else if (response.statusCode !== 200) finish({ ok: false, error: data.error || 'Could not upload photo' })
+        else {
+          emitAvatarUploadProgress(sendProgress, 100, 'done')
+          finish({ ok: true, dataUrl: `data:${mime};base64,${buf.toString('base64')}` })
+        }
+      })
+    })
+    request.on('error', () => finish({ ok: false, error: 'Could not reach Soumtok' }))
+    const chunkSize = 64 * 1024
+    let offset = 0
+    const pump = () => {
+      if (offset >= body.length) {
+        request.end()
+        return
+      }
+      const end = Math.min(offset + chunkSize, body.length)
+      const slice = body.subarray(offset, end)
+      offset = end
+      request.write(slice, pump)
+    }
+    emitAvatarUploadProgress(sendProgress, 8, 'upload')
+    pump()
+  })
+}
+
+async function uploadAvatarMultipart(filePath, sendProgress) {
+  emitAvatarUploadProgress(sendProgress, 2, 'read')
+  let buf
+  try {
+    buf = fs.readFileSync(filePath)
+  } catch {
+    return { ok: false, error: 'Could not read that file' }
+  }
+  if (buf.length > 6 * 1024 * 1024) return { ok: false, error: 'Image must be under 6 MB' }
   const name = path.basename(filePath)
   const ext = path.extname(name).toLowerCase()
   const mime =
@@ -2019,62 +2324,35 @@ async function uploadAvatarMultipart(filePath) {
     : ext === '.webp' ? 'image/webp'
     : ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg'
     : ''
-  if (!mime) return { error: 'Use PNG, JPEG, or WebP' }
+  if (!mime) return { ok: false, error: 'Use PNG, JPEG, or WebP' }
 
-  const boundary = `----Soumtok${crypto.randomBytes(8).toString('hex')}`
-  const head = `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${name}"\r\nContent-Type: ${mime}\r\n\r\n`
-  const tail = `\r\n--${boundary}--\r\n`
-  const body = Buffer.concat([Buffer.from(head, 'utf8'), buf, Buffer.from(tail, 'utf8')])
+  emitAvatarUploadProgress(sendProgress, 6, 'read')
 
   try {
     const cookie = await cookieHeader()
-    return await new Promise((resolve) => {
-      let settled = false
-      const finish = (result) => {
-        if (settled) return
-        settled = true
-        clearTimeout(timer)
-        resolve(result)
-      }
-      const request = net.request({
-        method: 'PUT',
-        url: `${API}/api/me/photo/avatar`,
-        session: authSession(),
-      })
-      const timer = setTimeout(() => {
-        try {
-          request.abort()
-        } catch {
-          /* ignore */
-        }
-        finish({ ok: false, error: 'Upload timed out' })
-      }, 60000)
-      request.setHeader('Cookie', cookie)
-      request.setHeader('Accept', 'application/json')
-      request.setHeader('Content-Type', `multipart/form-data; boundary=${boundary}`)
-      request.setHeader('Content-Length', String(body.length))
-      const chunks = []
-      request.on('response', (response) => {
-        response.on('data', (chunk) => chunks.push(chunk))
-        response.on('end', () => {
-          const text = Buffer.concat(chunks).toString('utf8')
-          let data = {}
-          try {
-            data = JSON.parse(text)
-          } catch {
-            data = { error: text || 'Upload failed' }
-          }
-          if (response.statusCode === 401) finish({ ok: false, error: 'Sign in required' })
-          else if (response.statusCode !== 200) finish({ ok: false, error: data.error || 'Could not upload photo' })
-          else finish({ ok: true })
-        })
-      })
-      request.on('error', () => finish({ ok: false, error: 'Could not reach Soumtok' }))
-      request.write(body)
-      request.end()
+    const blob = new Blob([buf], { type: mime })
+    const form = new FormData()
+    form.append('file', blob, name)
+    emitAvatarUploadProgress(sendProgress, 12, 'upload')
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 120000)
+    const res = await fetch(`${API}/api/me/photo/avatar`, {
+      method: 'PUT',
+      headers: { Cookie: cookie, Accept: 'application/json' },
+      body: form,
+      signal: controller.signal,
     })
-  } catch {
-    return { ok: false, error: 'Could not upload photo' }
+    clearTimeout(timer)
+    emitAvatarUploadProgress(sendProgress, 90, 'save')
+    const data = await res.json().catch(() => ({}))
+    if (res.status === 401) return { ok: false, error: 'Sign in required' }
+    if (res.status === 503) return { ok: false, error: data.error || 'Photo storage is not connected' }
+    if (!res.ok) return { ok: false, error: data.error || 'Could not upload photo' }
+    emitAvatarUploadProgress(sendProgress, 100, 'done')
+    return { ok: true, dataUrl: `data:${mime};base64,${buf.toString('base64')}` }
+  } catch (err) {
+    if (err?.name === 'AbortError') return { ok: false, error: 'Upload timed out' }
+    return uploadAvatarViaNet(filePath, buf, mime, name, sendProgress)
   }
 }
 
@@ -2096,12 +2374,20 @@ ipcMain.handle('profile:avatar', async () => {
 
 ipcMain.handle('profile:uploadAvatar', async (event) => {
   const win = BrowserWindow.fromWebContents(event.sender)
+  const sendProgress = (payload) => {
+    try {
+      event.sender.send('profile:uploadProgress', payload)
+    } catch {
+      /* ignore */
+    }
+  }
+  emitAvatarUploadProgress(sendProgress, 0, 'pick')
   const picked = await dialog.showOpenDialog(win, {
     properties: ['openFile'],
     filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] }],
   })
   if (picked.canceled || !picked.filePaths[0]) return { cancelled: true }
-  return uploadAvatarMultipart(picked.filePaths[0])
+  return uploadAvatarMultipart(picked.filePaths[0], sendProgress)
 })
 
 ipcMain.handle('file:write', (event, filePath, contents) => {
@@ -2278,8 +2564,13 @@ ipcMain.handle('agent:run', async (event, payload) => {
       messages: payload?.messages || [],
       userMessage: payload?.userMessage,
       threadTitle: payload?.threadTitle,
+      threadId: payload?.threadId || '',
       openFiles: payload?.openFiles || [],
       files: payload?.files || [],
+      attachedSkills: payload?.attachedSkills || [],
+      attachedPluginSkills: payload?.attachedPluginSkills || [],
+      attachedLocalSkills: payload?.attachedLocalSkills || [],
+      attachedManualSkills: payload?.attachedManualSkills || [],
       agentPrefs: payload?.agentPrefs || {},
       subagentModel: payload?.subagentModel,
       branch,
@@ -2348,10 +2639,24 @@ ipcMain.handle('agent:steer', (_event, payload) => {
   return true
 })
 
-ipcMain.handle('checkpoint:restore', (event, checkpointId) => {
+ipcMain.handle('checkpoint:restore', (event, payload) => {
   const folder = folderOf(event)
-  if (!folder || !checkpointId) return { ok: false, error: 'No folder or checkpoint' }
-  return restoreCheckpoint(folder, String(checkpointId))
+  const id = typeof payload === 'string' ? payload : payload?.id
+  const paths = typeof payload === 'object' ? payload?.paths : null
+  if (!folder || !id) return { ok: false, error: 'No folder or checkpoint' }
+  return restoreCheckpoint(folder, String(id), paths)
+})
+
+ipcMain.handle('checkpoint:list', (event) => {
+  const folder = folderOf(event)
+  if (!folder) return []
+  return listCheckpoints(folder)
+})
+
+ipcMain.handle('terminal:state', (event) => {
+  const folder = folderOf(event)
+  if (!folder) return { status: 'idle', devServerUp: false, urls: [] }
+  return getWorkspaceTerminalState(folder)
 })
 
 ipcMain.handle('editor:ai', async (_e, payload) => runEditorAiAssist(api, payload))
@@ -2439,8 +2744,19 @@ function saveConnectorsCache(payload) {
         2,
       ),
     )
+    notifyConnectorsUpdated()
   } catch {
     /* ignore */
+  }
+}
+
+function notifyConnectorsUpdated() {
+  for (const win of BrowserWindow.getAllWindows()) {
+    try {
+      win.webContents.send('connectors:updated')
+    } catch {
+      /* ignore */
+    }
   }
 }
 
@@ -2547,6 +2863,28 @@ ipcMain.handle('connectors:oauth', async (_e, payload) => {
   return { error: res.data?.error || 'This service needs a token in the web dashboard, or is already connected.' }
 })
 
+ipcMain.handle('connect:start', async (_e, payload) => {
+  const body = payload && typeof payload === 'object' ? payload : {}
+  const pluginId = String(body.pluginId || '').trim()
+  const connectorId = String(body.connectorId || '').trim()
+  if (!pluginId && !connectorId) return { error: 'Missing service' }
+  const res = await api('POST', '/api/connect/start', { pluginId: pluginId || undefined, connectorId: connectorId || undefined }, 30_000)
+  if (res.status === 401) return { error: 'Sign in required' }
+  if (res.status === 402) return { error: res.data?.error || 'Upgrade to add more connectors' }
+  if (res.status !== 200) return { error: res.data?.error || 'Could not start connect' }
+  return res.data || { error: 'Could not start connect' }
+})
+
+ipcMain.handle('connect:poll', async (_e, code) => {
+  const want = String(code || '').trim()
+  if (!want) return { error: 'Missing code' }
+  const res = await api('GET', `/api/connect/device/${encodeURIComponent(want)}`, null, 20_000)
+  if (res.status === 401) return { error: 'Sign in required' }
+  if (res.status === 404) return { error: 'Connect link expired — tap Connect again.' }
+  if (res.status !== 200) return { error: res.data?.error || 'Could not check connect status' }
+  return res.data || { error: 'Could not check connect status' }
+})
+
 ipcMain.handle('billing:open', () => {
   shell.openExternal(`${API}/dashboard/billing`)
 })
@@ -2556,7 +2894,12 @@ ipcMain.handle('dashboard:open', () => {
 })
 
 ipcMain.handle('github:open', () => {
-  shell.openExternal(`${API}/dashboard/studio`)
+  shell.openExternal(`${API}/dashboard/integrations`)
+})
+
+ipcMain.handle('github:grantRepos', () => {
+  shell.openExternal(`${API}/api/github/grant`)
+  return { ok: true }
 })
 
 ipcMain.handle('app:openUrl', (_e, url) => {
@@ -2766,36 +3109,38 @@ ipcMain.handle('git:commit', (event, message, workspaceHint) => {
   return gitStatusPayload(folder)
 })
 
+const { publishFolderToGithub } = require('./gitPublish')
+
 ipcMain.handle('git:publish', async (event, workspaceHint) => {
   const folder = resolveWorkspaceFolder(event, workspaceHint)
   if (!folder) return { error: 'Open a folder first.' }
-  const status = gitStatusPayload(folder)
-  if (!status.isRepo) {
-    const init = spawnSync('git', ['init'], { cwd: folder, encoding: 'utf8', windowsHide: true })
-    if (init.status !== 0) return { error: (init.stderr || 'Could not initialize Git.').trim() }
-  }
-  const name = path.basename(folder)
-  const ghAuth = spawnSync('gh', ['auth', 'status'], { encoding: 'utf8', windowsHide: true })
-  if (ghAuth.status === 0) {
-    const create = spawnSync('gh', ['repo', 'create', name, '--source=.', '--private', '--push'], {
-      cwd: folder,
-      encoding: 'utf8',
-      windowsHide: true,
-    })
-    if (create.status === 0) {
-      return { ok: true, ...gitStatusPayload(folder), via: 'gh' }
+  const pub = await publishFolderToGithub({
+    folder,
+    apiFetch: api,
+    name: path.basename(folder),
+    isPrivate: true,
+    grantBaseUrl: API,
+    onOpenGrantUrl: (url) => shell.openExternal(url),
+  })
+  if (!pub.ok) {
+    if (pub.needsGithub) {
+      return {
+        ok: false,
+        opened: Boolean(pub.grantUrl),
+        needsGithub: true,
+        hint: pub.text || 'Connect GitHub in your browser, then click Publish to GitHub again.',
+      }
     }
-    const hint = (create.stderr || create.stdout || '').trim()
-    if (/already exists/i.test(hint)) {
-      await shell.openExternal(`https://github.com/new?name=${encodeURIComponent(name)}`)
-      return { ok: false, opened: true, hint: 'That repo name may already exist. Finish on GitHub, then add the remote and push.' }
-    }
+    return { error: pub.text || 'Could not publish to GitHub.' }
   }
-  await shell.openExternal(`https://github.com/new?name=${encodeURIComponent(name)}`)
   return {
-    ok: false,
-    opened: true,
-    hint: 'Create the repository on GitHub, then run: git remote add origin … && git push -u origin main',
+    ok: true,
+    ...gitStatusPayload(folder),
+    via: pub.via,
+    fullName: pub.fullName,
+    htmlUrl: pub.htmlUrl,
+    branch: pub.branch,
+    created: pub.created,
   }
 })
 

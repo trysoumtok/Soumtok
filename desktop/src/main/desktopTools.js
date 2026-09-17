@@ -2,7 +2,14 @@ const fs = require('fs')
 const path = require('path')
 const { spawn, spawnSync } = require('child_process')
 const { resolveToolName, closestName } = require('../shared/typoIntent.js')
-const { parseStillRequest, normalizeStillAspect } = require('../shared/stillAspect.js')
+const {
+  parseStillRequest,
+  normalizeStillAspect,
+  stillAspectForImageUse,
+  DEFAULT_STILL_ASPECT,
+} = require('../shared/stillAspect.js')
+const { normalizeWorkspaceEditArgs } = require('../shared/toolArgsRuntime.js')
+const { classifyFile, extractFileContent } = require('./documentExtract')
 
 const BLOCK_SHELL =
   /[;&|`]|\$\(|&&|\|\||\brm\b|\bdel\b|\bformat\b|\bcurl\b|\bwget\b|\bssh\b|\breg\b|\binvoke-webrequest/i
@@ -53,6 +60,7 @@ const NPM_RUN_SCRIPTS =
 const { applyRunModeToPrefs } = require('../shared/agentPrefsRuntime')
 const { readLogsForCwd, waitForLogGrowth, appendWorkspaceLog } = require('./terminalLog')
 const { runGitTool } = require('./gitTools')
+const { publishFolderToGithub } = require('./gitPublish')
 const { searchCodebase, invalidateIndex } = require('./semanticIndex')
 const { runBrowserTool } = require('./agentBrowser')
 const { readSkillByName } = require('./agentSkills')
@@ -219,7 +227,27 @@ function normalizeTerminalCommand(command, root) {
       text: 'Do not capture dev servers into *-run.log via node -e. Use terminal(npm run …) and read_terminal() — Soumtok records the integrated Terminal.',
     }
   }
+  if (process.platform === 'win32' && /\$[a-z_@]|Get-Content|Set-Content|ForEach-Object|Get-ChildItem|Get-Location|Select-Object|@\s*'|@\s*"/i.test(cmd)) {
+    return {
+      ok: true,
+      cmd,
+      note: 'PowerShell command — running via powershell.exe in integrated Terminal (not cmd.exe).',
+      shell: 'powershell',
+    }
+  }
   return { ok: true, cmd, cwdRel }
+}
+
+function windowsExecSpec(command, shellHint) {
+  const c = String(command || '').trim()
+  const usePs =
+    shellHint === 'powershell' ||
+    (shellHint !== 'cmd' &&
+      /\$[a-z_@]|Get-Content|Set-Content|ForEach-Object|Get-ChildItem|Get-Location|Select-Object|@\s*'|@\s*"/i.test(c))
+  if (usePs) {
+    return { file: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-Command', c] }
+  }
+  return { file: process.env.ComSpec || 'cmd.exe', args: ['/d', '/s', '/c', c] }
 }
 
 function assertInRoot(root, target) {
@@ -235,6 +263,32 @@ function resolvePath(root, target, prefs) {
   return assertInRoot(root, rel)
 }
 
+/** Prefer src/ for bare component filenames when src/ exists (matches diff locateWorkspaceFile). */
+function resolveWritePath(root, relIn, prefs) {
+  const raw = String(relIn || '').replace(/^\/+/, '').replace(/\\/g, '/')
+  if (!raw) throw new Error('path required')
+  try {
+    const direct = resolvePath(root, raw, prefs)
+    if (fs.existsSync(direct)) return { file: direct, rel: raw }
+  } catch {
+    /* try src/ fallback */
+  }
+  const base = path.posix.basename(raw)
+  const isSource = /\.(ts|tsx|js|jsx|mjs|cjs|css|html|vue|svelte)$/i.test(base)
+  if (isSource && !raw.includes('/')) {
+    try {
+      const srcDir = resolvePath(root, 'src', prefs)
+      if (fs.existsSync(srcDir) && fs.statSync(srcDir).isDirectory()) {
+        const srcRel = `src/${base}`
+        return { file: resolvePath(root, srcRel, prefs), rel: srcRel }
+      }
+    } catch {
+      /* fall through */
+    }
+  }
+  return { file: resolvePath(root, raw, prefs), rel: raw }
+}
+
 function mimeFromExt(ext) {
   const e = String(ext || '').toLowerCase().replace(/^\./, '')
   if (e === 'png') return 'image/png'
@@ -245,7 +299,26 @@ function mimeFromExt(ext) {
   if (e === 'mp4') return 'video/mp4'
   if (e === 'webm') return 'video/webm'
   if (e === 'mov') return 'video/quicktime'
+  if (e === 'pdf') return 'application/pdf'
+  if (e === 'docx') return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
   return ''
+}
+
+function resolveReadablePath(root, relIn, prefs) {
+  const rel = String(relIn || '').replace(/^\/+/, '')
+  try {
+    return resolvePath(root, rel, prefs)
+  } catch (e) {
+    const base = path.basename(rel.replace(/\\/g, '/'))
+    if (base && (path.isAbsolute(rel) || /^[a-zA-Z]:[\\/]/.test(rel))) {
+      try {
+        return resolvePath(root, `.soumtok/inbox/${base}`, prefs)
+      } catch {
+        /* fall through */
+      }
+    }
+    throw e
+  }
 }
 
 function slugImageName(prompt, ext) {
@@ -366,14 +439,24 @@ async function runViaIntegratedTerminal(ctx, root, allowed, normalized, cwd = ro
   const delta = readLogsForCwd(root, 200_000).length - beforeLen
   if (!long && delta < 8) {
     try {
-      const result = spawnSync(allowed, {
-        shell: true,
-        cwd,
-        encoding: 'utf8',
-        windowsHide: true,
-        timeout: 180_000,
-        maxBuffer: 8 * 1024 * 1024,
-      })
+      const winSpec =
+        process.platform === 'win32' ? windowsExecSpec(allowed, normalized.shell) : null
+      const result = winSpec
+        ? spawnSync(winSpec.file, winSpec.args, {
+            cwd,
+            encoding: 'utf8',
+            windowsHide: true,
+            timeout: 180_000,
+            maxBuffer: 8 * 1024 * 1024,
+          })
+        : spawnSync(allowed, {
+            shell: true,
+            cwd,
+            encoding: 'utf8',
+            windowsHide: true,
+            timeout: 180_000,
+            maxBuffer: 8 * 1024 * 1024,
+          })
       const out = `${result.stdout || ''}${result.stderr || ''}`.slice(0, 32_000)
       if (out.trim()) {
         appendWorkspaceLog(root, `\r\n[soumtok capture]\r\n${out}\r\n`)
@@ -426,7 +509,8 @@ function runBackgroundCommand(command, root) {
     let child
     try {
       if (process.platform === 'win32') {
-        child = spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', command], {
+        const winSpec = windowsExecSpec(command)
+        child = spawn(winSpec.file, winSpec.args, {
           cwd: root,
           stdio: ['ignore', 'pipe', 'pipe'],
           windowsHide: true,
@@ -571,6 +655,19 @@ function globSearch(root, pattern, limit = 300) {
   return { ok: true, text: hits.length ? [...new Set(hits)].sort().join('\n') : 'No matches.' }
 }
 
+function pythonBin() {
+  if (process.platform === 'win32') return 'py'
+  return 'python3'
+}
+
+function workspaceHasPython(root, pathList) {
+  if (pathList.some((p) => /\.py$/i.test(p))) return true
+  for (const name of ['pyproject.toml', 'requirements.txt', 'setup.py', 'Pipfile']) {
+    if (fs.existsSync(path.join(root, name))) return true
+  }
+  return false
+}
+
 function readLintsWorkspace(root, args) {
   const pathsArg = args.paths || args.path || ''
   const pathList = String(pathsArg)
@@ -608,6 +705,20 @@ function readLintsWorkspace(root, args) {
     const out = `${run.stdout || ''}${run.stderr || ''}`.slice(0, 14_000)
     chunks.push(`tsc --noEmit (exit ${run.status})\n${out || '(no output)'}`)
   }
+  if (workspaceHasPython(root, pathList)) {
+    const bin = pythonBin()
+    const targets = pathList.filter((p) => /\.py$/i.test(p))
+    const argsPy = targets.length ? ['-m', 'py_compile', ...targets] : ['-m', 'compileall', '-q', '.']
+    const run = spawnSync(bin, argsPy, {
+      cwd: root,
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 180_000,
+      shell: process.platform === 'win32',
+    })
+    const out = `${run.stdout || ''}${run.stderr || ''}`.slice(0, 14_000)
+    chunks.push(`${bin} ${argsPy.join(' ')} (exit ${run.status})\n${out || '(no output)'}`)
+  }
   if (!chunks.length && pathList.length) {
     const run = spawnSync(`npx eslint ${pathList.map((p) => JSON.stringify(p)).join(' ')}`, {
       shell: true,
@@ -620,7 +731,7 @@ function readLintsWorkspace(root, args) {
     chunks.push(`eslint ${pathList.join(' ')} (exit ${run.status})\n${out || '(no output)'}`)
   }
   if (!chunks.length) {
-    return { ok: false, text: 'No lint script in package.json and no tsconfig.json — add eslint or TypeScript.' }
+    return { ok: false, text: 'No lint script, tsconfig, or Python files — add eslint, TypeScript, or a .py file.' }
   }
   const ok = !chunks.some((c) => /\(exit [1-9]/.test(c))
   return { ok, text: chunks.join('\n\n') }
@@ -868,6 +979,9 @@ function locateWorkspaceFile(root, rel, prefs) {
       /* try next */
     }
   }
+  if (raw.includes('/')) {
+    return { file: resolvePath(root, raw, prefs), rel: raw }
+  }
   const dirRel = path.posix.dirname(raw)
   const dirs = [dirRel]
   if (dirRel === '.' || dirRel === '') dirs.push('src')
@@ -976,9 +1090,23 @@ async function runDesktopTool(root, name, argsRaw, prefsRaw, ctx = {}) {
   }
 
   if (n === 'git') {
-    const action = String(args.action || args.command || 'status').toLowerCase()
+    const action = String(args.action || args.command || 'status').toLowerCase().replace(/^git\s+/, '')
     if (action === 'commit' && prefs.terminalSandbox === 'strict') {
       return { ok: false, text: 'git commit is blocked in Ask mode. Switch to Agent.' }
+    }
+    if (action === 'push' || action === 'publish') {
+      if (typeof ctx.api !== 'function') {
+        return { ok: false, text: 'Sign in to Soumtok to push to GitHub.' }
+      }
+      const pub = await publishFolderToGithub({
+        folder: root,
+        apiFetch: ctx.api,
+        name: args.name || args.repo || path.basename(root),
+        isPrivate: args.private !== false && args.private !== 'false',
+        message: args.message || args.m || args.commit_message,
+        onOpenGrantUrl: typeof ctx.openExternal === 'function' ? ctx.openExternal : undefined,
+      })
+      return { ok: pub.ok, text: pub.text || (pub.ok ? 'Pushed to GitHub.' : 'Push failed.') }
     }
     return runGitTool(root, args)
   }
@@ -989,7 +1117,8 @@ async function runDesktopTool(root, name, argsRaw, prefsRaw, ctx = {}) {
   }
 
   if (n === 'read_skill' || n === 'readskill') {
-    return readSkillByName(root, args.name || args.skill || args.id)
+    const { readSkillByNameOrCloud } = require('./agentSkills')
+    return readSkillByNameOrCloud(root, args.name || args.skill || args.id, ctx)
   }
 
   if (n === 'browser' || n === 'browser_snapshot' || n === 'screenshot') {
@@ -1029,10 +1158,44 @@ async function runDesktopTool(root, name, argsRaw, prefsRaw, ctx = {}) {
     try {
       located = locateWorkspaceFile(root, relIn, prefs)
     } catch (e) {
-      return { ok: false, text: String(e.message || e) }
+      try {
+        const file = resolveReadablePath(root, relIn, prefs)
+        located = { file, rel: path.basename(relIn.replace(/\\/g, '/')) }
+      } catch {
+        return { ok: false, text: String(e.message || e) }
+      }
     }
     const rel = located.rel
     const file = located.file
+    const kind = classifyFile(rel, '')
+    if (kind !== 'binary' || /\.(pdf|docx?|xlsx?|pptx?|rtf|odt|ods|odp|epub|zip)$/i.test(rel)) {
+      try {
+        const bytes = fs.readFileSync(file)
+        const extracted = await extractFileContent(path.basename(rel), mimeFromExt(path.extname(rel).slice(1)), bytes)
+        if (extracted.text) {
+          const note = extracted.truncated ? '\n…truncated' : ''
+          return {
+            ok: true,
+            text: `${rel} (${String(extracted.kind || kind).toUpperCase()}, ${extracted.text.length} chars)${note}\n${extracted.text.slice(0, 48_000)}`,
+            rel,
+            path: file,
+          }
+        }
+        if (extracted.hint) {
+          return { ok: true, text: `${rel}: ${extracted.hint}`, rel, path: file }
+        }
+        if (kind !== 'text') {
+          return {
+            ok: true,
+            text: `${rel} (${bytes.length} bytes) — no extractable text.${extracted.error ? ` ${extracted.error}` : ''}`,
+            rel,
+            path: file,
+          }
+        }
+      } catch (e) {
+        if (kind !== 'text') return { ok: false, text: `Could not read ${rel}: ${String(e.message || e)}` }
+      }
+    }
     try {
       const body = fs.readFileSync(file, 'utf8')
       const all = body.split('\n')
@@ -1120,15 +1283,19 @@ async function runDesktopTool(root, name, argsRaw, prefsRaw, ctx = {}) {
   }
 
   if (n === 'write') {
-    const rel = String(args.path || args.file || '').replace(/^\/+/, '')
-    const content = String(args.content ?? args.body ?? '')
+    const editArgs = normalizeWorkspaceEditArgs(args)
+    const rel = String(editArgs.path || editArgs.file || '').replace(/^\/+/, '')
+    const content = String(editArgs.content ?? editArgs.body ?? '')
     if (!rel) return { ok: false, text: 'write needs path' }
     if (/^<write\s/i.test(rel) || /<\/write>$/i.test(rel)) {
       return { ok: false, text: 'write path looks like XML markup — use the write tool with a real filename.' }
     }
     let file
+    let storedRel = rel
     try {
-      file = resolvePath(root, rel, prefs)
+      const located = resolveWritePath(root, rel, prefs)
+      file = located.file
+      storedRel = located.rel
     } catch (e) {
       return { ok: false, text: String(e.message || e) }
     }
@@ -1144,12 +1311,13 @@ async function runDesktopTool(root, name, argsRaw, prefsRaw, ctx = {}) {
     fs.mkdirSync(path.dirname(file), { recursive: true })
     fs.writeFileSync(file, content, 'utf8')
     invalidateIndex(root)
-    const out = editToolResult(rel, prev, content)
+    const out = editToolResult(storedRel, prev, content)
     return { ...out, path: file }
   }
 
   if (n === 'diff' || n === 'edit' || n === 'str_replace' || n === 'apply_patch') {
-    const relIn = String(args.path || args.file || '').replace(/^\/+/, '')
+    const editArgs = normalizeWorkspaceEditArgs(args)
+    const relIn = String(editArgs.path || editArgs.file || '').replace(/^\/+/, '')
     if (!relIn) return { ok: false, text: 'diff needs path' }
     let located
     try {
@@ -1165,15 +1333,15 @@ async function runDesktopTool(root, name, argsRaw, prefsRaw, ctx = {}) {
     } catch {
       prev = ''
     }
-    if (!prev && !args.content && !args.body) {
+    if (!prev && !editArgs.content && !editArgs.body) {
       return {
         ok: false,
         text: `Could not apply edit to ${relIn} — file missing. read() the real path (often src/${path.basename(relIn)}) then write() or diff().`,
       }
     }
-    const detailed = applyDiffDetailed(prev, args)
+    const detailed = applyDiffDetailed(prev, editArgs)
     if (!detailed.ok) {
-      const nearest = nearestMatchHint(prev, args.old_string || args.search || args.find || '')
+      const nearest = nearestMatchHint(prev, editArgs.old_string || editArgs.search || editArgs.find || '')
       if (detailed.reason === 'ambiguous') {
         return {
           ok: false,
@@ -1282,6 +1450,20 @@ async function runDesktopTool(root, name, argsRaw, prefsRaw, ctx = {}) {
       }
     }
 
+    if (/^git\s+push\b/i.test(allowed) && typeof ctx.api === 'function') {
+      const pub = await publishFolderToGithub({
+        folder: cwd,
+        apiFetch: ctx.api,
+        name: path.basename(cwd),
+        message: 'Update from Soumtok',
+        onOpenGrantUrl: typeof ctx.openExternal === 'function' ? ctx.openExternal : undefined,
+      })
+      if (typeof ctx.onTerminalMirror === 'function') {
+        ctx.onTerminalMirror({ cwd, command: allowed, output: pub.text || '' })
+      }
+      return { ok: pub.ok, text: pub.text || (pub.ok ? 'Pushed to GitHub.' : 'git push failed.') }
+    }
+
     const integrated = await runViaIntegratedTerminal(ctx, root, allowed, normalized, cwd)
     if (integrated) return integrated
     if (process.platform === 'win32' && isLongRunningTerminalCommand(allowed)) {
@@ -1308,7 +1490,23 @@ async function runDesktopTool(root, name, argsRaw, prefsRaw, ctx = {}) {
 
   if (n === 'github') {
     const action = String(args.action || 'clone').toLowerCase()
-    if (action !== 'clone') return { ok: false, text: 'github supports action=clone.' }
+    if (action === 'publish' || action === 'push') {
+      if (typeof ctx.api !== 'function') {
+        return { ok: false, text: 'Sign in to Soumtok to publish to GitHub.' }
+      }
+      const pub = await publishFolderToGithub({
+        folder: root,
+        apiFetch: ctx.api,
+        name: args.name || args.repo || path.basename(root),
+        isPrivate: args.private !== false && args.private !== 'false',
+        message: args.message || args.commit || args.commit_message,
+        onOpenGrantUrl: typeof ctx.openExternal === 'function' ? ctx.openExternal : undefined,
+      })
+      return { ok: pub.ok, text: pub.text || (pub.ok ? 'Published to GitHub.' : 'Publish failed.') }
+    }
+    if (action !== 'clone') {
+      return { ok: false, text: 'github supports action=clone, publish, or push.' }
+    }
     const repo = String(args.repo || args.url || '').trim()
     if (!repo) return { ok: false, text: 'github clone needs repo (owner/name or https URL).' }
     const url = /^https?:\/\//i.test(repo)
@@ -1342,7 +1540,13 @@ async function runDesktopTool(root, name, argsRaw, prefsRaw, ctx = {}) {
       return { ok: false, text: 'Sign in to Soumtok to generate images (Flux 2 Max via REPLICATE_API_TOKEN).' }
     }
     const parsed = parseStillRequest(prompt)
-    const aspect = normalizeStillAspect(args.aspect || args.aspect_ratio || args.ratio || parsed.aspect)
+    const pathHint = String(args.path || args.file || '').replace(/^\/+/, '')
+    const aspect = normalizeStillAspect(
+      args.aspect ||
+        args.aspect_ratio ||
+        args.ratio ||
+        (parsed.aspect !== DEFAULT_STILL_ASPECT ? parsed.aspect : stillAspectForImageUse(parsed.prompt, pathHint)),
+    )
     const clean = parsed.prompt
     const got = await ctx.generateImage({ prompt: clean, model: args.model, aspect })
     if (!got?.ok) return { ok: false, text: got?.error || 'Image generation failed' }
@@ -1374,7 +1578,7 @@ async function runDesktopTool(root, name, argsRaw, prefsRaw, ctx = {}) {
     if (!rel) return { ok: false, text: 'examine_media needs path' }
     let file
     try {
-      file = resolvePath(root, rel, prefs)
+      file = resolveReadablePath(root, rel, prefs)
     } catch (e) {
       return { ok: false, text: String(e.message || e) }
     }
@@ -1382,12 +1586,41 @@ async function runDesktopTool(root, name, argsRaw, prefsRaw, ctx = {}) {
       try {
         file = locateWorkspaceFile(root, rel, prefs).file
       } catch {
-        return { ok: false, text: `Not found: ${rel}` }
+        try {
+          file = resolveReadablePath(root, path.basename(rel), prefs)
+        } catch {
+          return { ok: false, text: `Not found: ${rel}` }
+        }
       }
     }
     const ext = path.extname(file).slice(1)
+    const fileKind = classifyFile(path.basename(file), mimeFromExt(ext))
+    if (fileKind !== 'image' && fileKind !== 'video') {
+      try {
+        const bytes = fs.readFileSync(file)
+        const extracted = await extractFileContent(path.basename(file), mimeFromExt(ext), bytes)
+        if (extracted.text) {
+          const note = extracted.truncated ? '\n…truncated' : ''
+          return {
+            ok: true,
+            text: `${rel} (${String(extracted.kind || fileKind).toUpperCase()}, ${extracted.text.length} chars)${note}\n${extracted.text.slice(0, 48_000)}`,
+            rel,
+          }
+        }
+        if (extracted.hint) {
+          return { ok: true, text: `${rel}: ${extracted.hint}`, rel }
+        }
+      } catch (e) {
+        return { ok: false, text: `Could not read ${rel}: ${String(e.message || e)}` }
+      }
+    }
     const mime = mimeFromExt(ext)
-    if (!mime) return { ok: false, text: 'examine_media supports images (png/jpg/webp/gif) and videos (mp4/webm/mov).' }
+    if (!mime) {
+      return {
+        ok: false,
+        text: 'examine_media supports images (png/jpg/webp/gif) and videos (mp4/webm/mov). For PDF/DOCX use read() or the ATTACHED DOCUMENTS block.',
+      }
+    }
     const buf = fs.readFileSync(file)
     if (buf.length > 12 * 1024 * 1024) return { ok: false, text: 'File is larger than 12 MB — pick a smaller clip or screenshot.' }
     const base64 = buf.toString('base64')

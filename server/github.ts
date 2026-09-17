@@ -2,7 +2,12 @@ import type { Hono } from 'hono'
 import { mkdtemp, readdir, readFile, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import nodePath from 'node:path'
-import { githubAppInstallUrl } from '../shared/githubApp.ts'
+import {
+  githubAppInstallUrl,
+  githubOAuthConnectionsUrl,
+  resolveGithubGrantReposUrl,
+  type GithubGrantReposKind,
+} from '../shared/githubApp.ts'
 import { isSecretPath } from '../shared/secretsGuard.ts'
 import { pool } from './db.ts'
 import { env } from './env.ts'
@@ -13,6 +18,47 @@ type ReadyFn = (c: { req: { raw: Request } }) => Promise<{
   session: { user: { id: string } } | null
   ready: boolean
 }>
+
+let githubAppInstallAvailable: boolean | null = null
+let githubAppInstallCheckedAt = 0
+const GITHUB_APP_CHECK_TTL_MS = 10 * 60_000
+
+async function probeGithubAppInstall(slug: string) {
+  const key = String(slug || '').trim()
+  if (!key) return false
+  const now = Date.now()
+  if (githubAppInstallAvailable !== null && now - githubAppInstallCheckedAt < GITHUB_APP_CHECK_TTL_MS) {
+    return githubAppInstallAvailable
+  }
+  try {
+    const res = await fetch(githubAppInstallUrl(key), { method: 'GET', redirect: 'manual' })
+    githubAppInstallAvailable = res.status !== 404
+  } catch {
+    githubAppInstallAvailable = false
+  }
+  githubAppInstallCheckedAt = now
+  return githubAppInstallAvailable
+}
+
+async function grantReposLink() {
+  const appOk = await probeGithubAppInstall(env.githubAppSlug)
+  const resolved = resolveGithubGrantReposUrl({
+    appSlug: env.githubAppSlug,
+    clientId: env.githubClientId,
+    appInstallAvailable: appOk,
+  })
+  return resolved
+}
+
+function githubReposPayload(extra: Record<string, unknown> = {}) {
+  return grantReposLink().then(({ url, kind }) => ({
+    installUrl: url,
+    grantReposUrl: url,
+    grantReposKind: kind as GithubGrantReposKind,
+    reconnectUrl: githubOAuthConnectionsUrl(env.githubClientId),
+    ...extra,
+  }))
+}
 
 type GithubRepo = {
   id: number
@@ -192,6 +238,48 @@ export function gitTreeFromFiles(files: Record<string, string>) {
     .filter((item) => item.path && !item.path.split('/').includes('..'))
 }
 
+async function commitEmptyRepoFiles(
+  token: string,
+  repo: string,
+  branch: string,
+  message: string,
+  tree: ReturnType<typeof gitTreeFromFiles>,
+) {
+  const made = await githubJson<{ sha?: string; message?: string }>(`https://api.github.com/repos/${repo}/git/trees`, token, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tree }),
+  })
+  if (!made.ok || !made.data.sha) throw new Error(made.data.message || 'Could not write the tree')
+  const commit = await githubJson<{ sha?: string; html_url?: string; message?: string }>(
+    `https://api.github.com/repos/${repo}/git/commits`,
+    token,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message: message.trim().slice(0, 200) || 'Initial commit',
+        tree: made.data.sha,
+        parents: [],
+      }),
+    },
+  )
+  if (!commit.ok || !commit.data.sha) throw new Error(commit.data.message || 'Could not create the commit')
+  const created = await githubJson<{ message?: string }>(`https://api.github.com/repos/${repo}/git/refs`, token, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ref: `refs/heads/${branch}`, sha: commit.data.sha }),
+  })
+  if (!created.ok) throw new Error(created.data.message || 'Could not create the branch')
+  return {
+    fullName: repo,
+    branch,
+    sha: commit.data.sha,
+    url: commit.data.html_url || `https://github.com/${repo}/commit/${commit.data.sha}`,
+    count: tree.length,
+  }
+}
+
 export async function commitRepoFiles(
   userId: string,
   fullName: string,
@@ -211,7 +299,10 @@ export async function commitRepoFiles(
     `https://api.github.com/repos/${repo}/git/ref/heads/${encodeURIComponent(base)}`,
     token,
   )
-  if (!ref.ok || !ref.data.object?.sha) throw new Error(ref.data.message || `Could not read ${base}`)
+  if (!ref.ok || !ref.data.object?.sha) {
+    if (opts?.newBranch) throw new Error(ref.data.message || `Could not read ${base}`)
+    return commitEmptyRepoFiles(token, repo, base, message, tree)
+  }
   const parent = ref.data.object.sha
   const head = await githubJson<{ tree?: { sha?: string }; message?: string }>(
     `https://api.github.com/repos/${repo}/git/commits/${parent}`,
@@ -403,6 +494,19 @@ async function contentsApiSnapshot(token: string, repo: string) {
 }
 
 export function registerGithub(app: Hono, requireReadyUser: ReadyFn) {
+  app.get('/api/github/grant', async (c) => {
+    const { session, ready } = await requireReadyUser(c)
+    const origin = env.betterAuthUrl.replace(/\/$/, '')
+    if (!session) {
+      return c.redirect(`${origin}/dashboard/integrations`, 302)
+    }
+    if (!ready) {
+      return c.redirect(`${origin}/dashboard/integrations?github=setup`, 302)
+    }
+    const { url } = await grantReposLink()
+    return c.redirect(url, 302)
+  })
+
   app.get('/api/github/repos', async (c) => {
     const { session, ready } = await requireReadyUser(c)
     if (!session || !pool) return c.json({ error: 'Unauthorized' }, 401)
@@ -410,36 +514,36 @@ export function registerGithub(app: Hono, requireReadyUser: ReadyFn) {
 
     const synced = await syncGithubProfile(session.user.id)
     if (!synced.token) {
-      return c.json({
-        connected: false,
-        login: null,
-        repos: [],
-        installUrl: githubAppInstallUrl(env.githubAppSlug),
-        reconnectUrl: `https://github.com/settings/connections/applications/${env.githubClientId}`,
-      })
+      return c.json(
+        await githubReposPayload({
+          connected: false,
+          login: null,
+          repos: [],
+        }),
+      )
     }
 
     if (synced.expired) {
-      return c.json({
-        connected: true,
-        expired: true,
-        login: synced.login,
-        repos: [],
-        installUrl: githubAppInstallUrl(env.githubAppSlug),
-        reconnectUrl: `https://github.com/settings/connections/applications/${env.githubClientId}`,
-      })
+      return c.json(
+        await githubReposPayload({
+          connected: true,
+          expired: true,
+          login: synced.login,
+          repos: [],
+        }),
+      )
     }
 
     const fromUser = await listUserRepos(synced.token)
     if (fromUser.expired) {
-      return c.json({
-        connected: true,
-        expired: true,
-        login: synced.login,
-        repos: [],
-        installUrl: githubAppInstallUrl(env.githubAppSlug),
-        reconnectUrl: `https://github.com/settings/connections/applications/${env.githubClientId}`,
-      })
+      return c.json(
+        await githubReposPayload({
+          connected: true,
+          expired: true,
+          login: synced.login,
+          repos: [],
+        }),
+      )
     }
     const [fromInstall, fromOrgs] = await Promise.all([
       listInstallationRepos(synced.token),
@@ -449,22 +553,23 @@ export function registerGithub(app: Hono, requireReadyUser: ReadyFn) {
       b.updated_at.localeCompare(a.updated_at),
     )
 
-    return c.json({
-      connected: true,
-      expired: false,
-      login: synced.login,
-      repos: repos.map((repo) => ({
-        id: repo.id,
-        name: repo.name,
-        fullName: repo.full_name,
-        private: repo.private,
-        url: repo.html_url,
-        description: repo.description,
-        language: repo.language,
-        updatedAt: repo.updated_at,
-      })),
-      installUrl: githubAppInstallUrl(env.githubAppSlug),
-    })
+    return c.json(
+      await githubReposPayload({
+        connected: true,
+        expired: false,
+        login: synced.login,
+        repos: repos.map((repo) => ({
+          id: repo.id,
+          name: repo.name,
+          fullName: repo.full_name,
+          private: repo.private,
+          url: repo.html_url,
+          description: repo.description,
+          language: repo.language,
+          updatedAt: repo.updated_at,
+        })),
+      }),
+    )
   })
 
   app.get('/api/github/tree', async (c) => {
@@ -504,5 +609,93 @@ export function registerGithub(app: Hono, requireReadyUser: ReadyFn) {
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : 'Could not open a pull request' }, 400)
     }
+  })
+
+  /** Create (or reuse) a GitHub repo for Desktop “Publish to GitHub”. Returns a one-time push URL. */
+  app.post('/api/github/publish-repo', async (c) => {
+    const { session, ready } = await requireReadyUser(c)
+    if (!session || !pool) return c.json({ error: 'Unauthorized' }, 401)
+    if (!ready) return c.json({ error: 'Finish account setup first' }, 403)
+    const body = await c.req.json<{
+      name?: string
+      private?: boolean
+      description?: string
+      message?: string
+      files?: Record<string, string>
+    }>()
+    const name = String(body.name || '')
+      .trim()
+      .replace(/[^a-zA-Z0-9._-]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+    if (!name || name.length < 1) return c.json({ error: 'Pick a repository name.' }, 400)
+
+    const synced = await syncGithubProfile(session.user.id)
+    if (!synced.token) {
+      const { url } = await grantReposLink()
+      return c.json({ error: 'Connect GitHub first.', grantUrl: url, needsGithub: true }, 403)
+    }
+    if (synced.expired) {
+      return c.json({ error: 'GitHub sign-in expired. Reconnect in Integrations.', needsGithub: true }, 403)
+    }
+
+    const login = synced.login || ''
+    if (!login) return c.json({ error: 'Could not read your GitHub username.' }, 400)
+
+    let fullName = `${login}/${name}`
+    let htmlUrl = `https://github.com/${fullName}`
+    let created = false
+
+    const existing = await githubJson<GithubRepo | { message?: string }>(
+      `https://api.github.com/repos/${encodeURIComponent(login)}/${encodeURIComponent(name)}`,
+      synced.token,
+    )
+    if (existing.ok && existing.data && 'full_name' in existing.data) {
+      fullName = existing.data.full_name
+      htmlUrl = existing.data.html_url
+    } else {
+      const made = await githubJson<GithubRepo | { message?: string }>('https://api.github.com/user/repos', synced.token, {
+        method: 'POST',
+        body: JSON.stringify({
+          name,
+          private: body.private !== false,
+          description: body.description?.trim() || undefined,
+          auto_init: false,
+        }),
+      })
+      if (!made.ok || !made.data || !('full_name' in made.data)) {
+        const message = (made.data as { message?: string })?.message || 'Could not create repository'
+        return c.json({ error: message }, made.status >= 400 ? made.status : 400)
+      }
+      fullName = made.data.full_name
+      htmlUrl = made.data.html_url
+      created = true
+    }
+
+    const pushUrl = `https://x-access-token:${encodeURIComponent(synced.token)}@github.com/${fullName}.git`
+    const fileBag = body.files && typeof body.files === 'object' ? body.files : null
+    if (fileBag && Object.keys(fileBag).length > 0) {
+      try {
+        const committed = await commitRepoFiles(
+          session.user.id,
+          fullName,
+          body.message || (created ? 'Initial commit from Soumtok' : 'Update from Soumtok'),
+          fileBag,
+        )
+        return c.json({ fullName, htmlUrl, pushUrl, created, login, ...committed, pushed: true })
+      } catch (error) {
+        return c.json(
+          {
+            error: error instanceof Error ? error.message : 'Could not push files',
+            fullName,
+            htmlUrl,
+            pushUrl,
+            created,
+            login,
+          },
+          400,
+        )
+      }
+    }
+    return c.json({ fullName, htmlUrl, pushUrl, created, login })
   })
 }

@@ -185,17 +185,44 @@ try {
   fail('cli --help', err.message)
 }
 
-// 9) Optional live API
+// 9) API key session uses /api/v1/me (not cookie get-session)
+try {
+  const { createApiClient } = await import('../lib/api.mjs')
+  const { loadCredentials, saveCredentials } = await import('../lib/config.mjs')
+  const prevEnvKey = process.env.SOUMTOK_API_KEY
+  const prevCreds = loadCredentials()
+  process.env.SOUMTOK_API_KEY = 'sk-soumtok-test-routing-check'
+  saveCredentials({ apiKey: 'sk-soumtok-test-routing-check', api: 'http://127.0.0.1:9' })
+  const client = createApiClient('http://127.0.0.1:9')
+  let hit = ''
+  const orig = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    hit = String(url)
+    return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401 })
+  }
+  await client.session().catch(() => null)
+  globalThis.fetch = orig
+  saveCredentials(prevCreds)
+  if (prevEnvKey) process.env.SOUMTOK_API_KEY = prevEnvKey
+  else delete process.env.SOUMTOK_API_KEY
+  if (!hit.includes('/api/v1/me')) fail('api key session route', hit || 'no fetch')
+  else ok('api key session uses /api/v1/me')
+} catch (err) {
+  fail('api key session route', err.message)
+}
+
+// 10) Optional live API
 const liveKey = process.env.SOUMTOK_API_KEY?.trim()
+const liveKeyLooksReal = liveKey?.startsWith('sk-soumtok-') && !liveKey.includes('routing-check')
 const liveApi = (process.env.SOUMTOK_API || 'https://soumtok.com').replace(/\/$/, '')
-if (liveKey) {
+if (liveKeyLooksReal) {
   try {
-    const res = await fetch(`${liveApi}/api/auth/get-session`, {
+    const res = await fetch(`${liveApi}/api/v1/me`, {
       headers: { Authorization: `Bearer ${liveKey}`, Accept: 'application/json' },
     })
     const data = await res.json().catch(() => ({}))
-    if (!data?.user) fail('live session', 'no user')
-    else ok(`live session (${data.user.email || data.user.name})`)
+    if (!data?.id) fail('live api key', data.error || 'no user')
+    else ok(`live api key (${data.email || data.name})`)
 
     const models = await fetch(`${liveApi}/api/desktop/models`, {
       headers: { Authorization: `Bearer ${liveKey}`, Accept: 'application/json' },

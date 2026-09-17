@@ -5,6 +5,11 @@ import { createApiClient } from './api.mjs'
 import { brand, c } from './ansi.mjs'
 import { resolveApiBase, saveConfig, saveCredentials } from './config.mjs'
 
+function userFromProbe(data) {
+  if (!data?.id) return null
+  return { id: data.id, email: data.email, name: data.name, ready: data.ready !== false }
+}
+
 function openBrowser(url) {
   const platform = process.platform
   if (platform === 'win32') {
@@ -73,8 +78,14 @@ export async function loginWithApiKeyCommand(key) {
   }
   saveCredentials({ apiKey: trimmed })
   process.env.SOUMTOK_API_KEY = trimmed
-  const user = await createApiClient().session()
-  if (!user) throw new Error('Invalid API key or account not ready')
+  const client = createApiClient()
+  const probe = await client.api('GET', '/api/v1/me')
+  if (probe.status === 401) throw new Error('Invalid API key')
+  const user = userFromProbe(probe.data)
+  if (!user) throw new Error('Could not verify API key — check SOUMTOK_API points at your account host')
+  if (probe.data?.ready === false) {
+    throw new Error('Finish account setup in Dashboard → Settings, then run soumtok login --api-key again')
+  }
   console.log(c.green(`✓ ${user.name || user.email}`))
   console.log(c.dim('API key saved to ~/.soumtok/credentials.json'))
   return user

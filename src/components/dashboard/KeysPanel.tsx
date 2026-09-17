@@ -495,7 +495,9 @@ export function KeysPanel() {
         </div>
         {revealedApiId && revealed && (
           <p className="mt-3 text-[12px] text-white/50">
-            This key is saved. Copy the token now — after Done it will never be shown again.
+            This key is saved. Copy the token now — after Done it will never be shown again. Connect the CLI with{' '}
+            <code className="text-white/70">soumtok login --api-key &lt;key&gt;</code> or set{' '}
+            <code className="text-white/70">SOUMTOK_API_KEY</code>.
           </p>
         )}
         {addingApi || apiKeys.length > 0 ? (

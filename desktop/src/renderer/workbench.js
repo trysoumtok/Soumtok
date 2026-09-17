@@ -1,8 +1,30 @@
 const api = window.soumtok
+const parseAgentChoices = (text) => window.SOUMTOK_AGENT_CHOICES?.parseAgentChoices(text) ?? null
+const stripNumberedListForChoices = (text, choices) =>
+  window.SOUMTOK_AGENT_CHOICES?.stripNumberedListForChoices(text, choices) ?? text
 const DEV_SNAPSHOT = 'soumtok-ide-dev'
+const EXT_DOCK_KEY = 'soumtok-ext-dock'
+const AGENT_THREADS_BACKUP_PREFIX = 'soumtok-agent-threads-v1'
 const EXT_MARKET_FILTER_KEY = 'soumtok-ext-market-filter'
+const EXT_INSTALL_UNAVAILABLE_MSG =
+  'Extension installs are under development — we are facing a few things right now and will be back soon.'
 const SKIP_WIN = navigator.platform.startsWith('Mac')
 if (SKIP_WIN) document.querySelectorAll('[data-win]').forEach((btn) => { btn.hidden = true })
+
+function syncWinMaxIcon(maximized) {
+  const btn = document.querySelector('[data-win="max"]')
+  if (!btn || SKIP_WIN) return
+  btn.classList.toggle('is-restored', !!maximized)
+  const label = maximized ? 'Restore' : 'Maximize'
+  btn.title = label
+  btn.setAttribute('aria-label', label)
+}
+
+function bindWindowChrome() {
+  if (SKIP_WIN) return
+  api.isWindowMaximized?.().then(syncWinMaxIcon).catch(() => {})
+  api.onWindowMaxChanged?.(syncWinMaxIcon)
+}
 
 const MODEL_CATALOG = window.SOUMTOK_MODEL_CATALOG || { MODELS: [], RECOMMENDED_MODEL_IDS: [] }
 /** Always available in the renderer — desktop never shows an empty model list. */
@@ -149,6 +171,23 @@ const state = {
   settingsDeployLinks: [],
   settingsDeployLinksLoading: false,
   settingsDeployLinksError: '',
+  userSkills: [],
+  pluginsCatalog: [],
+  installedPlugins: [],
+  settingsSkillsLoading: false,
+  settingsSkillsError: '',
+  settingsSkillsStatus: '',
+  settingsConnectLink: '',
+  settingsConnectCode: '',
+  settingsConnectPluginId: '',
+  settingsSkillsSubview: 'marketplace',
+  settingsSkillsSearch: '',
+  settingsSkillsCustomMcpOpen: false,
+  pluginInstallBusy: '',
+  agentSkillsPickerOpen: false,
+  agentSkillsPickerSearch: '',
+  localAgentSkills: [],
+  localAgentSkillsLoading: false,
   connectorsMarket: null,
   connectorsMine: [],
   connectorsStatus: '',
@@ -159,6 +198,8 @@ const state = {
   profile: null,
   avatarDataUrl: '',
   avatarUploadBusy: false,
+  avatarUploadProgress: 0,
+  avatarUploadStage: '',
   testHubAgentWasOff: null,
   testHubSidebarWasOff: null,
   platformProviders: [],
@@ -177,6 +218,8 @@ const state = {
   agentAvatarState: 'idle',
   agentLiveFile: null,
   agentReview: null,
+  agentBgTerminals: [],
+  agentCanvas: null,
   windowLayout: 'editor',
   expandedDirs: new Set(),
   gitSnapshot: null,
@@ -221,7 +264,7 @@ const DEFAULT_AGENT_PREFS = {
   autoFormatOnFinish: true,
   legacyTerminal: false,
   toolbarOnSelection: true,
-  intelligence: 'max',
+  intelligence: 'balanced',
   thinkFirst: true,
   browserVerify: true,
   skillsEnabled: true,
@@ -303,8 +346,20 @@ function settingsNavIcon(id) {
       <path d="M14 11a5 5 0 0 0-7.54-.54L5.04 11.9a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
       <circle cx="7" cy="7" r="2"/>
     </svg>`,
+    skills: `<svg class="settings-nav-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+      <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+      <path d="M8 7h8M8 11h8"/>
+    </svg>`,
   }
   return icons[id] || icons.general
+}
+
+function prettySkillSize(bytes) {
+  const n = Number(bytes) || 0
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`
 }
 
 function keyForProvider(id) {
@@ -654,16 +709,26 @@ function toggleModelEnabled(id, on) {
   refreshModelPickerList()
 }
 
+async function ensureLanguageHostRunning() {
+  try {
+    await api.extensionHostStart?.({
+      usePlatformWorkspace: !state.folder,
+      workspace: state.folder || undefined,
+    })
+  } catch {
+    /* host starts on demand when an app panel opens */
+  }
+}
+
 async function activateInstalledExtensionsQuiet(options = {}) {
   try {
     await refreshExtensionActivityBar()
+    await ensureLanguageHostRunning()
     const pub = options.publisher
     const name = options.name
     if (pub && name) {
-      await openInstalledExtensionInHost(pub, name)
-    } else if (options.openFirst && state.extensionActivity.length) {
-      const item = state.extensionActivity[0]
-      if (item) await openExtensionHostEditor(item)
+      const item = findExtensionActivityItem(extensionId(pub, name))
+      if (item) return
     }
   } catch {
     /* ignore */
@@ -707,6 +772,7 @@ function cancelExtensionHostIdleStop() {
 }
 
 function scheduleExtensionHostIdleStop() {
+  if (shouldKeepExtensionHost()) return
   cancelExtensionHostIdleStop()
   extHostStopTimer = setTimeout(() => {
     extHostStopTimer = null
@@ -733,6 +799,17 @@ function triggerExtensionOpenCommand() {
 }
 
 async function refreshExtensionActivityBar() {
+  try {
+    const res = await api.extensionsInstalled?.()
+    if (res?.ok && Array.isArray(res.extensions)) {
+      state.installedExtById = new Map(
+        res.extensions.map((e) => [extensionId(e.publisher, e.name), { ...e, installPath: e.path }]),
+      )
+      state.installedExtCacheAt = Date.now()
+    }
+  } catch {
+    /* ignore */
+  }
   const anchor = document.querySelector('#activity .act-spacer')
   if (!anchor) return
   document.querySelectorAll('#activity .act-ext').forEach((el) => el.remove())
@@ -754,7 +831,8 @@ async function refreshExtensionActivityBar() {
     btn.dataset.extId = item.extensionId
     btn.title = item.title || item.displayName || item.extensionId
     if (item.iconUrl) {
-      btn.innerHTML = `<img class="act-ext-icon" src="${escapeAttr(item.iconUrl)}" alt="" />`
+      const mono = platformIconNeedsMono(item.iconUrl) ? ' act-ext-icon-mono' : ''
+      btn.innerHTML = `<span class="act-ext-icon-wrap"><img class="act-ext-icon${mono}" src="${escapeAttr(item.iconUrl)}" alt="" referrerpolicy="no-referrer" decoding="async" /></span>`
     } else {
       btn.innerHTML = `<span class="act-ext-letter" aria-hidden="true">${escapeHtml((item.title || '?').charAt(0))}</span>`
     }
@@ -791,6 +869,7 @@ function extensionDockState() {
       uiReady: false,
       error: '',
       embeddedUrl: '',
+      progress: '',
     }
   }
   return state.extDock
@@ -803,9 +882,16 @@ function clearExtensionDockReadyTimer() {
   }
 }
 
+function extensionDockLabel(item) {
+  const raw = String(item?.displayName || item?.title || '').trim()
+  if (!raw || /^%[\w.-]+%$/.test(raw)) return item?.name || 'Extension'
+  return raw
+}
+
 function extensionDockLoaderLabel() {
   const dock = extensionDockState()
-  const name = dock.item?.displayName || dock.item?.title || 'Extension'
+  if (dock.progress) return dock.progress
+  const name = extensionDockLabel(dock.item)
   return dock.loading ? `Starting ${name}…` : `Loading ${name}…`
 }
 
@@ -834,7 +920,10 @@ function unmountExtensionDockLoader() {
 
 function markExtensionDockUiReady() {
   const dock = extensionDockState()
-  if (dock.uiReady) return
+  if (dock.uiReady) {
+    void syncExtensionHostViewBoundsNow()
+    return
+  }
   dock.uiReady = true
   dock.booting = false
   clearExtensionDockReadyTimer()
@@ -844,14 +933,22 @@ function markExtensionDockUiReady() {
     body.classList.add('ext-dock-embedded')
     body.innerHTML = ''
   }
-  void syncExtensionHostViewBounds()
+  void syncExtensionHostViewBoundsNow()
+  requestAnimationFrame(() => void syncExtensionHostViewBoundsNow())
+  setTimeout(() => void syncExtensionHostViewBoundsNow(), 280)
+  setTimeout(() => void syncExtensionHostViewBoundsNow(), 900)
 }
 
-function scheduleExtensionDockReadyFallback(ms = 35_000) {
+function scheduleExtensionDockReadyFallback(ms = 45_000) {
   clearExtensionDockReadyTimer()
   extDockReadyTimer = setTimeout(() => {
     extDockReadyTimer = null
-    if (extensionDockOpen() && extensionDockState().booting) markExtensionDockUiReady()
+    const dock = extensionDockState()
+    if (!extensionDockOpen() || !dock.booting) return
+    dock.error = `Could not open ${extensionDockLabel(dock.item)}. Close the panel and open it again.`
+    dock.booting = false
+    dock.embeddedUrl = ''
+    paintExtensionDock()
   }, ms)
 }
 
@@ -859,35 +956,92 @@ function extensionDockOpen() {
   return document.body.classList.contains('extdock-on')
 }
 
+function serializeExtDockItem(item) {
+  if (!item) return null
+  const extensionId = item.extensionId || item.id
+  if (!extensionId) return null
+  return {
+    extensionId,
+    publisher: item.publisher || '',
+    name: item.name || '',
+    displayName: item.displayName || item.title || '',
+    title: item.title || item.displayName || '',
+    openCommand: item.openCommand || '',
+    embedSurface: item.embedSurface || '',
+    containerId: item.containerId || '',
+  }
+}
+
+function persistExtDock() {
+  try {
+    const payload = extensionDockOpen() ? serializeExtDockItem(state.extDock?.item) : null
+    if (!payload) localStorage.removeItem(EXT_DOCK_KEY)
+    else localStorage.setItem(EXT_DOCK_KEY, JSON.stringify(payload))
+  } catch {
+    /* private mode */
+  }
+}
+
+function readPersistedExtDock() {
+  try {
+    const raw = localStorage.getItem(EXT_DOCK_KEY)
+    return raw ? JSON.parse(raw) : null
+  } catch {
+    return null
+  }
+}
+
+async function restoreExtDock(saved = readPersistedExtDock()) {
+  const item = saved?.item || saved
+  if (!item?.extensionId) return
+  cancelExtensionHostIdleStop()
+  await refreshExtensionActivityBar()
+  const live = findExtensionActivityItem(item.extensionId)
+  await openExtensionHostEditor(live || item)
+}
+
 async function openExtensionHostEditor(item) {
+  if (!item) return
+  const nextId = item.extensionId || item.id
+  if (extensionDockOpen() && state.extDock?.item?.extensionId === nextId && state.extDock?.uiReady && !state.extDock?.error) {
+    persistExtDock()
+    void syncExtensionHostViewBoundsNow()
+    return
+  }
   cancelExtensionHostIdleStop()
   enterWorkbench({ allowNoFolder: true })
   const dock = extensionDockState()
-  const label = item?.displayName || item?.title || 'Extension'
+  const label = extensionDockLabel(item)
   dock.item = item || dock.item
   dock.error = ''
+  dock.progress = ''
   dock.uiReady = false
   dock.booting = false
   document.body.classList.add('extdock-on')
+  persistExtDock()
   applyLayout()
 
-  const status = await api.extensionHostStatus?.().catch(() => null)
-  if (dock.url && status?.running) {
-    dock.loading = false
-    dock.booting = true
-    dock.embeddedUrl = ''
-    paintExtensionDock()
-    return
+  const startPayload = {
+    usePlatformWorkspace: !state.folder,
+    workspace: state.folder || undefined,
+    publisher: item?.publisher,
+    name: item?.name,
+    extensionId: item?.extensionId || item?.id,
+    openCommand: item?.openCommand || '',
+    embedSurface: item?.embedSurface || '',
+    containerId: item?.containerId || '',
   }
 
   dock.loading = true
-  dock.url = ''
+  dock.url = dock.url || ''
   dock.embeddedUrl = ''
+  dock.uiReady = false
   paintExtensionDock()
   try {
-    const out = await api.extensionHostStart?.({ usePlatformWorkspace: true })
+    const out = await api.extensionHostStart?.(startPayload)
     if (!out?.ok) {
       dock.loading = false
+      dock.progress = ''
       dock.error = out?.error || `Could not open ${label}`
       paintExtensionDock()
       appendPanelOutput(`[extensions] ${dock.error}\n`)
@@ -895,11 +1049,13 @@ async function openExtensionHostEditor(item) {
     }
     dock.url = out.url
     dock.loading = false
+    dock.progress = ''
     dock.booting = true
     dock.embeddedUrl = ''
     paintExtensionDock()
   } catch (err) {
     dock.loading = false
+    dock.progress = ''
     dock.error = err?.message || `Could not open ${label}`
     paintExtensionDock()
     appendPanelOutput(`[extensions] ${dock.error}\n`)
@@ -911,7 +1067,7 @@ function paintExtensionDock() {
   const body = $('ext-dock-body')
   const title = $('ext-dock-title')
   if (!body || !title) return
-  title.textContent = dock.item?.displayName || dock.item?.title || 'Extension'
+  title.textContent = extensionDockLabel(dock.item)
   if (dock.error) {
     clearExtensionDockReadyTimer()
     unmountExtensionDockLoader()
@@ -920,7 +1076,7 @@ function paintExtensionDock() {
     dock.booting = false
     dock.uiReady = false
     void hideExtensionHostViewIfNeeded()
-    body.innerHTML = `<div><p class="git-scm-muted">${escapeHtml(dock.error)}</p><button type="button" class="ext-activity-open" id="ext-dock-retry">Retry</button></div>`
+    body.innerHTML = `<div class="ext-dock-error"><pre class="ext-dock-error-msg">${escapeHtml(dock.error)}</pre><button type="button" class="ext-activity-open" id="ext-dock-retry">Retry</button></div>`
     $('ext-dock-retry')?.addEventListener('click', () => void openExtensionHostEditor(dock.item))
     return
   }
@@ -932,8 +1088,7 @@ function paintExtensionDock() {
     return
   }
   if (dock.embeddedUrl === dock.url) {
-    if (dock.booting) void hideExtensionHostViewIfNeeded()
-    else void syncExtensionHostViewBounds()
+    void syncExtensionHostViewBounds()
     return
   }
   dock.embeddedUrl = dock.url
@@ -944,6 +1099,8 @@ function paintExtensionDock() {
       extensionId: dock.item?.extensionId,
       openCommand: dock.item?.openCommand,
       title: dock.item?.displayName || dock.item?.title,
+      embedSurface: dock.item?.embedSurface,
+      containerId: dock.item?.containerId,
     })
     if (!embed?.ok) {
       dock.embeddedUrl = ''
@@ -952,16 +1109,13 @@ function paintExtensionDock() {
       paintExtensionDock()
       return
     }
-    void hideExtensionHostViewIfNeeded()
-    requestAnimationFrame(() => {
-      void hideExtensionHostViewIfNeeded()
-      setTimeout(() => void hideExtensionHostViewIfNeeded(), 120)
-    })
+    void syncExtensionHostViewBoundsNow()
   })()
 }
 
 function closeExtensionDock() {
   document.body.classList.remove('extdock-on')
+  persistExtDock()
   clearExtensionDockReadyTimer()
   unmountExtensionDockLoader()
   const dock = extensionDockState()
@@ -988,7 +1142,13 @@ function extensionHostViewActive() {
   return Boolean(extensionHostEmbedActive() && dock?.uiReady)
 }
 
+function shouldKeepExtensionHost() {
+  if (extensionDockOpen() || extensionDockState().booting) return true
+  return Boolean(readPersistedExtDock()?.extensionId)
+}
+
 async function hideExtensionHostViewIfNeeded() {
+  if (shouldKeepExtensionHost()) return
   try {
     await api.extensionHostHide?.()
   } catch {
@@ -998,6 +1158,7 @@ async function hideExtensionHostViewIfNeeded() {
 
 async function syncExtensionHostViewBoundsNow() {
   if (!extensionHostEmbedActive()) {
+    if (shouldKeepExtensionHost()) return
     await hideExtensionHostViewIfNeeded()
     scheduleExtensionHostIdleStop()
     return
@@ -1005,11 +1166,17 @@ async function syncExtensionHostViewBoundsNow() {
   cancelExtensionHostIdleStop()
   const body = $('ext-dock-body')
   if (!body || typeof api.extensionHostLayout !== 'function') return
-  const r = body.getBoundingClientRect()
   if (!extensionHostViewActive()) {
-    await hideExtensionHostViewIfNeeded()
+    const r = body.getBoundingClientRect()
+    await api.extensionHostLayout({
+      x: -4800,
+      y: 0,
+      width: Math.max(480, Math.round(r.width) || 480),
+      height: Math.max(720, Math.round(r.height) || 720),
+    })
     return
   }
+  const r = body.getBoundingClientRect()
   await api.extensionHostLayout({
     x: r.left,
     y: r.top,
@@ -1035,7 +1202,10 @@ function paintExtensionContributionSide(extensionId) {
     return
   }
   const icon = item.iconUrl
-    ? `<img class="ext-activity-hero-icon" src="${escapeAttr(item.iconUrl)}" alt="" />`
+    ? (() => {
+        const mono = platformIconNeedsMono(item.iconUrl) ? ' act-ext-icon-mono' : ''
+        return `<span class="act-ext-icon-wrap act-ext-icon-wrap-lg"><img class="ext-activity-hero-icon${mono}" src="${escapeAttr(item.iconUrl)}" alt="" referrerpolicy="no-referrer" decoding="async" /></span>`
+      })()
     : ''
   root.innerHTML = `<div class="side-section ext-activity-section">
     <div class="side-section-head">
@@ -1634,34 +1804,25 @@ function botChatTitle() {
 }
 
 function applyAgentDriverUi() {
-  const bot = state.agentDriver === 'bot'
-  document.body.classList.toggle('driver-bot', bot)
+  document.body.classList.remove('driver-bot')
   syncAccountActivityIndicator()
-  if (bot) {
-    closeSettings()
-    document.body.classList.remove('agent-off')
-    state.threads.forEach((t) => {
-      if (t.title === 'New Agent') t.title = 'New Bot'
-    })
-  } else {
-    state.threads.forEach((t) => {
-      if (t.title === 'New Bot') t.title = 'New Agent'
-    })
-  }
+  state.threads.forEach((t) => {
+    if (t.title === 'New Bot') t.title = 'New Agent'
+  })
   if (document.body.classList.contains('mode-project')) renderAgentPanel()
 }
 
-function persistAgentDriver(next) {
-  state.agentDriver = next === 'bot' ? 'bot' : 'ide'
+function persistAgentDriver(_next) {
+  state.agentDriver = 'ide'
   const t = activeThread()
-  if (t) t.driver = state.agentDriver
+  if (t) t.driver = 'ide'
   try {
-    localStorage.setItem('soumtok-agent-driver', state.agentDriver)
+    localStorage.setItem('soumtok-agent-driver', 'ide')
   } catch {
     /* ignore */
   }
   applyAgentDriverUi()
-  window.dispatchEvent(new CustomEvent('soumtok-agent-driver', { detail: state.agentDriver }))
+  window.dispatchEvent(new CustomEvent('soumtok-agent-driver', { detail: 'ide' }))
 }
 
 function syncAccountActivityIndicator() {
@@ -1697,7 +1858,16 @@ async function loadUserProfile() {
     state.profile = data
     if (data.hasAvatar) {
       const av = await api.fetchAvatarDataUrl?.()
-      state.avatarDataUrl = av?.dataUrl || ''
+      if (av?.dataUrl) {
+        state.avatarDataUrl = av.dataUrl
+      } else if (!state.avatarDataUrl) {
+        state.avatarDataUrl = ''
+        const note = $('settings-avatar-note')
+        if (note && av?.error) {
+          note.textContent = 'Could not load profile photo — try Upload again or refresh after signing in on the web.'
+          note.hidden = false
+        }
+      }
     } else {
       state.avatarDataUrl = ''
     }
@@ -1707,31 +1877,87 @@ async function loadUserProfile() {
   if (state.settingsOpen) renderSettingsScreen()
 }
 
+function avatarUploadProgressLabel() {
+  const pct = state.avatarUploadProgress || 0
+  const stage = state.avatarUploadStage || 'upload'
+  if (stage === 'pick') return 'Choose an image…'
+  if (stage === 'read') return 'Reading file…'
+  if (stage === 'save') return `Saving to your account… ${pct}%`
+  if (stage === 'done') return 'Saved — synced with soumtok.com'
+  return pct > 0 ? `Uploading… ${pct}%` : 'Uploading…'
+}
+
+function paintAvatarUploadProgress() {
+  const wrap = $('settings-avatar-progress')
+  const fill = $('settings-avatar-progress-fill')
+  const label = $('settings-avatar-progress-label')
+  if (!wrap || !fill) return
+  wrap.hidden = !state.avatarUploadBusy
+  fill.style.width = `${Math.max(4, state.avatarUploadProgress || 0)}%`
+  if (label) label.textContent = avatarUploadProgressLabel()
+}
+
 async function uploadProfilePhoto() {
   if (state.avatarUploadBusy) return
   state.avatarUploadBusy = true
+  state.avatarUploadProgress = 0
+  state.avatarUploadStage = 'pick'
   const note = $('settings-avatar-note')
   if (note) {
     note.hidden = true
     note.textContent = ''
+    note.style.color = ''
   }
+  if (state.settingsOpen) {
+    renderSettingsScreen()
+    paintAvatarUploadProgress()
+  }
+  const offProgress = api.onProfileUploadProgress?.((payload) => {
+    if (typeof payload?.percent === 'number') state.avatarUploadProgress = payload.percent
+    if (payload?.stage) state.avatarUploadStage = payload.stage
+    paintAvatarUploadProgress()
+  })
+  let savedOk = false
   try {
     const res = await api.uploadProfileAvatar?.()
     if (res?.cancelled) return
-    if (res?.error) {
+    if (!res?.ok) {
+      const message = res?.error || 'Could not upload photo'
       if (note) {
-        note.textContent = res.error
+        note.textContent = message
         note.hidden = false
       } else {
-        window.alert(res.error)
+        window.alert(message)
       }
       return
     }
+    savedOk = true
     state.profile = { ...(state.profile || {}), hasAvatar: true }
+    if (res?.dataUrl) state.avatarDataUrl = res.dataUrl
+    state.avatarUploadStage = 'done'
+    state.avatarUploadProgress = 100
+    paintAvatarUploadProgress()
+    if (note) {
+      note.textContent = 'Photo saved — same profile on desktop and soumtok.com'
+      note.hidden = false
+      note.style.color = '#3fb950'
+    }
     await loadUserProfile()
   } finally {
-    state.avatarUploadBusy = false
-    if (state.settingsOpen) renderSettingsScreen()
+    offProgress?.()
+    if (savedOk) {
+      window.setTimeout(() => {
+        state.avatarUploadBusy = false
+        state.avatarUploadProgress = 0
+        state.avatarUploadStage = ''
+        if (state.settingsOpen) renderSettingsScreen()
+      }, 2400)
+    } else {
+      state.avatarUploadBusy = false
+      state.avatarUploadProgress = 0
+      state.avatarUploadStage = ''
+      if (state.settingsOpen) renderSettingsScreen()
+    }
   }
 }
 
@@ -1785,6 +2011,7 @@ function saveDevSnapshot() {
         panel: document.querySelector('#panel-bar .panel-tab.on')?.dataset.panel || 'terminal',
         sidebarOff: document.body.classList.contains('sidebar-off'),
         folder: state.folder || null,
+        extDock: serializeExtDockItem(extensionDockOpen() ? state.extDock?.item : null),
         extMarketFilter: (() => {
           try {
             return JSON.parse(localStorage.getItem(EXT_MARKET_FILTER_KEY) || 'null')
@@ -1841,10 +2068,20 @@ async function restoreDevSnapshot(snap) {
     : snapSide === 'account'
       ? 'account'
       : 'files'
-  if (Array.isArray(snap.threads) && snap.threads.length) {
-    state.threads = snap.threads
-    state.activeThreadId = snap.activeThreadId || snap.threads[0].id
+  if (state.folder) {
+    await loadWorkspaceLocal()
+  } else {
+    applyBestThreadHistory({ backup: readAgentThreadsBackup('_home') })
   }
+  if (Array.isArray(snap.threads) && snap.threads.length) {
+    const snapScore = threadHistoryScore(snap.threads)
+    const loadedScore = threadHistoryScore(state.threads)
+    if (snapScore >= loadedScore) {
+      state.threads = snap.threads
+      state.activeThreadId = snap.activeThreadId || snap.threads[0].id
+    }
+  }
+  ensureThreads()
   renderAgentPanel()
   state.tabs = (snap.tabs || []).map(normalizeRestoredTab)
   state.active = snap.active || null
@@ -1871,12 +2108,25 @@ async function restoreDevSnapshot(snap) {
     renderEditor()
   }
   updateStatus()
+  await restoreExtDock(snap.extDock || readPersistedExtDock())
 }
 
 function ensureThreads() {
   if (!state.threads.length) {
     const id = `t${Date.now()}`
-    state.threads = [{ id, title: defaultThreadTitle(), items: [], modelMessages: [], mode: state.agentMode, driver: state.agentDriver, model: state.agentModel }]
+    state.threads = [{
+      id,
+      title: defaultThreadTitle(),
+      items: [],
+      modelMessages: [],
+      attachedSkills: [],
+      attachedPluginSkills: [],
+      attachedLocalSkills: [],
+      attachedManualSkills: [],
+      mode: state.agentMode,
+      driver: state.agentDriver,
+      model: state.agentModel,
+    }]
     state.activeThreadId = id
   }
 }
@@ -1956,6 +2206,10 @@ function newAgentThread() {
     title: defaultThreadTitle(),
     items: [],
     modelMessages: [],
+    attachedSkills: [],
+    attachedPluginSkills: [],
+    attachedLocalSkills: [],
+    attachedManualSkills: [],
     mode: state.agentMode || 'agent',
     driver: state.agentDriver,
     model: state.agentModel || 'auto',
@@ -1963,6 +2217,7 @@ function newAgentThread() {
     updatedAt: now,
   })
   state.activeThreadId = id
+  clearAgentComposerAttachments()
   closeAgentToolbarPopovers()
   renderAgentPanel()
   scheduleWorkspaceSave()
@@ -1992,6 +2247,8 @@ function agentBarIcon(name) {
       '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" aria-hidden="true"><rect x="5.5" y="5.5" width="7" height="8" rx="1.1"/><path d="M3.5 10.5V4.2A1.2 1.2 0 0 1 4.7 3h6"/></svg>',
     panel:
       '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" aria-hidden="true"><rect x="2.5" y="3" width="11" height="10" rx="1.2"/><path d="M10 3v10"/></svg>',
+    canvas:
+      '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12.5l8.5-8.5 2 2L5 14.5H3v-2z"/><path d="M9.5 4.5l2 2"/></svg>',
   }
   return icons[name] || ''
 }
@@ -2155,7 +2412,9 @@ function popPickThreads(root) {
       th.archived = false
       touchThreadActivity(th)
       closeAgentToolbarPopovers()
+      clearAgentComposerAttachments()
       renderAgentPanel()
+      refreshAgentAttachRow()
       scheduleWorkspaceSave()
     }
   })
@@ -2253,6 +2512,10 @@ function closeAllAgentThreads() {
       title: defaultThreadTitle(),
       items: [],
       modelMessages: [],
+      attachedSkills: [],
+      attachedPluginSkills: [],
+      attachedLocalSkills: [],
+      attachedManualSkills: [],
       mode: state.agentMode,
       driver: state.agentDriver,
       model: state.agentModel,
@@ -2924,12 +3187,8 @@ async function boot() {
     })
   })
   try {
-    const savedDriver = localStorage.getItem('soumtok-agent-driver')
-    if (savedDriver === 'ide') state.agentDriver = 'ide'
-    else if (savedDriver === 'bot') {
-      state.agentDriver = 'ide'
-      localStorage.setItem('soumtok-agent-driver', 'ide')
-    }
+    state.agentDriver = 'ide'
+    localStorage.setItem('soumtok-agent-driver', 'ide')
     state.agentModelFast = localStorage.getItem('soumtok-agent-model-fast') === '1'
     state.agentPreviewEditors = localStorage.getItem('soumtok-agent-preview-editors') !== '0'
     state.subagentModel = localStorage.getItem('soumtok-subagent-model') || 'auto'
@@ -2951,11 +3210,10 @@ async function boot() {
   } catch {
     /* ignore */
   }
-  window.addEventListener('soumtok-agent-driver', (event) => {
-    const next = event.detail === 'bot' ? 'bot' : 'ide'
-    state.agentDriver = next
+  window.addEventListener('soumtok-agent-driver', () => {
+    state.agentDriver = 'ide'
     const t = activeThread()
-    if (t) t.driver = next
+    if (t) t.driver = 'ide'
     applyAgentDriverUi()
     if (state.side === 'account') renderSide()
   })
@@ -2970,7 +3228,12 @@ async function boot() {
     appendPanelOutput,
     updateStatus,
   }
-  window.__soumtokOpenExtensionLsp = (item) => openExtensionHostEditor(item)
+  window.__soumtokOpenExtensionLsp = (item) => {
+    const id = String(item?.extensionId || item?.id || '').toLowerCase()
+    const activity = typeof findExtensionActivityItem === 'function' ? findExtensionActivityItem(id) : null
+    if (activity) return openExtensionHostEditor(activity)
+    return ensureLanguageHostRunning()
+  }
   bindLayoutResize()
   window.addEventListener('resize', () => applyLayout())
   offAgentEvent?.()
@@ -2994,16 +3257,44 @@ async function boot() {
     void refreshExtensionActivityBar()
     if (state.side === 'extensions') renderSide()
   })
+  api.onConnectorsUpdated?.(() => {
+    void refreshConnectorsMine()
+    if (state.side === 'connectors') void paintConnectorsPanel()
+    if (state.settingsOpen && state.settingsTab === 'connectors') void paintConnectorsMarketplace()
+    if (state.settingsOpen && state.settingsTab === 'skills') {
+      renderSettingsScreen()
+      bindSettingsScreen()
+    }
+  })
   api.onExtensionHostUiReady?.(() => markExtensionDockUiReady())
+  api.onExtensionHostDownloadProgress?.((data) => {
+    const dock = extensionDockState()
+    if (!extensionDockOpen()) return
+    dock.progress = String(data?.message || '').trim()
+    if (dock.progress) {
+      dock.loading = true
+      dock.error = ''
+      const msg = $('ext-dock-loader-msg')
+      if (msg) msg.textContent = dock.progress
+      paintExtensionDock()
+    }
+  })
   api.onTermRunRequest?.((payload) => {
+    const cmd = String(typeof payload === 'string' ? payload : payload?.command || '').trim()
+    if (cmd) {
+      const label = cmd.length > 52 ? `${cmd.slice(0, 50)}…` : cmd
+      state.agentBgTerminals.unshift({ command: cmd, label, at: Date.now() })
+      state.agentBgTerminals = state.agentBgTerminals.slice(0, 8)
+      paintAgentBgTerminals()
+    }
     void runAgentTerminalCommand(payload)
   })
   api.onTermMirror?.((payload) => {
     void mirrorAgentTerminalOutput(payload)
   })
   window.addEventListener('beforeunload', () => {
-    saveDevSnapshot()
-    flushWorkspaceSave()
+    persistExtDock()
+    flushWorkspaceSaveSync()
   })
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible' && pendingLoginId) void tryPollLogin()
@@ -3069,6 +3360,7 @@ async function boot() {
   } finally {
     finishAuthBoot()
   }
+  if (state.user && !extensionDockOpen()) void restoreExtDock()
   if (state.user) await syncModelCatalogForSession()
   else void loadAgentModels()
   await loadMonaco()
@@ -3309,8 +3601,14 @@ function bind() {
     })
   }
   document.querySelectorAll('[data-win]').forEach((btn) => {
-    btn.onclick = () => api.window(btn.dataset.win)
+    btn.onclick = async () => {
+      await api.window(btn.dataset.win)
+      if (btn.dataset.win === 'max') {
+        api.isWindowMaximized?.().then(syncWinMaxIcon).catch(() => {})
+      }
+    }
   })
+  bindWindowChrome()
   document.querySelectorAll('[data-cmd]').forEach((btn) => {
     btn.onclick = (event) => {
       event.stopPropagation()
@@ -4091,6 +4389,67 @@ async function runWorkspaceSearch() {
   })
 }
 
+function agentThreadsBackupKey(folderPath) {
+  const user = state.user?.id || state.user?.email || 'anon'
+  const folder = folderPath || state.folder || '_home'
+  return `${AGENT_THREADS_BACKUP_PREFIX}:${user}:${normPath(folder).toLowerCase()}`
+}
+
+function threadHistoryScore(threads) {
+  if (!Array.isArray(threads)) return 0
+  return threads.reduce((sum, t) => sum + (Array.isArray(t.items) ? t.items.length : 0), 0)
+}
+
+function readAgentThreadsBackup(folderPath) {
+  try {
+    const raw = localStorage.getItem(agentThreadsBackupKey(folderPath))
+    return raw ? JSON.parse(raw) : null
+  } catch {
+    return null
+  }
+}
+
+function saveAgentThreadsBackup(forFolder) {
+  if (!state.threads.length) return
+  try {
+    localStorage.setItem(
+      agentThreadsBackupKey(forFolder),
+      JSON.stringify({
+        threads: state.threads,
+        activeThreadId: state.activeThreadId,
+        savedAt: Date.now(),
+      }),
+    )
+  } catch {
+    /* private mode / quota */
+  }
+}
+
+function applyBestThreadHistory({ diskThreads, diskActiveId, diskUpdatedAt, backup, legacyMessages }) {
+  /** @type {{ threads: typeof state.threads, activeThreadId: string | null, score: number, updatedAt: number }} */
+  let best = { threads: [], activeThreadId: null, score: 0, updatedAt: 0 }
+  const consider = (threads, activeThreadId, score, updatedAt = 0) => {
+    if (!Array.isArray(threads) || !threads.length) return
+    const at = Number(updatedAt) || 0
+    const weighted = score + at / 1e12
+    const bestWeighted = best.score + best.updatedAt / 1e12
+    if (weighted > bestWeighted) best = { threads, activeThreadId, score, updatedAt: at }
+  }
+  consider(diskThreads, diskActiveId, threadHistoryScore(diskThreads), diskUpdatedAt ? Date.parse(diskUpdatedAt) : 0)
+  consider(backup?.threads, backup?.activeThreadId, threadHistoryScore(backup?.threads), backup?.savedAt || 0)
+  if (legacyMessages?.length) {
+    ensureThreads()
+    const legacyThread = [{ ...activeThread(), items: legacyMessages }]
+    consider(legacyThread, legacyThread[0].id, legacyMessages.length, 0)
+  }
+  if (best.threads.length) {
+    state.threads = best.threads
+    state.activeThreadId = best.activeThreadId || best.threads[0].id
+    return true
+  }
+  return false
+}
+
 async function loadWorkspaceLocal() {
   if (!state.folder) return
   const cache = await api.workspaceLoad()
@@ -4098,13 +4457,14 @@ async function loadWorkspaceLocal() {
     state.workspaceExtraFolders = cache.workspaceExtraFolders.filter(Boolean)
   }
   if (cache.workspaceFilePath) state.workspaceFilePath = cache.workspaceFilePath
-  if (Array.isArray(cache.threads) && cache.threads.length) {
-    state.threads = cache.threads
-    state.activeThreadId = cache.activeThreadId || cache.threads[0].id
-  } else if (Array.isArray(cache.messages) && cache.messages.length) {
-    ensureThreads()
-    activeThread().items = cache.messages
-  }
+  const backup = readAgentThreadsBackup(state.folder)
+  applyBestThreadHistory({
+    diskThreads: cache.threads,
+    diskActiveId: cache.activeThreadId,
+    diskUpdatedAt: cache.updatedAt,
+    backup,
+    legacyMessages: cache.messages,
+  })
   if (Array.isArray(cache.tabs) && cache.tabs.length) {
     state.tabs = cache.tabs.map(normalizeRestoredTab)
     state.active = cache.active || state.tabs[0]?.path || null
@@ -4128,6 +4488,9 @@ async function loadWorkspaceLocal() {
   if (Array.isArray(cache.terminals) && cache.terminals.length) {
     window.SoumtokTerminal?.setRestoreLogs?.(cache.terminals)
   }
+  if (cache.extDock?.extensionId && !extensionDockOpen()) {
+    await restoreExtDock(cache.extDock)
+  }
 }
 
 function workspaceSavePayload() {
@@ -4139,6 +4502,10 @@ function workspaceSavePayload() {
       title: t.title,
       items: t.items,
       modelMessages: t.modelMessages,
+      attachedSkills: t.attachedSkills || [],
+      attachedPluginSkills: t.attachedPluginSkills || [],
+      attachedLocalSkills: t.attachedLocalSkills || [],
+      attachedManualSkills: t.attachedManualSkills || [],
       mode: t.mode,
       model: t.model,
       archived: !!t.archived,
@@ -4150,13 +4517,40 @@ function workspaceSavePayload() {
     side: state.side,
     terminals: window.SoumtokTerminal?.snapshot?.() || [],
     extMarketFilter: loadExtMarketFilter(),
+    extDock: serializeExtDockItem(extensionDockOpen() ? state.extDock?.item : null),
   }
 }
 
 async function flushWorkspaceSave(forFolder) {
   const folder = forFolder || state.folder
-  if (!folder) return
+  if (!folder) {
+    saveAgentThreadsBackup(forFolder || '_home')
+    saveDevSnapshot()
+    return
+  }
+  saveAgentThreadsBackup(folder)
+  saveDevSnapshot()
   await api.workspaceSave({ ...workspaceSavePayload(), path: folder })
+}
+
+function flushWorkspaceSaveSync(forFolder) {
+  if (workspaceSaveTimer) {
+    clearTimeout(workspaceSaveTimer)
+    workspaceSaveTimer = null
+  }
+  const folder = forFolder || state.folder
+  saveAgentThreadsBackup(folder || '_home')
+  saveDevSnapshot()
+  if (!folder) return false
+  try {
+    return api.workspaceSaveSync({ ...workspaceSavePayload(), path: folder })
+  } catch {
+    return false
+  }
+}
+
+if (typeof window !== 'undefined') {
+  window.__soumtokFlushWorkspace = () => flushWorkspaceSaveSync()
 }
 
 function resetWorkspaceSessionState() {
@@ -4326,9 +4720,10 @@ async function switchToProject({ pickFolder, nextPath, intent, stayOnSide } = {}
 }
 
 function scheduleWorkspaceSave() {
-  if (!state.folder) return
   if (workspaceSaveTimer) clearTimeout(workspaceSaveTimer)
-  workspaceSaveTimer = setTimeout(flushWorkspaceSave, 400)
+  workspaceSaveTimer = setTimeout(() => {
+    void flushWorkspaceSave()
+  }, 400)
 }
 
 async function reopenLastProjectFolder() {
@@ -4480,6 +4875,9 @@ async function openSignedInWorkspace() {
     renderAgentPanel()
     return
   }
+  applyBestThreadHistory({ backup: readAgentThreadsBackup('_home') })
+  ensureThreads()
+  renderAgentPanel()
   setMode('home')
   await renderRecents()
 }
@@ -4583,13 +4981,6 @@ function enterWorkbench(opts = {}) {
 function openAgentsWindow() {
   if (!requireUser()) return
   enterWorkbench()
-  if (state.agentDriver === 'bot') {
-    document.body.classList.remove('agent-off')
-    applyAgentDriverUi()
-    $('agent-input')?.focus()
-    syncActivityRailHighlight()
-    return
-  }
   document.body.classList.toggle('agent-off')
   if (!document.body.classList.contains('agent-off')) {
     renderAgentPanel()
@@ -4626,6 +5017,12 @@ function openSettingsConnectors() {
   openSettings()
 }
 
+function openSettingsSkills() {
+  state.settingsTab = 'skills'
+  openSettings()
+  void loadSettingsSkills()
+}
+
 function openSettings() {
   if (!requireUser()) return
   void enterWorkbench()
@@ -4647,12 +5044,14 @@ function openSettings() {
   renderSettingsScreen()
   layoutEditor()
   if (state.settingsTab === 'test-hub') void loadSettingsDeployLinks()
+  if (state.settingsTab === 'skills') void loadSettingsSkills()
 }
 
 const SETTINGS_NAV = [
   { id: 'general', label: 'General' },
   { id: 'models', label: 'Models' },
   { id: 'agents', label: 'Agents' },
+  { id: 'skills', label: 'Skills', aliases: ['skill', 'upload', 'playbook', 'custom'] },
   { id: 'keys', label: 'API Keys' },
   { id: 'connectors', label: 'Connectors', aliases: ['mcp', 'marketplace', 'higgsfield', 'plugin'] },
   { id: 'test-hub', label: 'Test Hub', aliases: ['share', 'links', 'publish', 'deploy'] },
@@ -4752,17 +5151,16 @@ function settingsGeneralHtml() {
   const dataPath = state.appInfo?.localData || '…'
   return `<h1 class="settings-title">General</h1>
     ${settingsSection(
-      'Setup & health',
-      `<p class="settings-section-desc">What must be green for Agent, Tab, and Ctrl+K to work on your machine.</p>
-      <div class="settings-card settings-card-pad" id="settings-setup-status"><p class="git-scm-muted">Checking…</p></div>`,
-    )}
-    ${settingsSection(
       'Profile image',
       `<div class="settings-profile-upload">
         <div class="settings-avatar settings-avatar-lg">${settingsAvatarMarkup('settings-avatar')}</div>
         <div class="settings-profile-upload-meta">
           <p class="settings-section-desc">Used in Studio and your account. PNG, JPEG, or WebP up to 6 MB.</p>
           <button type="button" class="settings-row-btn" id="settings-upload-avatar" ${state.avatarUploadBusy ? 'disabled' : ''}>${state.avatarUploadBusy ? 'Uploading…' : 'Upload image'}</button>
+          <div class="settings-avatar-progress" id="settings-avatar-progress" ${state.avatarUploadBusy ? '' : 'hidden'}>
+            <div class="settings-avatar-progress-track" aria-hidden="true"><div class="settings-avatar-progress-fill" id="settings-avatar-progress-fill" style="width:${Math.max(4, state.avatarUploadProgress || 0)}%"></div></div>
+            <p class="settings-footnote settings-avatar-progress-label" id="settings-avatar-progress-label">${escapeHtml(avatarUploadProgressLabel())}</p>
+          </div>
           <p class="settings-footnote settings-avatar-note" id="settings-avatar-note" hidden></p>
         </div>
       </div>`,
@@ -4851,8 +5249,8 @@ function settingsGeneralHtml() {
             </select>`,
           ) +
           settingsPrefSwitch(
-            'Extension host for LSP',
-            'Suggest opening Python, Rust, Go, etc. in the extension host for full language support',
+            'Extension host for languages',
+            'Keep Python, Rust, Go, and other installed language extensions available to the editor and agent',
             'preferExtensionLsp',
           ) +
           settingsRow(
@@ -4924,16 +5322,56 @@ function settingsModelListHtml() {
   return `${rows}${footer}`
 }
 
-function settingsUsageBar(label, hint, pct, detail) {
+function settingsUsageBar(label, hint, pct, detail, opts = {}) {
   const p = Math.min(100, Math.max(0, Number(pct) || 0))
-  return `<div class="settings-usage-block">
+  const locked = Boolean(opts.locked)
+  const tone = opts.tone === 'premium' ? ' premium' : ''
+  return `<div class="settings-usage-block${locked ? ' locked' : ''}">
     <div class="settings-usage-head">
       <div><strong>${escapeHtml(label)}</strong><span>${escapeHtml(hint)}</span></div>
-      <span class="settings-usage-pct">${p}%</span>
+      <span class="settings-usage-pct">${locked ? '—' : `${p}%`}</span>
     </div>
-    <div class="settings-usage-track"><div class="settings-usage-fill" style="width:${p}%"></div></div>
+    <div class="settings-usage-track${tone}"><div class="settings-usage-fill${tone}" style="width:${locked ? 0 : p}%"></div></div>
     <p class="settings-usage-detail">${escapeHtml(detail)}</p>
   </div>`
+}
+
+function isUnpaidPlanId(plan) {
+  return !plan || plan === 'hobby' || plan === 'trial'
+}
+
+function formatPoolUsd(n) {
+  return `$${Number(n || 0).toFixed(2)}`
+}
+
+function settingsPlanKeysBlock(byokAllowed) {
+  const loading = state.providerKeysLoading
+  const rows = DESKTOP_KEY_PROVIDERS.map((p) => {
+    const saved = keyForProvider(p.id)
+    const status = saved ? `Connected ····${escapeHtml(saved.last4 || '****')}` : 'Not set'
+    const disabled = byokAllowed ? '' : ' disabled'
+    const saveDisabled = byokAllowed ? '' : ' disabled aria-disabled="true"'
+    return `<div class="settings-key-block" data-provider="${escapeAttr(p.id)}">
+      <div class="settings-key-head">
+        <strong>${escapeHtml(PROVIDER_NAMES[p.id])}</strong>
+        <span class="settings-key-status ${saved ? 'ok' : ''}">${status}</span>
+      </div>
+      <p class="settings-key-hint">${escapeHtml(p.hint)}</p>
+      <div class="settings-key-row">
+        <input type="password" class="settings-key-input"${disabled} id="settings-key-${escapeAttr(p.id)}" placeholder="${saved ? 'Paste new key to replace' : 'Paste API key'}" autocomplete="off" spellcheck="false" />
+        <button type="button" class="settings-row-btn"${saveDisabled} data-save-key="${escapeAttr(p.id)}">Save</button>
+        ${saved && byokAllowed ? `<button type="button" class="settings-row-btn ghost" data-rm-key="${escapeAttr(p.id)}">Remove</button>` : ''}
+      </div>
+    </div>`
+  }).join('')
+  const gate =
+    byokAllowed ?
+      '<p class="settings-card-note">Tokens bill directly to your provider — not your Soumtok pools. After saving, refresh Models if a row still shows not ready.</p>'
+    : `<div class="settings-plan-gate">
+        <p><strong>Pro plan required.</strong> Add your own OpenAI, Anthropic, DeepSeek, or xAI keys to code at your vendor&apos;s cost — without touching Soumtok pools.</p>
+        <button type="button" class="settings-row-btn primary" id="settings-upgrade-byok">Upgrade to Pro in browser</button>
+      </div>`
+  return `${gate}${loading ? '<p class="settings-footnote">Loading keys…</p>' : ''}<div class="settings-keys-grid">${rows}</div>`
 }
 
 function settingsModelsHtml() {
@@ -5003,28 +5441,11 @@ function settingsModelsHtml() {
 }
 
 function settingsKeysHtml() {
-  const loading = state.providerKeysLoading
-  const rows = DESKTOP_KEY_PROVIDERS.map((p) => {
-    const saved = keyForProvider(p.id)
-    const status = saved ? `Connected ····${escapeHtml(saved.last4 || '****')}` : 'Not set on this account'
-    return `<div class="settings-key-block" data-provider="${escapeAttr(p.id)}">
-      <div class="settings-key-head">
-        <strong>${escapeHtml(PROVIDER_NAMES[p.id])}</strong>
-        <span class="settings-key-status ${saved ? 'ok' : ''}">${status}</span>
-      </div>
-      <p class="settings-key-hint">${escapeHtml(p.hint)}</p>
-      <div class="settings-key-row">
-        <input type="password" class="settings-key-input" id="settings-key-${escapeAttr(p.id)}" placeholder="${saved ? 'Paste new key to replace' : 'Paste API key'}" autocomplete="off" spellcheck="false" />
-        <button type="button" class="settings-row-btn" data-save-key="${escapeAttr(p.id)}">Save</button>
-        ${saved ? `<button type="button" class="settings-row-btn ghost" data-rm-key="${escapeAttr(p.id)}">Remove</button>` : ''}
-      </div>
-    </div>`
-  }).join('')
+  const byokAllowed = Boolean(state.accountSummary?.byokAllowed)
   return `<h1 class="settings-title">API Keys</h1>
-    <p class="settings-page-desc">Add provider keys here in Soumtok Desktop. Keys are stored encrypted on your Soumtok account and unlock models in the agent.</p>
-    ${loading ? '<p class="settings-footnote">Loading keys…</p>' : ''}
-    <div class="settings-keys-grid">${rows}</div>
-    <p class="settings-footnote">After saving, open <strong>Models</strong> and tap Refresh. Platform-routed models still work on Trial when keys are not set.</p>`
+    <p class="settings-page-desc">Add provider keys to code at your vendor&apos;s cost. Keys are stored encrypted on your Soumtok account.</p>
+    <div class="settings-card settings-card-pad">${settingsPlanKeysBlock(byokAllowed)}</div>
+    <p class="settings-footnote">Bring your own keys requires <strong>Pro ($20/mo)</strong> or higher. On Start, use Everyday models on your included pool.</p>`
 }
 
 function settingsAgentsHtml() {
@@ -5165,7 +5586,7 @@ function settingsAgentsHtml() {
       settingsCard(
         settingsPrefSelect(
           'Run mode',
-          'Controls terminal sandbox strictness and file protections (like Cursor Auto-Review)',
+          'Controls terminal sandbox strictness and file protections (Soumtok Auto-Review)',
           'runMode',
           [
             { value: 'ask', label: 'Ask before run — strict sandbox' },
@@ -5231,7 +5652,7 @@ function settingsAgentsHtml() {
       'Tools exposed to the model',
       settingsCard(
         `<div class="settings-tools-list">${toolsHtml}</div>
-        <p class="settings-card-note">Toggles above add or remove tools from the model on the next agent round. Slash skills and full MCP wiring continue to expand on desktop.</p>`,
+        <p class="settings-card-note">Skills live under Settings → Skills. Toggles above control tools on the next run.</p>`,
       ),
     )}`
 }
@@ -5248,17 +5669,27 @@ function settingsPlanHtml() {
       <p class="settings-lead">${escapeHtml(err)}</p>
       <button type="button" class="settings-row-btn" id="settings-reload-plan">Retry</button>`
   }
-  const planName = s?.planLabel || 'Trial'
-  const planPrice = s?.planPrice || 'Free'
+  const unpaid = isUnpaidPlanId(s?.plan)
+  const planName = unpaid ? 'Free — no plan' : s?.planLabel || 'Plan'
+  const planPrice = unpaid ? '' : s?.planPrice || ''
+  const priceHtml = planPrice ? `<span>${escapeHtml(planPrice)}</span>` : ''
   const renewText =
-    s?.planRenewsAt && s?.renewsInDays != null
-      ? `Usage limits reset ${new Date(s.planRenewsAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} (${s.renewsInDays} days left)`
+    !unpaid && s?.planRenewsAt && s?.renewsInDays != null
+      ? `Pools reset ${new Date(s.planRenewsAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} (${s.renewsInDays} days left)`
+      : unpaid ?
+        'Subscribe to Start ($5/mo) to open Everyday models in Studio and Desktop.'
       : 'Usage resets monthly on your billing cycle'
-  const includedDetail = `${formatTokens(s?.includedTokens || 0)} of ${formatTokens(s?.quota || 0)} included tokens this month`
-  const byokDetail =
-    (s?.byokTokens || 0) > 0
-      ? `${formatTokens(s.byokTokens)} tokens on your own API keys (not counted against included)`
-      : 'No usage on your own keys yet this month'
+  const pools = s?.pools || {}
+  const byokAllowed = Boolean(s?.byokAllowed)
+  const hasAdditional = Number(pools.premiumDisplayUsd) > 0
+  const everydayDetail =
+    unpaid ?
+      'Subscribe to Start — $5/mo Everyday pool on DeepSeek Flash, DeepSeek Pro, and GPT-4.1 Mini.'
+    : `${formatPoolUsd(pools.cheapUsedUsd)} of ${formatPoolUsd(pools.cheapDisplayUsd)} used this cycle`
+  const additionalDetail =
+    hasAdditional ?
+      `${formatPoolUsd(pools.premiumUsedUsd)} of ${formatPoolUsd(pools.premiumDisplayUsd)} used this cycle`
+    : 'Upgrade to Pro — separate pool for Opus, GPT-6, Sonnet, and Grok.'
   const upgrade = s?.upgrade
   const topModels =
     s?.topModels?.length ?
@@ -5271,16 +5702,35 @@ function settingsPlanHtml() {
         .join('')}</ul>`
     : '<p class="settings-hint">No model usage yet this month.</p>'
 
+  const usageSection =
+    unpaid ?
+      `<div class="settings-card settings-card-pad">
+        ${settingsUsageBar('Everyday', 'DeepSeek Flash, DeepSeek Pro, GPT-4.1 Mini', 0, everydayDetail, { locked: true })}
+        ${settingsUsageBar('Additional', 'Opus, GPT-6, Sonnet, Grok', 0, 'Available on Pro ($20/mo) and above.', { locked: true, tone: 'premium' })}
+        <button type="button" class="settings-row-btn primary" id="settings-upgrade">Subscribe to Start</button>
+      </div>`
+    : `<div class="settings-card settings-card-pad">
+        ${settingsUsageBar('Everyday', 'DeepSeek Flash, DeepSeek Pro, GPT-4.1 Mini', pools.cheapPct ?? 0, everydayDetail)}
+        ${settingsUsageBar(
+          'Additional',
+          'Opus, GPT-6, Sonnet, Grok',
+          hasAdditional ? pools.premiumPct ?? 0 : 0,
+          additionalDetail,
+          { locked: !hasAdditional, tone: 'premium' },
+        )}
+        ${!hasAdditional ? '<button type="button" class="settings-row-btn" id="settings-upgrade">Upgrade to Pro</button>' : ''}
+      </div>`
+
   return `<h1 class="settings-title">Plan & Usage</h1>
     <p class="settings-page-desc">Live usage for your account in Soumtok Desktop. Billing changes use your browser once — everything else stays here.</p>
     <div class="settings-plan-cards">
       <div class="settings-plan-card">
         <div class="settings-plan-kicker">Current plan</div>
-        <div class="settings-plan-name">${escapeHtml(planName)} <span>${escapeHtml(planPrice)}</span></div>
+        <div class="settings-plan-name">${escapeHtml(planName)} ${priceHtml}</div>
         <p class="settings-section-desc">${escapeHtml(renewText)}</p>
       </div>
       ${
-        upgrade ?
+        upgrade && !unpaid ?
           `<div class="settings-plan-card upgrade">
             <div class="settings-plan-kicker">Upgrade available</div>
             <div class="settings-plan-name">${escapeHtml(upgrade.name)} <span>${escapeHtml(upgrade.price)}</span></div>
@@ -5290,10 +5740,8 @@ function settingsPlanHtml() {
         : ''
       }
     </div>
-    ${settingsSection(
-      `Included in ${planName}`,
-      `<div class="settings-card settings-card-pad">${settingsUsageBar('Soumtok included', 'DeepSeek, OpenAI, Anthropic, Grok on platform routing', s?.includedPct ?? 0, includedDetail)}${settingsUsageBar('Your API keys', 'Tokens billed to your provider when keys are connected', s?.byokPct ?? 0, byokDetail)}</div>`,
-    )}
+    ${settingsSection('Usage pools', usageSection)}
+    ${settingsSection('Your API keys', `<div class="settings-card settings-card-pad">${settingsPlanKeysBlock(byokAllowed)}</div>`)}
     ${settingsSection('This month by model', `<div class="settings-card settings-card-pad settings-card-list">${topModels}</div>`)}
     <p class="settings-footnote">Need invoices or checkout? <button type="button" class="settings-link" id="settings-billing">Billing in browser</button></p>`
 }
@@ -5321,11 +5769,640 @@ function settingsConnectorsHtml() {
 function settingsMainHtml() {
   if (state.settingsTab === 'models') return settingsModelsHtml()
   if (state.settingsTab === 'agents') return settingsAgentsHtml()
+  if (state.settingsTab === 'skills') return settingsSkillsHtml()
   if (state.settingsTab === 'keys') return settingsKeysHtml()
   if (state.settingsTab === 'connectors') return settingsConnectorsHtml()
   if (state.settingsTab === 'plan') return settingsPlanHtml()
   if (state.settingsTab === 'test-hub') return settingsTestHubHtml()
   return settingsGeneralHtml()
+}
+
+async function loadLocalAgentSkills() {
+  state.localAgentSkillsLoading = true
+  try {
+    const res = (await api.agentListLocalSkills?.()) || { skills: [] }
+    state.localAgentSkills = res.skills || []
+  } catch {
+    state.localAgentSkills = []
+  } finally {
+    state.localAgentSkillsLoading = false
+  }
+}
+
+async function loadUserSkills() {
+  if (!state.user) {
+    state.userSkills = []
+    return
+  }
+  try {
+    const res = (await api.skillsList?.()) || { skills: [] }
+    if (res.error && !res.skills?.length) {
+      state.settingsSkillsError = res.error
+      state.userSkills = []
+      return
+    }
+    state.settingsSkillsError = ''
+    state.userSkills = res.skills || []
+  } catch {
+    state.settingsSkillsError = 'Could not load skills'
+    state.userSkills = []
+  }
+}
+
+async function loadPlugins() {
+  if (!state.user) {
+    state.pluginsCatalog = []
+    state.installedPlugins = []
+    return
+  }
+  try {
+    const res = (await api.pluginsList?.()) || { catalog: [], installed: [] }
+    if (res.error && !res.catalog?.length) {
+      if (!state.settingsSkillsError) state.settingsSkillsError = res.error
+      return
+    }
+    state.pluginsCatalog = res.catalog || []
+    state.installedPlugins = res.installed || []
+  } catch {
+    if (!state.settingsSkillsError) state.settingsSkillsError = 'Could not load marketplace'
+  }
+}
+
+async function refreshConnectorsMine() {
+  if (!api.connectorsList) return
+  try {
+    const data = await api.connectorsList()
+    state.connectorsMine = data.connectors || []
+  } catch {
+    /* optional */
+  }
+}
+
+function skillPackLiveStatus(plug) {
+  const meta = catalogPluginById(plug.plugin_id)
+  const mcpUrl = plug.mcp_url || meta?.mcpHint || meta?.mcps?.[0]?.url || null
+  const hasLive = Boolean(mcpUrl || plug.mcps?.length || meta?.mcps?.length)
+  if (!hasLive) return { needsLive: false, connected: true }
+  const saved = findSavedConnector(state.connectorsMine || [], {
+    pluginId: plug.plugin_id,
+    name: plug.name || meta?.name,
+    mcpUrl,
+    id: plug.plugin_id,
+  })
+  return { needsLive: true, connected: Boolean(saved?.connected) }
+}
+
+async function waitForConnectDevice(code, setStatus, timeoutMs = 180000) {
+  const start = Date.now()
+  while (Date.now() - start < timeoutMs) {
+    const data = await api.connectPoll?.(code)
+    if (data?.error && !data?.status) {
+      setStatus(data.error)
+      return null
+    }
+    if (data?.status === 'authorized') return data
+    if (data?.status === 'expired' || data?.status === 'denied') {
+      setStatus(data.status === 'denied' ? 'Sign-in was denied.' : 'Connect link expired — tap Connect again.')
+      return null
+    }
+    setStatus('Finish sign-in in your browser — updating live when OAuth completes…')
+    await sleepMs(1200)
+  }
+  return null
+}
+
+async function connectSkillPack(pluginId, btn) {
+  if (!requireUser() || !pluginId) return
+  const meta = catalogPluginById(pluginId)
+  const plug = installedSkillPlugins().find((row) => row.plugin_id === pluginId)
+  const name = plug?.name || meta?.name || pluginId
+  const label = btn?.textContent
+  if (btn) {
+    btn.disabled = true
+    btn.textContent = 'Connecting…'
+  }
+  const setStatus = (msg) => {
+    state.settingsSkillsStatus = msg
+    if (state.settingsOpen && state.settingsTab === 'skills') {
+      renderSettingsScreen()
+      bindSettingsScreen()
+    }
+  }
+  try {
+    if (!api.connectStart) throw new Error('Restart the desktop app to use Connect from Skills.')
+    if (!state.agentPrefs) loadAgentPrefs()
+    if (state.agentPrefs && !state.agentPrefs.mcpConnectors) setAgentPref('mcpConnectors', true)
+
+    setStatus('Creating secure connect link…')
+    state.settingsConnectLink = ''
+    state.settingsConnectCode = ''
+    state.settingsConnectPluginId = ''
+    const started = await api.connectStart({ pluginId })
+    if (started?.error) throw new Error(started.error)
+    if (!started?.connectorId) throw new Error('Could not save connector')
+    state.settingsConnectLink = started.url || started.verificationUri || ''
+    state.settingsConnectCode = started.code || ''
+    state.settingsConnectPluginId = pluginId
+    setStatus(`Sign in to ${name}, or copy the link below to open on another device.`)
+    const oauth = await api.connectorsOauth({
+      id: started.connectorId,
+      loginUrl: started.loginUrl || meta?.signupUrl || '',
+    })
+    if (!oauth?.openedOauth && !oauth?.noAuth && started.url) {
+      void api.openUrl?.(started.url)
+    }
+    if (oauth?.error && !/already connected|token/i.test(oauth.error)) {
+      throw new Error(oauth.error)
+    }
+
+    if (!oauth?.noAuth && started.code) {
+      setStatus(`Approve ${name} in your browser. Status updates here automatically.`)
+      const ready = await waitForConnectDevice(started.code, setStatus)
+      if (!ready) return
+    }
+
+    setStatus('Activating live tools…')
+    const done = await api.connectorsConnect(started.connectorId)
+    if (done?.error) throw new Error(done.error)
+    const n = done.mcp?.tools?.length
+    state.settingsConnectLink = ''
+    state.settingsConnectCode = ''
+    state.settingsConnectPluginId = ''
+    setStatus(
+      done.connected || n
+        ? `${name} connected${n ? ` · ${n} live tools` : ''}. Attach skills in chat ◆.`
+        : `${name} saved. Tap Connect again if tools are still empty.`,
+    )
+    await loadSettingsSkills()
+  } catch (err) {
+    setStatus(err?.message || 'Connect failed')
+  } finally {
+    if (btn) {
+      btn.disabled = false
+      btn.textContent = label || 'Connect'
+    }
+  }
+}
+
+async function loadSettingsSkills() {
+  state.settingsSkillsLoading = true
+  state.settingsSkillsError = ''
+  renderSettingsScreen()
+  await Promise.all([loadUserSkills(), loadPlugins(), refreshConnectorsMine()])
+  state.settingsSkillsLoading = false
+  renderSettingsScreen()
+  bindSettingsScreen()
+  bindLogoFallback($('settings-screen'))
+}
+
+function catalogPluginById(id) {
+  return (state.pluginsCatalog || []).find((row) => row.id === id) || null
+}
+
+function installedPluginIdsSet() {
+  return new Set((state.installedPlugins || []).map((row) => row.plugin_id))
+}
+
+function filterPluginsCatalog(list) {
+  const q = state.settingsSkillsSearch.trim().toLowerCase()
+  if (!q) return list || []
+  return (list || []).filter(
+    (row) =>
+      row.name.toLowerCase().includes(q) ||
+      String(row.description || '').toLowerCase().includes(q) ||
+      String(row.category || '').toLowerCase().includes(q),
+  )
+}
+
+function enabledInstalledPlugins() {
+  return (state.installedPlugins || []).filter((row) => row.enabled !== false)
+}
+
+/** Skill packs only — MCP-only connectors live under Settings → Connectors. */
+function catalogHasSkills(item) {
+  return Boolean(item && Array.isArray(item.skills) && item.skills.length > 0)
+}
+
+function skillsCatalogOnly(list) {
+  return (list || []).filter(catalogHasSkills)
+}
+
+function installedSkillPlugins() {
+  return enabledInstalledPlugins().filter((plug) => {
+    const meta = catalogPluginById(plug.plugin_id)
+    const skills = plug.skills?.length ? plug.skills : meta?.skills || []
+    return skills.length > 0
+  })
+}
+
+function flattenPluginSkills() {
+  const out = []
+  for (const plug of installedSkillPlugins()) {
+    const meta = catalogPluginById(plug.plugin_id)
+    const skills = plug.skills?.length ? plug.skills : meta?.skills || []
+    for (const skill of skills) {
+      out.push({
+        id: `${plug.plugin_id}:${skill.id}`,
+        skillId: skill.id,
+        pluginId: plug.plugin_id,
+        pluginName: plug.name || meta?.name || plug.plugin_id,
+        label: skill.label || skill.id,
+        description: skill.description || '',
+        insert: skill.insert || `Use the ${skill.label || skill.id} skill from ${plug.name || meta?.name || plug.plugin_id}.\n\n`,
+        sourceUrl: skill.sourceUrl || '',
+      })
+    }
+  }
+  return out
+}
+
+function pluginMarketCardHtml(item) {
+  const installed = installedPluginIdsSet().has(item.id)
+  const skillCount = item.skills?.length || 0
+  const busy = state.pluginInstallBusy === item.id
+  return `<div class="conn-market-block">
+    <div class="conn-market-card skills-market-card">
+      ${marketLogoHtml({ ...item, pluginId: item.id, logo: item.logo })}
+      <div class="conn-meta">
+        <strong>${escapeHtml(item.name)}</strong>
+        <span>${skillCount} skill${skillCount === 1 ? '' : 's'} · GitHub</span>
+      </div>
+      <button type="button" class="conn-btn ${installed ? 'on' : ''}" data-plugin-install="${escapeAttr(item.id)}" ${busy || installed ? 'disabled' : ''}>${busy ? '…' : installed ? 'Added' : 'Add'}</button>
+    </div>
+  </div>`
+}
+
+function settingsSkillsTabsHtml() {
+  const sub = state.settingsSkillsSubview || 'marketplace'
+  return `<div class="settings-skills-tabs" role="tablist">
+    ${[
+      ['marketplace', 'Browse'],
+      ['installed', 'Installed'],
+      ['custom', 'Yours'],
+    ]
+      .map(
+        ([id, label]) =>
+          `<button type="button" class="settings-skills-tab ${sub === id ? 'on' : ''}" data-skills-sub="${id}" role="tab">${escapeHtml(label)}</button>`,
+      )
+      .join('')}
+  </div>`
+}
+
+function settingsSkillsMarketplaceHtml() {
+  const installedIds = installedPluginIdsSet()
+  const catalog = skillsCatalogOnly(filterPluginsCatalog(state.pluginsCatalog || []))
+  const available = catalog.filter((row) => !installedIds.has(row.id))
+  const featured = available.filter((row) => row.featured)
+  const suggested = available.filter((row) => row.suggested && !row.featured)
+  const rest = available.filter((row) => !row.featured && !row.suggested)
+  const sections = []
+  if (featured.length) {
+    sections.push(`<section class="conn-market-section"><h2 class="settings-section-title">Featured</h2><div class="conn-market-grid">${featured.map(pluginMarketCardHtml).join('')}</div></section>`)
+  }
+  if (suggested.length) {
+    sections.push(`<section class="conn-market-section"><h2 class="settings-section-title">Suggested</h2><div class="conn-market-grid">${suggested.map(pluginMarketCardHtml).join('')}</div></section>`)
+  }
+  if (rest.length) {
+    sections.push(`<section class="conn-market-section"><h2 class="settings-section-title">More</h2><div class="conn-market-grid">${rest.map(pluginMarketCardHtml).join('')}</div></section>`)
+  }
+  if (!sections.length) {
+    return '<div class="skills-empty">All skill packs installed.</div>'
+  }
+  return sections.join('')
+}
+
+function settingsSkillsInstalledHtml() {
+  const rows = installedSkillPlugins()
+  if (!rows.length) {
+    return '<div class="skills-empty">No skill packs yet.</div>'
+  }
+  return `<div class="skills-installed-list">${rows
+    .map((plug) => {
+      const meta = catalogPluginById(plug.plugin_id)
+      const skills = plug.skills?.length ? plug.skills : meta?.skills || []
+      const skillList = skills.length
+        ? `<div class="settings-plugin-skills">${skills
+            .slice(0, 10)
+            .map(
+              (skill) =>
+                `<button type="button" class="settings-plugin-skill-link" data-plugin-skill="${escapeAttr(`${plug.plugin_id}:${skill.id}`)}">${escapeHtml(skill.label || skill.id)}</button>`,
+            )
+            .join('')}</div>`
+        : ''
+      const live = skillPackLiveStatus(plug)
+      const liveLine = live.needsLive
+        ? live.connected
+          ? '<span class="skills-live-tag on">Connected</span>'
+          : '<span class="skills-live-tag">Connect for live tools</span>'
+        : ''
+      const connectBtn = live.needsLive
+        ? live.connected
+          ? ''
+          : `<button type="button" class="settings-row-btn primary" data-plugin-connect="${escapeAttr(plug.plugin_id)}">Connect</button>`
+        : ''
+      return `<div class="skills-installed-row" data-plugin-row="${escapeAttr(plug.id)}">
+        <div class="skills-installed-main">
+          ${connectorLogoHtml(plug.plugin_id, plug.name)}
+          <div class="skills-installed-meta">
+            <strong>${escapeHtml(plug.name)}</strong>
+            <span>${skills.length} skill${skills.length === 1 ? '' : 's'}</span>
+            ${liveLine}
+          </div>
+        </div>
+        ${skillList}
+        <div class="skills-installed-actions">
+          ${connectBtn}
+          <button type="button" class="settings-row-btn" data-plugin-uninstall="${escapeAttr(plug.id)}">Remove</button>
+        </div>
+      </div>`
+    })
+    .join('')}</div>`
+}
+
+function settingsSkillsCustomHtml() {
+  const skills = state.userSkills || []
+  let list = ''
+  if (!skills.length) {
+    list = '<div class="skills-empty">No files yet.</div>'
+  } else {
+    list = `<div class="skills-file-list">${skills
+      .map(
+        (skill) => `<div class="skills-file-row" data-skill-id="${escapeAttr(skill.id)}">
+          <div class="skills-file-meta">
+            <strong>${escapeHtml(skill.name || skill.file_name || 'Skill')}</strong>
+            <span>${escapeHtml(prettySkillSize(skill.size))}</span>
+          </div>
+          <div class="skills-file-actions">
+            <button type="button" class="settings-row-btn" data-skill-attach="${escapeAttr(skill.id)}">Use</button>
+            <button type="button" class="settings-row-btn" data-skill-delete="${escapeAttr(skill.id)}">Remove</button>
+          </div>
+        </div>`,
+      )
+      .join('')}</div>`
+  }
+  return `${list}
+    <div class="skills-custom-actions">
+      <button type="button" class="settings-row-btn primary" id="settings-skill-upload">Upload</button>
+    </div>`
+}
+
+function settingsConnectLinkHtml() {
+  const url = state.settingsConnectLink
+  const code = state.settingsConnectCode
+  const pluginId = state.settingsConnectPluginId
+  if (!url) return ''
+  const meta = pluginId ? catalogPluginById(pluginId) : null
+  const logo = pluginId ? connectorLogoHtml(pluginId, meta?.name || pluginId) : ''
+  return `<div class="skills-connect-link-box">
+    ${
+      pluginId
+        ? `<div class="skills-connect-link-head">${logo}<div><strong>${escapeHtml(meta?.name || pluginId)}</strong><span>Connect link</span></div></div>`
+        : '<p class="skills-connect-link-label">Connect link</p>'
+    }
+    <input type="text" class="skills-connect-link-input" id="settings-connect-link" readonly value="${escapeAttr(url)}" />
+    <div class="skills-connect-link-actions">
+      <button type="button" class="settings-row-btn" id="settings-connect-copy-link">Copy link</button>
+      ${code ? `<button type="button" class="settings-row-btn" id="settings-connect-copy-code">Copy code</button>` : ''}
+      <button type="button" class="settings-row-btn primary" id="settings-connect-open-link">Open</button>
+    </div>
+    ${
+      code
+        ? `<p class="skills-connect-link-hint">Enter code <span class="skills-connect-code">${escapeHtml(code)}</span> if asked.</p>`
+        : ''
+    }
+  </div>`
+}
+
+function settingsSkillsHtml() {
+  const loading = state.settingsSkillsLoading
+  const err = state.settingsSkillsError
+  const status = state.settingsSkillsStatus
+  const sub = state.settingsSkillsSubview || 'marketplace'
+  let body = ''
+  if (loading) body = '<div class="skills-empty">Loading…</div>'
+  else if (err && sub !== 'custom') body = `<div class="skills-empty skills-empty-err">${escapeHtml(err)}</div>`
+  else if (sub === 'marketplace') body = settingsSkillsMarketplaceHtml()
+  else if (sub === 'installed') body = settingsSkillsInstalledHtml()
+  else body = settingsSkillsCustomHtml()
+  return `<div class="skills-panel">
+    <h1 class="settings-title">Skills</h1>
+    ${status ? `<p class="skills-status">${escapeHtml(status)}</p>` : ''}
+    ${settingsConnectLinkHtml()}
+    <div class="settings-skills-toolbar">
+      <input type="search" id="settings-skills-search" class="settings-search" placeholder="Search" value="${escapeAttr(state.settingsSkillsSearch)}" autocomplete="off" />
+      ${sub === 'custom' ? '' : `<button type="button" class="settings-row-btn primary settings-skills-add" id="settings-skills-goto-custom" ${sub === 'custom' ? 'hidden' : ''}>Upload</button>`}
+    </div>
+    ${settingsSkillsTabsHtml()}
+    <div class="settings-skills-body">${body}</div>
+  </div>`
+}
+
+async function installMarketplacePlugin(pluginId) {
+  if (!requireUser() || !pluginId) return
+  state.pluginInstallBusy = pluginId
+  state.settingsSkillsStatus = ''
+  renderSettingsScreen()
+  bindSettingsScreen()
+  const res = await api.pluginsInstall?.({ pluginId })
+  state.pluginInstallBusy = ''
+  if (res?.error) {
+    state.settingsSkillsStatus = res.error
+    if (state.agentSkillsPickerOpen) paintAgentSkillsPicker()
+    if (state.settingsOpen) {
+      renderSettingsScreen()
+      bindSettingsScreen()
+    }
+    return
+  }
+  const meta = catalogPluginById(pluginId)
+  const n = meta?.skills?.length || 0
+  const needsSignIn = Boolean(meta?.mcps?.length || meta?.mcpHint)
+  state.settingsSkillsStatus = n
+    ? needsSignIn
+      ? `${meta?.name || 'Skill pack'} installed (${n} skills). Attach in chat ◆, then tap Connect on the Installed tab for live ${meta?.name || 'service'} tools.`
+      : `${meta?.name || 'Skill pack'} installed (${n} skill${n === 1 ? '' : 's'}). Attach from chat ◆.`
+    : `${meta?.name || 'Skill pack'} installed.`
+  state.settingsSkillsSubview = 'installed'
+  await loadPlugins()
+  if (needsSignIn && meta?.id) {
+    state.settingsSkillsStatus = `${meta?.name || 'Service'} installed — opening sign-in for live tools…`
+    if (state.settingsOpen) {
+      renderSettingsScreen()
+      bindSettingsScreen()
+    }
+    await connectSkillPack(meta.id)
+  } else if (state.settingsOpen) {
+    await loadSettingsSkills()
+  }
+  if (state.agentSkillsPickerOpen) paintAgentSkillsPicker()
+}
+
+async function uploadSettingsSkill() {
+  if (!requireUser()) return
+  state.settingsSkillsStatus = ''
+  const res = await api.skillsUpload?.()
+  if (res?.cancelled) return
+  if (res?.error) {
+    state.settingsSkillsStatus = res.error
+    renderSettingsScreen()
+    bindSettingsScreen()
+    return
+  }
+  state.settingsSkillsStatus = res?.skill?.name ? `Saved ${res.skill.name} as a skill.` : 'Skill saved.'
+  await loadSettingsSkills()
+}
+
+function attachSkillToThread(skill) {
+  if (!skill?.id) return
+  const t = activeThread()
+  t.attachedSkills = t.attachedSkills || []
+  if (t.attachedSkills.some((row) => row.id === skill.id)) return
+  t.attachedSkills.push({
+    id: skill.id,
+    name: skill.name,
+    file_name: skill.file_name,
+    excerpt: skill.excerpt,
+  })
+  scheduleWorkspaceSave()
+  refreshAgentAttachRow()
+}
+
+function skillMetaFromAgentText(name, text) {
+  const raw = String(text || '').trim()
+  if (!raw) return null
+  const isSkillName = /skill\.md$/i.test(name) || /\.skill$/i.test(name)
+  const fm = /^---\r?\n([\s\S]*?)\r?\n---/.exec(raw)
+  if (fm) {
+    const meta = {}
+    for (const line of fm[1].split('\n')) {
+      const at = line.indexOf(':')
+      if (at < 0) continue
+      meta[line.slice(0, at).trim()] = line.slice(at + 1).trim().replace(/^["']|["']$/g, '')
+    }
+    if (meta.name || meta.description || isSkillName) {
+      return {
+        name: meta.name || String(name).replace(/\.(md|skill)$/i, ''),
+        description: meta.description || 'Skill document',
+        source: 'file',
+        fileName: name,
+        body: raw,
+      }
+    }
+  }
+  if (isSkillName || /^#\s+skill\b/im.test(raw) || /\bwhen to use\b/i.test(raw.slice(0, 1200))) {
+    return {
+      name: String(name).replace(/\.(md|skill)$/i, ''),
+      description: 'Skill document',
+      source: 'file',
+      fileName: name,
+      body: raw,
+    }
+  }
+  return null
+}
+
+function attachManualSkillToThread(skill) {
+  if (!skill?.name) return
+  const t = activeThread()
+  t.attachedManualSkills = t.attachedManualSkills || []
+  if (t.attachedManualSkills.some((row) => row.name === skill.name && row.fileName === skill.fileName)) return
+  t.attachedManualSkills.push({
+    name: skill.name,
+    description: skill.description || '',
+    source: skill.source || 'file',
+    fileName: skill.fileName || '',
+    body: String(skill.body || '').slice(0, 120_000),
+  })
+  scheduleWorkspaceSave()
+  refreshAgentAttachRow()
+}
+
+function detachManualSkillFromThread(name, fileName = '') {
+  const t = activeThread()
+  if (!Array.isArray(t.attachedManualSkills)) return
+  t.attachedManualSkills = t.attachedManualSkills.filter(
+    (row) => row.name !== name || (fileName && row.fileName !== fileName),
+  )
+  scheduleWorkspaceSave()
+  refreshAgentAttachRow()
+}
+
+function attachLocalSkillToThread(skill) {
+  if (!skill?.name) return
+  const t = activeThread()
+  t.attachedLocalSkills = t.attachedLocalSkills || []
+  if (t.attachedLocalSkills.some((row) => row.name === skill.name)) return
+  t.attachedLocalSkills.push({
+    name: skill.name,
+    description: skill.description || '',
+    source: skill.source || 'local',
+  })
+  scheduleWorkspaceSave()
+  refreshAgentAttachRow()
+}
+
+function detachLocalSkillFromThread(name) {
+  const t = activeThread()
+  if (!Array.isArray(t.attachedLocalSkills)) return
+  t.attachedLocalSkills = t.attachedLocalSkills.filter((row) => row.name !== name)
+  scheduleWorkspaceSave()
+  refreshAgentAttachRow()
+}
+
+function toggleLocalSkillAttachment(skill) {
+  const t = activeThread()
+  const attached = (t.attachedLocalSkills || []).some((row) => row.name === skill.name)
+  if (attached) detachLocalSkillFromThread(skill.name)
+  else attachLocalSkillToThread(skill)
+  paintAgentSkillsPicker()
+}
+
+function detachSkillFromThread(skillId) {
+  const t = activeThread()
+  if (!Array.isArray(t.attachedSkills)) return
+  t.attachedSkills = t.attachedSkills.filter((row) => row.id !== skillId)
+  scheduleWorkspaceSave()
+  refreshAgentAttachRow()
+}
+
+function attachPluginSkillToThread(skill) {
+  if (!skill?.id) return
+  const t = activeThread()
+  t.attachedPluginSkills = t.attachedPluginSkills || []
+  if (t.attachedPluginSkills.some((row) => row.id === skill.id)) return
+  t.attachedPluginSkills.push({ ...skill })
+  scheduleWorkspaceSave()
+  refreshAgentAttachRow()
+}
+
+function togglePluginSkillAttachment(skill) {
+  if (!skill?.id) return
+  const t = activeThread()
+  const attached = (t.attachedPluginSkills || []).some((row) => row.id === skill.id)
+  if (attached) detachPluginSkillFromThread(skill.id)
+  else attachPluginSkillToThread(skill)
+  paintAgentSkillsPicker()
+}
+
+function toggleSkillAttachment(skill) {
+  if (!skill?.id) return
+  const t = activeThread()
+  const attached = (t.attachedSkills || []).some((row) => row.id === skill.id)
+  if (attached) detachSkillFromThread(skill.id)
+  else attachSkillToThread(skill)
+  paintAgentSkillsPicker()
+}
+
+function detachPluginSkillFromThread(skillId) {
+  const t = activeThread()
+  if (!Array.isArray(t.attachedPluginSkills)) return
+  t.attachedPluginSkills = t.attachedPluginSkills.filter((row) => row.id !== skillId)
+  scheduleWorkspaceSave()
+  refreshAgentAttachRow()
+}
+
+function pluginSkillByKey(key) {
+  return flattenPluginSkills().find((row) => row.id === key) || null
 }
 
 function applyWindowLayout(layout) {
@@ -5348,10 +6425,128 @@ function bindSettingsScreen() {
     btn.onclick = () => {
       state.settingsTab = btn.dataset.tab
       if (state.settingsTab === 'test-hub') void loadSettingsDeployLinks()
+      if (state.settingsTab === 'skills') void loadSettingsSkills()
+      if (state.settingsTab === 'plan' || state.settingsTab === 'keys') void loadProviderKeys()
       renderSettingsScreen()
     }
   })
   $('settings-deploy-refresh')?.addEventListener('click', () => void loadSettingsDeployLinks())
+  $('settings-skill-upload')?.addEventListener('click', () => void uploadSettingsSkill())
+  $('settings-skills-goto-custom')?.addEventListener('click', () => {
+    state.settingsSkillsSubview = 'custom'
+    renderSettingsScreen()
+    bindSettingsScreen()
+    void uploadSettingsSkill()
+  })
+  screen.querySelectorAll('[data-skill-delete]').forEach((btn) => {
+    btn.onclick = async () => {
+      const id = btn.getAttribute('data-skill-delete')
+      const skill = state.userSkills.find((row) => row.id === id)
+      if (!id || !window.confirm(`Remove "${skill?.name || 'this skill'}" from your account?`)) return
+      btn.disabled = true
+      const res = await api.skillsRemove?.({ id })
+      btn.disabled = false
+      if (res?.error) {
+        state.settingsSkillsStatus = res.error
+        renderSettingsScreen()
+        bindSettingsScreen()
+        return
+      }
+      state.settingsSkillsStatus = 'Skill removed.'
+      state.threads.forEach((thread) => {
+        if (Array.isArray(thread.attachedSkills)) {
+          thread.attachedSkills = thread.attachedSkills.filter((row) => row.id !== id)
+        }
+      })
+      await loadSettingsSkills()
+    }
+  })
+  screen.querySelectorAll('[data-skill-attach]').forEach((btn) => {
+    btn.onclick = () => {
+      const id = btn.getAttribute('data-skill-attach')
+      const skill = state.userSkills.find((row) => row.id === id)
+      if (!skill) return
+      attachSkillToThread(skill)
+      state.settingsOpen = false
+      document.body.classList.remove('settings-open')
+      renderAgentPanel()
+      state.settingsSkillsStatus = `Attached "${skill.name}" to this chat.`
+    }
+  })
+  $('settings-skills-search')?.addEventListener('input', (e) => {
+    state.settingsSkillsSearch = e.target.value
+    renderSettingsScreen()
+    bindSettingsScreen()
+  })
+  screen.querySelectorAll('[data-skills-sub]').forEach((btn) => {
+    btn.onclick = () => {
+      state.settingsSkillsSubview = btn.getAttribute('data-skills-sub') || 'marketplace'
+      renderSettingsScreen()
+      bindSettingsScreen()
+    }
+  })
+  screen.querySelectorAll('[data-plugin-install]').forEach((btn) => {
+    btn.onclick = () => void installMarketplacePlugin(btn.getAttribute('data-plugin-install'))
+  })
+  screen.querySelectorAll('[data-plugin-uninstall]').forEach((btn) => {
+    btn.onclick = async () => {
+      const id = btn.getAttribute('data-plugin-uninstall')
+      const plug = state.installedPlugins.find((row) => row.id === id)
+      if (!id || !window.confirm(`Remove ${plug?.name || 'this plugin'} and its skills?`)) return
+      btn.disabled = true
+      const res = await api.pluginsRemove?.({ id })
+      btn.disabled = false
+      if (res?.error) {
+        state.settingsSkillsStatus = res.error
+        renderSettingsScreen()
+        bindSettingsScreen()
+        return
+      }
+      state.settingsSkillsStatus = 'Plugin removed.'
+      await loadSettingsSkills()
+    }
+  })
+  screen.querySelectorAll('[data-plugin-connect]').forEach((btn) => {
+    btn.onclick = () => void connectSkillPack(btn.getAttribute('data-plugin-connect'), btn)
+  })
+  $('settings-connect-copy-link')?.addEventListener('click', async () => {
+    const url = $('settings-connect-link')?.value || state.settingsConnectLink
+    if (!url) return
+    try {
+      await navigator.clipboard.writeText(url)
+      state.settingsSkillsStatus = 'Link copied.'
+    } catch {
+      window.prompt('Copy link', url)
+    }
+    renderSettingsScreen()
+    bindSettingsScreen()
+  })
+  $('settings-connect-copy-code')?.addEventListener('click', async () => {
+    const code = state.settingsConnectCode
+    if (!code) return
+    try {
+      await navigator.clipboard.writeText(code)
+      state.settingsSkillsStatus = 'Code copied.'
+    } catch {
+      window.prompt('Copy code', code)
+    }
+    renderSettingsScreen()
+    bindSettingsScreen()
+  })
+  $('settings-connect-open-link')?.addEventListener('click', () => {
+    const url = $('settings-connect-link')?.value || state.settingsConnectLink
+    if (url) void api.openUrl?.(url)
+  })
+  screen.querySelectorAll('[data-plugin-skill]').forEach((btn) => {
+    btn.onclick = () => {
+      const skill = pluginSkillByKey(btn.getAttribute('data-plugin-skill'))
+      if (!skill) return
+      attachPluginSkillToThread(skill)
+      state.settingsOpen = false
+      document.body.classList.remove('settings-open')
+      renderAgentPanel()
+    }
+  })
   screen.querySelectorAll('[data-deploy-copy]').forEach((btn) => {
     btn.onclick = async () => {
       const url = btn.getAttribute('data-deploy-copy') || ''
@@ -5386,6 +6581,7 @@ function bindSettingsScreen() {
   $('settings-upload-avatar')?.addEventListener('click', () => void uploadProfilePhoto())
   $('settings-billing')?.addEventListener('click', () => api.openBilling())
   $('settings-upgrade')?.addEventListener('click', () => api.openBilling())
+  $('settings-upgrade-byok')?.addEventListener('click', () => api.openBilling())
   $('settings-reset-prefs')?.addEventListener('click', () => {
     if (window.confirm('Reset all Soumtok Desktop preferences on this device?')) resetDesktopPreferences()
   })
@@ -5394,6 +6590,7 @@ function bindSettingsScreen() {
   })
   screen.querySelectorAll('[data-save-key]').forEach((btn) => {
     btn.onclick = async () => {
+      if (btn.disabled || btn.getAttribute('aria-disabled') === 'true') return
       const id = btn.dataset.saveKey
       const input = $(`settings-key-${id}`)
       const key = input?.value?.trim()
@@ -5528,13 +6725,6 @@ function bindSettingsScreen() {
       layoutEditor()
     }
   }
-  screen.querySelectorAll('.settings-driver-btn').forEach((btn) => {
-    btn.onclick = () => {
-      if (state.agentBusy) return
-      persistAgentDriver(btn.dataset.driver)
-      renderSettingsScreen()
-    }
-  })
   $('settings-default-mode')?.addEventListener('change', (e) => {
     state.agentMode = e.target.value
     activeThread().mode = state.agentMode
@@ -5605,98 +6795,10 @@ function renderSettingsScreen() {
       <input type="search" id="settings-search" class="settings-search" placeholder="Search settings" value="${escapeAttr(state.settingsSearch)}" autocomplete="off" />
       <nav class="settings-nav-list" id="settings-nav-list">${settingsNavHtml()}</nav>
     </aside>
-    <main class="settings-main"><div class="settings-main-inner ${state.settingsTab === 'agents' || state.settingsTab === 'connectors' ? 'settings-main-wide' : ''}">${settingsMainHtml()}</div></main>
+    <main class="settings-main"><div class="settings-main-inner ${state.settingsTab === 'agents' || state.settingsTab === 'connectors' || state.settingsTab === 'skills' ? 'settings-main-wide' : ''}">${settingsMainHtml()}</div></main>
   </div>`
   bindSettingsScreen()
-  if (state.settingsTab === 'general') void paintSetupStatus()
   if (state.settingsTab === 'connectors') void paintConnectorsMarketplace()
-}
-
-function setupStatusRow(ok, label, detail) {
-  const dot = ok ? 'setup-ok' : 'setup-bad'
-  return `<div class="setup-row"><span class="setup-dot ${dot}" aria-hidden="true"></span><div><strong>${escapeHtml(label)}</strong><p class="setup-detail">${escapeHtml(detail)}</p></div></div>`
-}
-
-async function collectSetupStatusFallback() {
-  let apiHost = (state.appInfo?.api || 'https://soumtok.com').replace(/\/$/, '')
-  try {
-    const info = await api.appInfo()
-    if (info?.api) apiHost = String(info.api).replace(/\/$/, '')
-  } catch {
-    /* ignore */
-  }
-  let signedIn = Boolean(state.user)
-  let userEmail = state.user?.email || null
-  if (!signedIn) {
-    try {
-      const sess = await api.session()
-      signedIn = Boolean(sess?.user)
-      userEmail = sess?.user?.email || null
-    } catch {
-      /* ignore */
-    }
-  }
-  let healthOk = false
-  let coding = {}
-  let imageReady = false
-  try {
-    const res = await fetch(`${apiHost}/api/health`, { headers: { Accept: 'application/json' } })
-    const data = await res.json().catch(() => ({}))
-    const head = JSON.stringify(data).slice(0, 32).toLowerCase()
-    healthOk = res.ok && !head.includes('<!doctype') && !head.includes('<html')
-    coding = data?.coding && typeof data.coding === 'object' ? data.coding : {}
-    imageReady = Boolean(data?.image)
-  } catch {
-    healthOk = false
-  }
-  const codingReady = Object.values(coding).some(Boolean)
-  return {
-    api: apiHost,
-    folder: state.folder || null,
-    healthOk,
-    codingReady,
-    imageReady,
-    coding,
-    signedIn,
-    userEmail,
-    installs: [],
-    fork: { bootstrap: 'npm run vscode:fork-bootstrap', clonePresent: false },
-  }
-}
-
-async function paintSetupStatus() {
-  const box = $('settings-setup-status')
-  if (!box) return
-  try {
-    let s = null
-    if (typeof api.setupStatus === 'function') {
-      try {
-        s = await api.setupStatus()
-      } catch (err) {
-        if (!extensionsIpcMissing(err)) throw err
-      }
-    }
-    if (!s) s = await collectSetupStatusFallback()
-    const codingList = Object.entries(s.coding || {})
-      .filter(([, v]) => v)
-      .map(([k]) => k)
-      .join(', ')
-    const soumtokHost = s.installs?.find((i) => i.id === 'soumtok-code')
-    const extHost = soumtokHost
-      ? 'Soumtok Code extension host is installed'
-      : 'Extensions install in this app; build Soumtok Code (Setup below) for ESLint/LSP inside the IDE'
-    box.innerHTML =
-      setupStatusRow(s.signedIn, 'Signed in to Soumtok', s.signedIn ? s.userEmail || 'OK' : 'Required for agent + Tab + Ctrl+K') +
-      setupStatusRow(s.healthOk, 'API reachable', `${s.api}${s.healthOk ? '' : ' — start npm start or check network'}`) +
-      setupStatusRow(s.codingReady, 'Coding models on server', codingList || 'Set OPENAI_API_KEY / DEEPSEEK_API_KEY in server .env or sign in with plan keys') +
-      setupStatusRow(Boolean(s.imageReady), 'Image generation (Flux 2 Max)', s.imageReady ? 'Replicate ready' : 'Set REPLICATE_API_TOKEN in .env') +
-      setupStatusRow(Boolean(s.folder || state.folder), 'Workspace folder open', s.folder || state.folder || 'Open a project folder') +
-      setupStatusRow(true, 'Extensions marketplace (Open VSX)', 'Install in the Extensions sidebar — stored in Soumtok') +
-      setupStatusRow(Boolean(soumtokHost), 'Soumtok extension host (LSP)', extHost) +
-      setupStatusRow(s.fork?.clonePresent, 'Soumtok Code fork clone', s.fork?.clonePresent ? s.fork.clonePath : `Run ${s.fork?.bootstrap || 'vscode:fork-bootstrap'}`)
-  } catch (err) {
-    box.innerHTML = `<p class="git-scm-muted">${escapeHtml(err?.message || 'Could not load status')}</p>`
-  }
 }
 
 async function createFile() {
@@ -6193,8 +7295,10 @@ function setPanelOpen(open) {
 }
 
 async function mirrorAgentTerminalOutput(payload) {
-  const out = String(payload?.output || '')
+  let out = String(payload?.output || '')
   if (!out.trim()) return
+  out = out.replace(/^\[soumtok capture\]\r?\n/gim, '')
+  if (out.length > 24_000) out = out.slice(-24_000)
   await openTerminalPanel(false)
   window.SoumtokTerminal?.appendDisplay?.(out)
 }
@@ -6738,18 +7842,25 @@ function renderSide() {
   $('login-btn')?.addEventListener('click', login)
   $('logout-btn')?.addEventListener('click', logout)
   $('billing-btn')?.addEventListener('click', () => api.openBilling())
-  root.querySelectorAll('[data-driver]').forEach((btn) => {
-    btn.onclick = () => {
-      if (state.agentBusy) return
-      persistAgentDriver(btn.dataset.driver)
-      renderSide()
-      if (document.body.classList.contains('mode-project')) renderAgentPanel()
-    }
-  })
 }
 
 const PLUGIN_LOGO_SKIP_SIMPLE = new Set(['neon', 'canva', 'salesforce', 'context7', 'huggingface', 'higgsfield'])
 const PLUGIN_LOGO_FILL = new Set(['canva', 'context7', 'neon', 'higgsfield', 'huggingface'])
+const PLUGIN_LOGO_COLOR_BRAND = new Set([
+  'figma',
+  'notion',
+  'slack',
+  'stripe',
+  'github',
+  'linear',
+  'sentry',
+  'postman',
+  'granola',
+  'datadog',
+  'gmail',
+  'google-drive',
+  'google-calendar',
+])
 const OFFICIAL_COMPANY_LOGOS = {
   higgsfield: 'https://higgsfield.ai/icon.png',
   canva: 'https://static.canva.com/static/images/android-192x192-2.png',
@@ -6760,6 +7871,20 @@ const OFFICIAL_COMPANY_LOGOS = {
   hubspot: 'https://www.hubspot.com/hubfs/HubSpot_Logos/HubSpot-Inversed-Favicon.png',
 }
 
+/** Dark/black platform logos need a light tile or invert on the dark activity rail. */
+function platformIconNeedsMono(url) {
+  const u = String(url || '').toLowerCase()
+  if (!u) return false
+  if (/\/logos\/plugins\//.test(u) || /plugin-logos\//.test(u)) return false
+  if (/simpleicons\.org|logo-dark|icon-dark|noborder\.svg|inversed|inverse|monochrome|\/dark[\./-]/.test(u)) {
+    return true
+  }
+  if (/\.svg(\?|$)/.test(u) && !/color|brand|favicon|\.png|higgsfield|canva|hubspot|figma|notion|slack/.test(u)) {
+    return true
+  }
+  return false
+}
+
 function pluginLogoCandidates(id) {
   const slug = String(id || 'custom')
   const host = String(state.appInfo?.api || 'https://soumtok.com').replace(/\/$/, '')
@@ -6767,7 +7892,10 @@ function pluginLogoCandidates(id) {
   const simple = PLUGIN_LOGO_SKIP_SIMPLE.has(slug)
     ? ''
     : `https://cdn.simpleicons.org/${encodeURIComponent(slug)}`
+  const meta = catalogPluginById(slug)
+  const catalogLogo = meta?.logo && !/^https?:\/\//i.test(meta.logo) ? `${host}${meta.logo}` : meta?.logo || ''
   return [
+    catalogLogo,
     official,
     `../../resources/plugin-logos/${encodeURIComponent(slug)}.svg`,
     `${host}/logos/plugins/${encodeURIComponent(slug)}.svg`,
@@ -6783,8 +7911,24 @@ function connectorLogoHtml(id, name) {
   const slug = String(id || 'custom')
   const [first, ...rest] = pluginLogoCandidates(slug)
   const letter = String(name || slug).replace(/^[^a-zA-Z0-9]+/, '').slice(0, 1).toUpperCase() || '?'
-  const fill = PLUGIN_LOGO_FILL.has(slug) ? ' conn-logo-fill' : ''
-  return `<span class="conn-logo${fill}" title="${escapeAttr(name || slug)}"><img src="${escapeAttr(first)}" alt="" data-fallbacks="${escapeAttr(JSON.stringify(rest))}" data-letter="${escapeAttr(letter)}" /></span>`
+  const fill = PLUGIN_LOGO_FILL.has(slug) || PLUGIN_LOGO_COLOR_BRAND.has(slug) ? ' conn-logo-fill' : ''
+  const mono = platformIconNeedsMono(first) ? ' conn-logo-mono' : ''
+  return `<span class="conn-logo${fill}${mono}" title="${escapeAttr(name || slug)}"><img src="${escapeAttr(first)}" alt="" data-fallbacks="${escapeAttr(JSON.stringify(rest))}" data-letter="${escapeAttr(letter)}" /></span>`
+}
+
+function soumtokSkillLogoCandidates() {
+  const host = String(state.appInfo?.api || 'https://soumtok.com').replace(/\/$/, '')
+  return [
+    '../../resources/brand/soumtok-mark-dark.png',
+    `${host}/images/soumtok-mark-dark.png`,
+    '../../resources/brand/soumtok-mark.png',
+    `${host}/images/soumtok-mark.png`,
+  ]
+}
+
+function soumtokSkillLogoHtml() {
+  const [first, ...rest] = soumtokSkillLogoCandidates()
+  return `<span class="conn-logo conn-logo-soumtok" title="Soumtok"><img src="${escapeAttr(first)}" alt="" data-fallbacks="${escapeAttr(JSON.stringify(rest))}" data-letter="S" /></span>`
 }
 
 function marketLogoHtml(item) {
@@ -6805,7 +7949,8 @@ function marketLogoHtml(item) {
   const [first, ...rest] = chain
   const fill = higgs || PLUGIN_LOGO_FILL.has(slug) ? ' conn-logo-fill' : ''
   const dark = higgs ? ' conn-logo-dark' : ''
-  return `<span class="conn-logo${dark}${fill}" title="${escapeAttr(item?.name || slug)}"><img src="${escapeAttr(first)}" alt="" data-fallbacks="${escapeAttr(JSON.stringify(rest))}" data-letter="${escapeAttr(letter)}" /></span>`
+  const mono = platformIconNeedsMono(first) ? ' conn-logo-mono' : ''
+  return `<span class="conn-logo${dark}${fill}${mono}" title="${escapeAttr(item?.name || slug)}"><img src="${escapeAttr(first)}" alt="" data-fallbacks="${escapeAttr(JSON.stringify(rest))}" data-letter="${escapeAttr(letter)}" /></span>`
 }
 
 function bindLogoFallback(root) {
@@ -7155,6 +8300,19 @@ async function connectMarketplaceItem(item, { setStatus = settingsConnStatus, re
           ? 'Saved. Finish sign-in in the browser, then tap Reconnect to activate tools.'
           : 'Saved. Reconnect if tools are still empty.',
     )
+    await refreshConnectorsMine()
+    if (state.side === 'connectors') await paintConnectorsPanel()
+    if (active && catalogId && !installedPluginIdsSet().has(catalogId)) {
+      const meta = catalogPluginById(catalogId)
+      if (meta?.skills?.length) {
+        setStatus(`Installing ${meta.name} skill pack…`)
+        await api.pluginsInstall?.({ pluginId: catalogId })
+        await loadPlugins()
+        setStatus(
+          `${meta.name} connected${n ? ` · ${n} tools` : ''} and skill pack installed. Attach skills in chat ◆ — agent can mcp({ server: "${catalogId}" }).`,
+        )
+      }
+    }
     if (typeof refresh === 'function') await refresh()
     if (state.settingsOpen && state.settingsTab === 'connectors' && refresh !== paintConnectorsMarketplace) {
       void paintConnectorsMarketplace()
@@ -7733,6 +8891,11 @@ function writeExtAutoUpdate(id, on) {
   }
 }
 
+function notifyExtensionInstallUnavailable() {
+  window.alert(EXT_INSTALL_UNAVAILABLE_MSG)
+  appendPanelOutput(`[extensions] ${EXT_INSTALL_UNAVAILABLE_MSG}\n`)
+}
+
 async function refreshInstalledExtensionCache() {
   let list = []
   try {
@@ -7872,6 +9035,7 @@ function extManageMenuHtml(ext, { installPath = '', updateAvailable = false, lat
     : ''
   return `<div class="ext-manage-menu" hidden role="menu">
     ${updateLine}
+    ${ext.hasAppUi || ext.kind === 'app' ? `<button type="button" class="ext-manage-item" data-action="open-panel" role="menuitem">Open panel</button>` : ''}
     <button type="button" class="ext-manage-item" data-action="enable" role="menuitem"${disabled ? '' : ' disabled'}>Enable</button>
     <button type="button" class="ext-manage-item" data-action="disable" role="menuitem"${disabled ? ' disabled' : ''}>Disable</button>
     <hr class="ext-filter-sep" />
@@ -7897,6 +9061,10 @@ async function runExtManageAction(action, ext, installPath) {
   }
   if (action === 'marketplace') {
     void api.openUrl(url)
+    return
+  }
+  if (action === 'open-panel') {
+    await openInstalledExtensionInHost(ext.publisher, ext.name)
     return
   }
   if (action === 'settings') {
@@ -8082,45 +9250,9 @@ async function restartExtensionHostAfterExtensionChange(publisher, name) {
   }
 }
 
-async function installExtensionFromDetail(publisher, name, btn) {
-  if (btn) {
-    btn.disabled = true
-    btn.textContent = 'Installing…'
-  }
-  const trustMeta = await extensionTrustMeta(publisher, name)
-  if (!(await askTrustPublisher(trustMeta))) {
-    if (btn) {
-      btn.disabled = false
-      btn.textContent = 'Install'
-    }
-    return false
-  }
-  try {
-    const out = await api.extensionsInstall({ publisher, name })
-    if (!out.ok) {
-      appendPanelOutput(`[extensions] ${out.error || 'Install failed'}\n`)
-      if (btn) {
-        btn.disabled = false
-        btn.textContent = 'Install'
-      }
-      return false
-    }
-    await refreshInstalledExtensionCache()
-    await refreshExtensionActivityBar()
-    await window.__soumtokExtInstalledRefresh?.()
-    await restartExtensionHostAfterExtensionChange(publisher, name)
-    appendPanelOutput(`[extensions] Installed ${publisher}.${name}\n`)
-    const tab = activeEditorTab()
-    if (tab && isExtensionTab(tab)) renderExtensionDetailPane(tab)
-    return true
-  } catch (err) {
-    appendPanelOutput(`[extensions] ${err?.message || 'Install failed'}\n`)
-    if (btn) {
-      btn.disabled = false
-      btn.textContent = 'Install'
-    }
-    return false
-  }
+async function installExtensionFromDetail(_publisher, _name, _btn) {
+  notifyExtensionInstallUnavailable()
+  return false
 }
 
 async function updateExtensionFromDetail(publisher, name, btn, targetVersion) {
@@ -8210,14 +9342,15 @@ function extStarRowHtml(rating, count, reviewsUrl) {
 }
 
 function extDetailPaneBodyHtml(d, pane, tab) {
-  const md = window.SoumtokExtMarkdown?.renderMarketMarkdown
+  const renderReadme =
+    window.SoumtokExtMarkdown?.renderMarketReadme || window.SoumtokExtMarkdown?.renderMarketMarkdown
   if (pane === 'changelog') {
     const src = d.changelog || '_No changelog published._'
-    return md ? md(src) : `<pre class="ext-detail-readme">${escapeHtml(src)}</pre>`
+    return renderReadme ? renderReadme(src) : `<pre class="ext-detail-readme">${escapeHtml(src)}</pre>`
   }
   if (pane === 'features') return extFeaturesPaneHtml(d, tab)
   const src = d.readme || d.description || ''
-  return md && src ? md(src) : `<p class="ext-detail-lead">${escapeHtml(d.description || '')}</p>`
+  return renderReadme && src ? renderReadme(src) : `<p class="ext-detail-lead">${escapeHtml(d.description || '')}</p>`
 }
 
 function extFeaturesPaneHtml(d, tab) {
@@ -8276,6 +9409,14 @@ function bindExtensionDetailPage(host, tab) {
     a.addEventListener('click', (e) => {
       e.preventDefault()
       void api.openUrl?.(a.dataset.href)
+    })
+  })
+  host.querySelectorAll('.ext-md-html a[href]').forEach((a) => {
+    const href = a.getAttribute('href')
+    if (!href || !/^https?:\/\//i.test(href)) return
+    a.addEventListener('click', (e) => {
+      e.preventDefault()
+      void api.openUrl?.(href)
     })
   })
   host.querySelectorAll('.ext-detail-tab').forEach((btn) => {
@@ -8703,6 +9844,7 @@ async function paintExtensionsPanel() {
       <div class="ext-market-body">
         <div class="ext-market-title-row">
           <span class="ext-market-title">${escapeHtml(ext.displayName)}</span>
+          ${ext.kind === 'language' ? '<span class="ext-kind-chip">Language · Agent</span>' : ext.hasAppUi || ext.kind === 'app' ? '<span class="ext-kind-chip">App</span>' : ''}
           ${stats ? `<span class="ext-market-stats">${escapeHtml(stats)}</span>` : ''}
         </div>
         <div class="ext-market-publisher">${extPublisherLineHtml(ext)}</div>
@@ -8756,45 +9898,8 @@ async function paintExtensionsPanel() {
 
   function bindInstallButtons(container) {
     container.querySelectorAll('.ext-install:not(.ext-installed)').forEach((btn) => {
-      btn.onclick = async () => {
-        const trustMeta = {
-          publisher: btn.dataset.publisher,
-          name: btn.dataset.name,
-          displayName: btn.dataset.display || btn.dataset.name,
-          publisherDisplayName: btn.dataset.publisherDisplay || btn.dataset.publisher,
-          verified: btn.dataset.verified === '1',
-          publisherDomain: btn.dataset.publisherDomain || '',
-        }
-        if (!(await askTrustPublisher(trustMeta))) return
-        btn.disabled = true
-        btn.textContent = 'Installing…'
-        let out
-        try {
-          out = await api.extensionsInstall({ publisher: btn.dataset.publisher, name: btn.dataset.name })
-        } catch (err) {
-          if (extensionsIpcMissing(err)) {
-            appendPanelOutput(`[extensions] ${EXT_MAIN_RESTART_HINT}\n`)
-          } else {
-            appendPanelOutput(`[extensions] ${err?.message || 'Install failed'}\n`)
-          }
-          btn.textContent = 'Install'
-          btn.disabled = false
-          return
-        }
-        if (!out.ok) {
-          appendPanelOutput(`[extensions] ${out.error || 'Install failed'}\n`)
-          btn.textContent = 'Install'
-          btn.disabled = false
-          return
-        }
-        const pub = btn.dataset.publisher
-        const extName = btn.dataset.name
-        installedKeys.add(extensionId(pub, extName))
-        await drawInstalled()
-        await refreshExtensionActivityBar()
-        await reloadMarket(false)
-        await activateInstalledExtensionsQuiet({ publisher: pub, name: extName })
-        appendPanelOutput(`[extensions] Installed ${pub}.${extName}\n`)
+      btn.onclick = () => {
+        notifyExtensionInstallUnavailable()
       }
     })
   }
@@ -9702,10 +10807,21 @@ function bindGitPanel() {
   })
   document.getElementById('git-docs')?.addEventListener('click', () => api.openHelp())
   document.getElementById('git-publish')?.addEventListener('click', async () => {
-    const res = await api.gitPublish(gitWorkspaceHint())
-    if (res?.error && !res.opened) showGitError(res.error)
-    else if (res?.hint) showGitError(res.hint)
-    await paintGitPanel()
+    const btn = document.getElementById('git-publish')
+    if (btn) {
+      btn.disabled = true
+      btn.textContent = 'Publishing…'
+    }
+    try {
+      const res = await api.gitPublish(gitWorkspaceHint())
+      if (res?.error && !res.opened) showGitError(res.error)
+      else if (res?.hint) showGitError(res.hint)
+      else if (res?.ok) {
+        showGitError(res.fullName ? `Published to ${res.fullName}` : 'Published to GitHub.')
+      }
+    } finally {
+      await paintGitPanel()
+    }
   })
   document.getElementById('git-commit')?.addEventListener('click', () => void doGitCommit())
   document.getElementById('git-commit-msg')?.addEventListener('keydown', (e) => {
@@ -10653,7 +11769,14 @@ function agentActivityStepHtml(step) {
     </div>`
   }
   let body = ''
-  if (stepState === 'running' && (n === 'read' || n === 'read_file')) {
+  if (
+    stepState === 'running' &&
+    /^(write|diff|edit|str_replace|apply_patch)$/.test(n) &&
+    step.contentPreview
+  ) {
+    const rel = step.path || step.args?.path || step.args?.file || 'file'
+    body = agentFileCodeCard(rel, step.contentPreview, 'Writing…')
+  } else if (stepState === 'running' && (n === 'read' || n === 'read_file')) {
     body = `<div class="agent-call-hint">Opening <span class="mono">${escapeHtml(String(step.args?.path || step.args?.file || 'file'))}</span>…</div>`
   } else if (step.result && stepState === 'done') {
     body = agentToolResultBody({
@@ -10708,10 +11831,23 @@ function collapseImageGenSteps(steps) {
   return out
 }
 
+function agentStatusDisplayText(raw) {
+  const t = String(raw || '').trim()
+  if (!t) return ''
+  const planMatch = t.match(/^Plan · (\d+) steps/i)
+  if (planMatch) return `Planning · ${planMatch[1]} steps`
+  if (t.length > 80 || /→|GROUND TRUTH|CODE SHAPE|VERIFY:/i.test(t)) {
+    if (/plan/i.test(t)) return 'Planning…'
+    if (/think/i.test(t)) return 'Thinking…'
+    return 'Working…'
+  }
+  return t
+}
+
 function agentActivityHtml(item) {
   const steps = collapseImageGenSteps(item.steps || []).map(agentActivityStepHtml).join('')
   const open = Boolean(item.open)
-  const thought = String(item.status || item.thought || '').trim()
+  const thought = agentStatusDisplayText(item.status || item.thought || '')
   const hasSteps = Boolean((item.steps || []).length)
   const hasPlan = Boolean((item.todos || []).length)
   const liveLabel = /plan/i.test(thought)
@@ -10723,7 +11859,7 @@ function agentActivityHtml(item) {
   const thinkLive = open
     ? `<span class="agent-think-shimmer">${escapeHtml(thought || (hasPlan ? 'Planning…' : hasSteps ? 'Soumtok is working…' : 'Thinking…'))}</span>`
     : ''
-  const thinkBody = thought && !open ? `<div class="agent-think-body">${escapeHtml(thought)}</div>` : ''
+  const thinkBody = ''
   const todos = (item.todos || [])
     .map((t) => {
       const st = t.status || 'pending'
@@ -10763,6 +11899,68 @@ function stripAttachCaptions(text) {
     .trim()
 }
 
+function agentChoicePickerHtml(item, index) {
+  if (!item.choices?.length || item.choicePicked || item.choicePending === false) return ''
+  const prompt = item.choicePrompt || item.choiceTitle || 'Choose one'
+  const chips = item.choices
+    .map(
+      (c) =>
+        `<button type="button" class="agent-choice-chip" data-choice-index="${index}" data-choice-num="${c.num}" data-choice-label="${escapeAttr(c.label)}">
+          <span class="agent-choice-num">${c.num}</span>
+          <span class="agent-choice-label">${escapeHtml(c.label)}</span>
+        </button>`,
+    )
+    .join('')
+  return `<div class="agent-choice-picker" data-choice-picker="${index}">
+    <p class="agent-choice-title">${escapeHtml(prompt)}</p>
+    <div class="agent-choice-list">${chips}</div>
+    <div class="agent-choice-custom-row">
+      <input type="text" class="agent-choice-custom" data-choice-index="${index}" placeholder="Or type your own…" />
+      <button type="button" class="agent-choice-send" data-choice-custom-send="${index}">Send</button>
+    </div>
+  </div>`
+}
+
+function bindAgentChoicePickers() {
+  document.querySelectorAll('.agent-choice-chip').forEach((btn) => {
+    btn.onclick = () => {
+      const idx = Number(btn.dataset.choiceIndex)
+      const num = btn.dataset.choiceNum
+      const label = btn.dataset.choiceLabel || ''
+      void submitAgentChoice(idx, label ? `${num}. ${label}` : String(num))
+    }
+  })
+  document.querySelectorAll('[data-choice-custom-send]').forEach((btn) => {
+    btn.onclick = () => {
+      const idx = Number(btn.dataset.choiceCustomSend)
+      const input = document.querySelector(`.agent-choice-custom[data-choice-index="${idx}"]`)
+      const text = String(input?.value || '').trim()
+      if (!text) return
+      void submitAgentChoice(idx, text)
+    }
+  })
+  document.querySelectorAll('.agent-choice-custom').forEach((input) => {
+    input.onkeydown = (e) => {
+      if (e.key !== 'Enter') return
+      e.preventDefault()
+      const idx = Number(input.dataset.choiceIndex)
+      const text = String(input.value || '').trim()
+      if (!text) return
+      void submitAgentChoice(idx, text)
+    }
+  })
+}
+
+async function submitAgentChoice(index, text) {
+  const t = activeThread()
+  const item = t.items[index]
+  if (!item || item.role !== 'agent' || item.choicePicked || !text) return
+  item.choicePicked = text
+  item.choicePending = false
+  paintAgentThread()
+  await sendAgentWithText(text)
+}
+
 function agentAskSummary(answers, questions) {
   const lines = []
   for (const q of questions || []) {
@@ -10785,21 +11983,21 @@ function agentAskCardHtml(item, index) {
             `<button type="button" class="agent-ask-opt${(picked[q.id] || []).includes(opt.label) ? ' on' : ''}" data-ask-index="${index}" data-qid="${escapeAttr(q.id)}" data-opt="${escapeAttr(opt.label)}" ${done ? 'disabled' : ''}>${String.fromCharCode(97 + oi)}. ${escapeHtml(opt.label)}</button>`,
         )
         .join('')
-      return `<div class="agent-ask-q"><span class="agent-ask-q-prompt">${qi + 1}. ${escapeHtml(q.prompt)}</span>${opts}</div>`
+      const custom =
+        q.allowCustom !== false && !done
+          ? `<input type="text" class="agent-ask-custom" data-ask-index="${index}" data-qid="${escapeAttr(q.id)}" value="${escapeAttr(item._custom?.[q.id] || '')}" placeholder="Or type your own…" />`
+          : ''
+      return `<div class="agent-ask-q"><span class="agent-ask-q-prompt">${qi + 1}. ${escapeHtml(q.prompt)}</span>${opts}${custom}</div>`
     })
     .join('')
   const actions = done
     ? ''
-    : `<div class="agent-ask-actions"><button type="button" class="ghost" data-ask-skip="${index}">Skip</button><button type="button" class="primary" data-ask-submit="${index}">Submit answers</button></div>`
-  const doneNote = done
-    ? `<p class="agent-ask-done">${escapeHtml(agentAskSummary(picked, qs))}</p>`
-    : ''
+    : `<div class="agent-ask-actions"><button type="button" class="ghost" data-ask-skip="${index}">Skip</button><button type="button" class="primary" data-ask-submit="${index}">Continue</button></div>`
   return `<div class="agent-ask-card${done ? ' is-done' : ''}" data-ask-card="${index}">
     <p class="agent-ask-title">${escapeHtml(item.title || 'Question')}</p>
     ${item.intro ? `<p class="agent-ask-intro">${escapeHtml(item.intro)}</p>` : ''}
     ${body}
     ${actions}
-    ${doneNote}
   </div>`
 }
 
@@ -10836,16 +12034,36 @@ function bindAgentAskCards() {
       void submitAgentAskCard(idx, true)
     }
   })
+  document.querySelectorAll('.agent-ask-custom').forEach((input) => {
+    input.oninput = () => {
+      const idx = Number(input.dataset.askIndex)
+      const qid = input.dataset.qid
+      const t = activeThread()
+      const item = t.items[idx]
+      if (!item || item.role !== 'ask' || item.answers) return
+      item._custom = item._custom || {}
+      item._custom[qid] = input.value
+    }
+  })
 }
 
 async function submitAgentAskCard(index, skip = false) {
   const t = activeThread()
   const item = t.items[index]
   if (!item || item.role !== 'ask' || !item.pending) return
-  const answers = skip ? {} : item._picked || {}
+  const answers = skip ? {} : { ...(item._picked || {}) }
+  if (!skip) {
+    for (const q of item.questions || []) {
+      const extra = String(item._custom?.[q.id] || '').trim()
+      if (!extra) continue
+      const cur = answers[q.id] || []
+      if (!cur.includes(extra)) answers[q.id] = [...cur, extra]
+    }
+  }
   item.answers = answers
   item.pending = false
   await api.agentAskReply({ id: item.id, answers })
+  t.items.splice(index, 1)
   paintAgentThread()
 }
 
@@ -10934,8 +12152,19 @@ function agentItemHtml(item, index, items) {
   if (item.role === 'agent') {
     const pending = item.pending ? '<span class="agent-pending-dot"></span>' : ''
     const model = item.model ? `<span class="agent-msg-model">${escapeHtml(item.model)}</span>` : ''
+    const bodyText =
+      item.choices?.length && !item.choicePicked
+        ? stripNumberedListForChoices(item.text, { items: item.choices })
+        : item.text
+    const picker = agentChoicePickerHtml(item, index)
+    const picked =
+      item.choicePicked && !picker
+        ? `<p class="agent-choice-done">You chose: ${escapeHtml(item.choicePicked)}</p>`
+        : ''
     return `<div class="msg agent agent-rich agent-conclusion ${item.pending ? 'is-pending' : ''}" data-msg-index="${index}">
-      <div class="agent-msg-body">${item.pending ? pending : formatAgentReplyHtml(item.text)}</div>
+      <div class="agent-msg-body">${item.pending ? pending : formatAgentReplyHtml(bodyText)}</div>
+      ${picker}
+      ${picked}
       <div class="agent-msg-foot">${model}<button type="button" class="agent-msg-copy" data-copy-index="${index}" title="Copy reply">Copy</button></div>
     </div>`
   }
@@ -11101,17 +12330,7 @@ function renderBotProfileMenu() {
   }
   const who = state.user?.name || state.user?.email || 'Account'
   const initials = profileInitials(who)
-  const ideOn = state.agentDriver !== 'bot'
   pop.innerHTML = `<div class="bot-profile-card" role="menu">
-    <div class="bot-profile-driver">
-      <p class="bot-profile-driver-title">Who helps you</p>
-      <div class="settings-driver-pick" role="group">
-        <button type="button" class="settings-driver-btn ${ideOn ? 'on' : ''}" data-driver="ide">IDE Agent</button>
-        <button type="button" class="settings-driver-btn ${!ideOn ? 'on' : ''}" data-driver="bot">Soumtok Bot</button>
-      </div>
-      <p class="bot-profile-driver-hint">${state.agentDriver === 'bot' ? 'Full bot chat. Switch to IDE Agent to edit code in the project.' : 'Editor + agent panel.'}</p>
-    </div>
-    <div class="bot-profile-divider"></div>
     <button type="button" class="bot-profile-row" id="bot-profile-settings">
       <span class="bot-profile-row-icon">⚙</span> Settings
     </button>
@@ -11127,13 +12346,6 @@ function renderBotProfileMenu() {
     <span class="bot-side-avatar">${escapeHtml(initials)}</span>
     <span class="bot-side-name">${escapeHtml(who)}</span>
   </button>`
-  pop.querySelectorAll('[data-driver]').forEach((btn) => {
-    btn.onclick = () => {
-      if (state.agentBusy) return
-      persistAgentDriver(btn.dataset.driver)
-      closeBotProfileMenu()
-    }
-  })
   $('bot-profile-settings')?.addEventListener('click', () => {
     closeBotProfileMenu()
     state.settingsTab = 'agents'
@@ -11301,6 +12513,16 @@ function openAgentImageLightbox(src) {
   el.hidden = false
 }
 
+let paintAgentScheduled = false
+function schedulePaintAgentThread() {
+  if (paintAgentScheduled) return
+  paintAgentScheduled = true
+  requestAnimationFrame(() => {
+    paintAgentScheduled = false
+    paintAgentThread()
+  })
+}
+
 function paintAgentThread() {
   const box = $('agent-thread')
   if (!box) return
@@ -11328,6 +12550,7 @@ function paintAgentThread() {
   mountAgentAvatarIfNeeded()
   mountActivityInlineAvatars()
   bindAgentAskCards()
+  bindAgentChoicePickers()
   requestAnimationFrame(() => {
     box.scrollTop = box.scrollHeight
   })
@@ -11687,7 +12910,9 @@ function renderAgentTabs() {
       loadPersistedAgentModel()
       syncThreadModelFromGlobal()
       closeAgentToolbarPopovers()
+      clearAgentComposerAttachments()
       renderAgentPanel()
+      refreshAgentAttachRow()
     }
   })
   row.querySelectorAll('.agent-tab-close').forEach((btn) => {
@@ -11742,8 +12967,12 @@ function renderBotAgentShell() {
       <div class="agent-attach-row" id="agent-attach-row">${renderAgentAttachChips()}</div>
       ${agentVoiceSheetHtml()}
       <div class="bot-composer-bar">
-        <input type="file" id="agent-file-input" accept="image/*,video/*,.pdf,.doc,.docx,.txt,.md,.json,.csv,.ts,.tsx,.js,.jsx,.py,.html,.css,.xml,.yaml,.yml" multiple hidden />
-        <button type="button" class="bot-composer-plus" id="agent-attach" title="Attach" ${state.agentBusy ? 'disabled' : ''}>+</button>
+        <input type="file" id="agent-file-input" accept="*/*" multiple hidden />
+        <div class="agent-skills-anchor-wrap bot-attach-wrap">
+          <button type="button" class="bot-composer-skill" id="agent-skills-btn" title="Load skills" ${state.agentBusy ? 'disabled' : ''}>◆</button>
+          <div class="agent-skills-anchor" id="agent-skills-anchor" hidden></div>
+        </div>
+        <button type="button" class="bot-composer-plus" id="agent-attach" title="Attach files" ${state.agentBusy ? 'disabled' : ''}>+</button>
         <textarea id="agent-input" rows="1" placeholder="Message New Bot" ${state.agentBusy ? 'disabled' : ''}></textarea>
         <button type="button" class="bot-composer-mic agent-voice-btn" id="agent-voice-btn" title="Voice input" aria-label="Voice input" aria-pressed="false" ${state.agentBusy ? 'disabled' : ''}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v5a3 3 0 0 0 3 3z"/><path d="M19 11v1a7 7 0 0 1-14 0v-1M12 18v3"/></svg>
@@ -11793,11 +13022,6 @@ function renderIdeAgentShell(pickerOpen) {
     </header>
     <div class="agent-user-pin" id="agent-user-pin" hidden aria-live="polite"></div>
     <div class="agent-scroll" id="agent-thread"></div>
-    <div class="agent-review-tray" id="agent-review-tray" hidden>
-      <span class="agent-review-label" id="agent-review-label">Review 0 files</span>
-      <button type="button" class="agent-review-keep" id="agent-review-keep">Keep</button>
-      <button type="button" class="agent-review-undo" id="agent-review-undo">Restore</button>
-    </div>
     <div class="agent-run-bar" id="agent-run-bar" hidden>
       <span class="agent-run-pulse" aria-hidden="true"></span>
       <div class="agent-run-text">
@@ -11806,11 +13030,38 @@ function renderIdeAgentShell(pickerOpen) {
       </div>
       <button type="button" class="agent-run-stop" id="agent-run-stop" title="Stop agent">Stop</button>
     </div>
-    <div class="agent-queue-row" id="agent-queue-row" hidden aria-label="Queued messages"></div>
-    <div class="agent-composer">
+    <div class="agent-bottom-dock">
+      <div class="agent-composer-trays" id="agent-composer-trays" hidden>
+        <div class="agent-dock-row agent-dock-canvas" id="agent-canvas-tray" hidden>
+          <span class="agent-dock-canvas-icon" aria-hidden="true">${agentBarIcon('canvas')}</span>
+          <span class="agent-dock-label" id="agent-canvas-label">Canvas</span>
+          <button type="button" class="agent-dock-open" id="agent-canvas-open">Open</button>
+        </div>
+        <details class="agent-dock-row agent-dock-terminals" id="agent-bg-terminals" hidden>
+          <summary class="agent-dock-summary">
+            <span class="agent-dock-chevron" aria-hidden="true"></span>
+            <span class="agent-dock-label" id="agent-bg-terminals-label">Background terminals</span>
+          </summary>
+          <ul class="agent-dock-expand agent-bg-terminals-list" id="agent-bg-terminals-list"></ul>
+        </details>
+        <details class="agent-dock-row agent-dock-review" id="agent-review-tray" hidden>
+          <summary class="agent-dock-summary agent-dock-summary-review">
+            <span class="agent-dock-chevron" aria-hidden="true"></span>
+            <span class="agent-dock-label" id="agent-review-label">0 Files</span>
+            <span class="agent-dock-actions">
+              <button type="button" class="agent-dock-link" id="agent-review-undo">Undo All</button>
+              <button type="button" class="agent-dock-link" id="agent-review-keep">Keep All</button>
+              <button type="button" class="agent-dock-pill" id="agent-review-open">Review</button>
+            </span>
+          </summary>
+          <ul class="agent-dock-expand agent-review-files" id="agent-review-files"></ul>
+        </details>
+      </div>
+      <div class="agent-queue-row" id="agent-queue-row" hidden aria-label="Queued messages"></div>
+      <div class="agent-composer">
       <div class="agent-attach-row" id="agent-attach-row">${renderAgentAttachChips()}</div>
       ${agentVoiceSheetHtml()}
-      <textarea id="agent-input" rows="1" placeholder="${state.agentBusy ? 'Type a follow-up — Send stops current work and runs this' : 'Describe a task or ask a question…'}"></textarea>
+      <textarea id="agent-input" rows="1" placeholder="${state.agentBusy ? 'Type while agent works — Send adds to queue · Send now interrupts' : 'Describe a task or ask a question…'}"></textarea>
       <div class="agent-composer-foot">
         <div class="agent-foot-left">
           <div class="agent-mode-anchor">
@@ -11852,19 +13103,26 @@ function renderIdeAgentShell(pickerOpen) {
           </div>
         </div>
         <div class="agent-foot-right">
-          <input type="file" id="agent-file-input" accept="image/*,video/*,.pdf,.doc,.docx,.txt,.md,.json,.csv,.ts,.tsx,.js,.jsx,.py,.html,.css,.xml,.yaml,.yml" multiple hidden />
-          <button type="button" class="agent-icon-btn agent-voice-btn" id="agent-voice-btn" title="Voice input" aria-label="Voice input" aria-pressed="false" ${state.agentBusy ? 'disabled' : ''}>
+          <input type="file" id="agent-file-input" accept="*/*" multiple hidden />
+          <button type="button" class="agent-icon-btn agent-voice-btn" id="agent-voice-btn" title="Voice input" aria-label="Voice input" aria-pressed="false">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v5a3 3 0 0 0 3 3z"/><path d="M19 11v1a7 7 0 0 1-14 0v-1M12 18v3"/></svg>
           </button>
-          <button type="button" class="agent-icon-btn" id="agent-attach" title="Attach files" ${state.agentBusy ? 'disabled' : ''}>
+          <div class="agent-skills-anchor-wrap">
+            <button type="button" class="agent-icon-btn" id="agent-skills-btn" title="Load skills">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/><path d="M8 7h8M8 11h6"/></svg>
+            </button>
+            <div class="agent-skills-anchor" id="agent-skills-anchor" hidden></div>
+          </div>
+          <button type="button" class="agent-icon-btn" id="agent-attach" title="Attach files">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M14 8l-6.5 6.5a2.5 2.5 0 003.5 3.5l7-7a4 4 0 00-5.5-5.5l-7.5 7.5a6 6 0 008.5 8.5l8-8"/></svg>
           </button>
-          <button type="button" class="agent-queue-btn" id="agent-queue" title="Add to queue (after current run)" ${state.agentBusy ? '' : 'hidden'}>Queue</button>
-          <button type="button" class="agent-send" id="agent-go" title="${state.agentBusy ? 'Stop current run and send' : 'Send message'}">
+          <button type="button" class="agent-send-now-btn" id="agent-send-now" title="Stop current run and send this now" ${state.agentBusy ? '' : 'hidden'}>Send now</button>
+          <button type="button" class="agent-send" id="agent-go" title="${state.agentBusy ? 'Add to wait line (runs after current task)' : 'Send message'}">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
           </button>
         </div>
       </div>
+    </div>
     </div>
   </div>`
 }
@@ -11882,12 +13140,21 @@ async function renderAgentPanel() {
     paintAgentThread()
     bindAgentThreadActions()
     bindAgentChatContextMenu()
+    syncAgentReviewLive()
+    paintAgentReviewTray()
+    paintAgentBgTerminals()
+    paintAgentCanvasTray()
+    renderAgentQueueStrip()
     updateAgentBusyUi()
     mountAgentAvatarIfNeeded()
     syncAgentAvatarUi()
     return
   }
-  if (state.user) refreshModelReadiness()
+  void loadLocalAgentSkills()
+  if (state.user) {
+    refreshModelReadiness()
+    void Promise.all([loadUserSkills(), loadPlugins()])
+  }
   ensureThreads()
   const thread = activeThread()
   state.agentMode = thread.mode || state.agentMode
@@ -11918,10 +13185,10 @@ async function renderAgentPanel() {
     if (pickerOpen) openModelPicker(pickerOpen)
   }
   $('agent-go').onclick = () => {
-    if (state.agentBusy) void sendAgent(undefined, { interrupt: true })
+    if (state.agentBusy) void sendAgent(undefined, { queueOnly: true })
     else void sendAgent()
   }
-  $('agent-queue')?.addEventListener('click', () => void sendAgent(undefined, { queueOnly: true }))
+  $('agent-send-now')?.addEventListener('click', () => void sendAgent(undefined, { interrupt: true }))
   $('agent-run-stop')?.addEventListener('click', () => {
     setAgentLiveStatus('Stopping…')
     void api.agentCancel()
@@ -11953,7 +13220,18 @@ async function renderAgentPanel() {
     }
   }
   bindAgentAttachments()
+  bindAgentSkillsButton()
   bindAgentDragDrop()
+  paintAgentSkillsPicker()
+  if (!document.body.dataset.skillsPickerBound) {
+    document.body.dataset.skillsPickerBound = '1'
+    document.addEventListener('mousedown', (event) => {
+      if (!state.agentSkillsPickerOpen) return
+      if (event.target.closest?.('#agent-skills-anchor, #agent-skills-btn, #agent-attach')) return
+      state.agentSkillsPickerOpen = false
+      paintAgentSkillsPicker()
+    })
+  }
   mountAgentAvatarIfNeeded()
 }
 
@@ -12021,8 +13299,46 @@ function bindAgentDragDrop() {
 }
 
 function renderAgentAttachChips() {
-  if (!state.agentAttachments.length) return ''
-  return state.agentAttachments
+  const thread = activeThread()
+  const soumtokChipLogo = `<span class="agent-skill-chip-logo">${soumtokSkillLogoHtml()}</span>`
+  const manualChips = (thread.attachedManualSkills || [])
+    .map(
+      (skill) => `<div class="agent-attach-item agent-skill-chip agent-manual-skill-chip">
+        ${soumtokChipLogo}
+        <span class="agent-attach-filename" title="${escapeAttr(skill.description || skill.fileName || '')}">${escapeHtml(skill.name || 'Skill')}</span>
+        <button type="button" class="agent-attach-rm" data-manual-skill-rm="${escapeAttr(skill.name)}" data-manual-skill-file="${escapeAttr(skill.fileName || '')}" aria-label="Remove skill">×</button>
+      </div>`,
+    )
+    .join('')
+  const localChips = (thread.attachedLocalSkills || [])
+    .map(
+      (skill) => `<div class="agent-attach-item agent-skill-chip agent-local-skill-chip">
+        ${soumtokChipLogo}
+        <span class="agent-attach-filename" title="${escapeAttr(skill.description || '')}">${escapeHtml(skill.name || 'Skill')}</span>
+        <button type="button" class="agent-attach-rm" data-local-skill-rm="${escapeAttr(skill.name)}" aria-label="Remove skill">×</button>
+      </div>`,
+    )
+    .join('')
+  const pluginChips = (thread.attachedPluginSkills || [])
+    .map(
+      (skill) => `<div class="agent-attach-item agent-skill-chip agent-plugin-skill-chip">
+        <span class="agent-skill-chip-logo">${connectorLogoHtml(skill.pluginId, skill.pluginName)}</span>
+        <span class="agent-attach-filename" title="${escapeAttr(skill.pluginName || '')}">${escapeHtml(skill.label || skill.id)}</span>
+        <button type="button" class="agent-attach-rm" data-plugin-skill-rm="${escapeAttr(skill.id)}" aria-label="Remove skill">×</button>
+      </div>`,
+    )
+    .join('')
+  const skillChips = (thread.attachedSkills || [])
+    .map(
+      (skill) => `<div class="agent-attach-item agent-skill-chip">
+        ${soumtokChipLogo}
+        <span class="agent-attach-filename" title="${escapeAttr(skill.name || '')}">${escapeHtml(skill.name || 'Skill')}</span>
+        <button type="button" class="agent-attach-rm" data-skill-rm="${escapeAttr(skill.id)}" aria-label="Remove skill">×</button>
+      </div>`,
+    )
+    .join('')
+  if (!state.agentAttachments.length && !skillChips && !pluginChips && !localChips && !manualChips) return ''
+  const fileChips = state.agentAttachments
     .map((f, i) => {
       const name = escapeHtml(f.name || 'attachment')
       const mime = f.mime || ''
@@ -12041,6 +13357,134 @@ function renderAgentAttachChips() {
       </div>`
     })
     .join('')
+  return manualChips + localChips + pluginChips + skillChips + fileChips
+}
+
+function agentSkillCardHtml({ title, desc, attached, pickAttr, pickVal, logoHtml, actionHtml }) {
+  return `<button type="button" class="agent-skill-card${attached ? ' on' : ''}" ${pickAttr}="${escapeAttr(pickVal)}" title="${escapeAttr(desc || title)}">
+    ${logoHtml || '<span class="agent-skill-card-icon" aria-hidden="true">◆</span>'}
+    <span class="agent-skill-card-body">
+      <span class="agent-skill-card-title">${escapeHtml(title)}</span>
+      ${desc ? `<span class="agent-skill-card-desc">${escapeHtml(desc)}</span>` : ''}
+    </span>
+    ${actionHtml || (attached ? '<span class="agent-skill-card-check" aria-hidden="true">✓</span>' : '')}
+  </button>`
+}
+
+function renderAgentSkillsPickerHtml() {
+  const q = state.agentSkillsPickerSearch.trim().toLowerCase()
+  const thread = activeThread()
+  const match = (text) => !q || String(text || '').toLowerCase().includes(q)
+  const localSkills = (state.localAgentSkills || []).filter((skill) => match(`${skill.name} ${skill.description} ${skill.source}`))
+  const pluginSkills = flattenPluginSkills().filter((skill) => match(`${skill.label} ${skill.pluginName} ${skill.description}`))
+  const userSkills = (state.userSkills || []).filter((skill) => match(`${skill.name} ${skill.file_name}`))
+  const installedIds = installedPluginIdsSet()
+  const marketRows = skillsCatalogOnly(state.pluginsCatalog || [])
+    .filter((row) => !installedIds.has(row.id) && (row.featured || row.suggested))
+    .filter((row) => match(`${row.name} ${row.description}`))
+    .slice(0, 6)
+
+  const localBlock = localSkills.length
+    ? `<p class="agent-skills-pop-label">Built-in skills</p><div class="agent-skill-cards">${localSkills
+        .map((skill) => {
+          const attached = (thread.attachedLocalSkills || []).some((row) => row.name === skill.name)
+          return agentSkillCardHtml({
+            title: skill.name,
+            desc: String(skill.description || '').slice(0, 72),
+            attached,
+            pickAttr: 'data-local-skill-pick',
+            pickVal: skill.name,
+            logoHtml: `<span class="agent-skill-card-logo">${soumtokSkillLogoHtml()}</span>`,
+          })
+        })
+        .join('')}</div>`
+    : state.localAgentSkillsLoading
+      ? `<p class="agent-skills-pop-empty">Loading skills…</p>`
+      : ''
+
+  const pluginBlock = pluginSkills.length
+    ? `<p class="agent-skills-pop-label">Installed skill packs</p><div class="agent-skill-cards">${pluginSkills
+        .slice(0, 16)
+        .map((skill) => {
+          const attached = (thread.attachedPluginSkills || []).some((row) => row.id === skill.id)
+          const logo = connectorLogoHtml(skill.pluginId, skill.pluginName)
+          return agentSkillCardHtml({
+            title: skill.label,
+            desc: skill.pluginName,
+            attached,
+            pickAttr: 'data-plugin-skill-pick',
+            pickVal: skill.id,
+            logoHtml: `<span class="agent-skill-card-logo">${logo}</span>`,
+          })
+        })
+        .join('')}</div>`
+    : ''
+
+  const customBlock = userSkills.length
+    ? `<p class="agent-skills-pop-label">Your account</p><div class="agent-skill-cards">${userSkills
+        .map((skill) => {
+          const attached = (thread.attachedSkills || []).some((row) => row.id === skill.id)
+          return agentSkillCardHtml({
+            title: skill.name || skill.file_name,
+            desc: 'Cloud skill',
+            attached,
+            pickAttr: 'data-skill-pick',
+            pickVal: skill.id,
+            logoHtml: `<span class="agent-skill-card-logo">${soumtokSkillLogoHtml()}</span>`,
+          })
+        })
+        .join('')}</div>`
+    : ''
+
+  const marketBlock = marketRows.length
+    ? `<p class="agent-skills-pop-label">Add from marketplace</p><div class="agent-skill-cards">${marketRows
+        .map((row) => {
+          const busy = state.pluginInstallBusy === row.id
+          return `<div class="agent-skill-card agent-skill-card-market">
+            <span class="agent-skill-card-logo">${marketLogoHtml({ ...row, pluginId: row.id })}</span>
+            <span class="agent-skill-card-body">
+              <span class="agent-skill-card-title">${escapeHtml(row.name)}</span>
+              <span class="agent-skill-card-desc">${escapeHtml(String(row.description || '').slice(0, 64))}</span>
+            </span>
+            <button type="button" class="agent-skill-card-action" data-plugin-install-pop="${escapeAttr(row.id)}" ${busy ? 'disabled' : ''}>${busy ? '…' : 'Add'}</button>
+          </div>`
+        })
+        .join('')}</div>`
+    : ''
+
+  const signInNote = !state.user
+    ? `<p class="agent-skills-pop-empty">Sign in to sync cloud skills and install marketplace plugins. Built-in skills work offline.</p>`
+    : state.settingsSkillsError
+      ? `<p class="agent-skills-pop-empty">${escapeHtml(state.settingsSkillsError)}</p>`
+      : !localBlock && !pluginBlock && !customBlock && !marketBlock
+        ? `<p class="agent-skills-pop-empty">Attach a built-in skill or open Marketplace to add Notion, Slack, Stripe, and more.</p>`
+        : ''
+
+  return `<div class="agent-skills-pop" id="agent-skills-pop">
+    <input type="search" class="agent-skills-pop-search" id="agent-skills-pop-search" placeholder="Search skills…" value="${escapeAttr(state.agentSkillsPickerSearch)}" />
+    <button type="button" class="agent-skills-pop-item agent-skills-pop-files" id="agent-skills-pick-files">Attach files…</button>
+    ${localBlock}
+    ${pluginBlock}
+    ${customBlock}
+    ${marketBlock}
+    ${signInNote}
+    <button type="button" class="agent-skills-pop-link" id="agent-skills-manage">Skills marketplace…</button>
+    <button type="button" class="agent-skills-pop-link" id="agent-skills-connectors">Connectors…</button>
+  </div>`
+}
+
+function paintAgentSkillsPicker() {
+  const anchor = $('agent-skills-anchor')
+  if (!anchor) return
+  if (!state.agentSkillsPickerOpen) {
+    anchor.innerHTML = ''
+    anchor.hidden = true
+    return
+  }
+  anchor.hidden = false
+  anchor.innerHTML = renderAgentSkillsPickerHtml()
+  bindAgentSkillsPicker()
+  bindLogoFallback(anchor)
 }
 
 function makeAttachThumb(dataUrl, size = 28) {
@@ -12075,14 +13519,75 @@ function makeAttachThumb(dataUrl, size = 28) {
   })
 }
 
+function bindAgentSkillsPicker() {
+  $('agent-skills-pop-search')?.addEventListener('input', (e) => {
+    state.agentSkillsPickerSearch = e.target.value
+    paintAgentSkillsPicker()
+  })
+  $('agent-skills-pick-files')?.addEventListener('click', () => {
+    state.agentSkillsPickerOpen = false
+    paintAgentSkillsPicker()
+    $('agent-file-input')?.click()
+  })
+  $('agent-skills-manage')?.addEventListener('click', () => {
+    state.agentSkillsPickerOpen = false
+    paintAgentSkillsPicker()
+    openSettingsSkills()
+  })
+  $('agent-skills-connectors')?.addEventListener('click', () => {
+    state.agentSkillsPickerOpen = false
+    paintAgentSkillsPicker()
+    openSettingsConnectors()
+  })
+  document.querySelectorAll('[data-local-skill-pick]').forEach((btn) => {
+    btn.onclick = () => {
+      const name = btn.getAttribute('data-local-skill-pick')
+      const skill = (state.localAgentSkills || []).find((row) => row.name === name)
+      if (skill) toggleLocalSkillAttachment(skill)
+    }
+  })
+  document.querySelectorAll('[data-plugin-install-pop]').forEach((btn) => {
+    btn.onclick = () => {
+      void installMarketplacePlugin(btn.getAttribute('data-plugin-install-pop')).then(() => paintAgentSkillsPicker())
+    }
+  })
+  document.querySelectorAll('[data-skill-pick]').forEach((btn) => {
+    btn.onclick = () => {
+      const id = btn.getAttribute('data-skill-pick')
+      const skill = state.userSkills.find((row) => row.id === id)
+      if (skill) toggleSkillAttachment(skill)
+    }
+  })
+  document.querySelectorAll('[data-plugin-skill-pick]').forEach((btn) => {
+    btn.onclick = () => {
+      const skill = flattenPluginSkills().find((row) => row.id === btn.getAttribute('data-plugin-skill-pick'))
+      if (skill) togglePluginSkillAttachment(skill)
+    }
+  })
+}
+
+async function openAgentSkillsPicker() {
+  if (state.agentBusy) return
+  state.agentSkillsPickerOpen = !state.agentSkillsPickerOpen
+  if (!state.agentSkillsPickerOpen) {
+    paintAgentSkillsPicker()
+    return
+  }
+  paintAgentSkillsPicker()
+  await loadLocalAgentSkills()
+  if (state.user) await Promise.all([loadUserSkills(), loadPlugins()])
+  paintAgentSkillsPicker()
+}
+
+function bindAgentSkillsButton() {
+  $('agent-skills-btn')?.addEventListener('click', () => void openAgentSkillsPicker())
+}
+
 function bindAgentAttachments() {
   const input = $('agent-file-input')
   const pick = $('agent-attach')
   if (pick) {
-    pick.onclick = () => {
-      if (state.agentBusy) return
-      input?.click()
-    }
+    pick.onclick = () => void openAgentSkillsPicker()
   }
   if (input) {
     input.onchange = () => {
@@ -12095,6 +13600,29 @@ function bindAgentAttachments() {
       const idx = Number(btn.dataset.rm)
       state.agentAttachments.splice(idx, 1)
       refreshAgentAttachRow()
+    }
+  })
+  $('agent-attach-row')?.querySelectorAll('[data-skill-rm]').forEach((btn) => {
+    btn.onclick = () => {
+      detachSkillFromThread(btn.getAttribute('data-skill-rm'))
+    }
+  })
+  $('agent-attach-row')?.querySelectorAll('[data-plugin-skill-rm]').forEach((btn) => {
+    btn.onclick = () => {
+      detachPluginSkillFromThread(btn.getAttribute('data-plugin-skill-rm'))
+    }
+  })
+  $('agent-attach-row')?.querySelectorAll('[data-local-skill-rm]').forEach((btn) => {
+    btn.onclick = () => {
+      detachLocalSkillFromThread(btn.getAttribute('data-local-skill-rm'))
+    }
+  })
+  $('agent-attach-row')?.querySelectorAll('[data-manual-skill-rm]').forEach((btn) => {
+    btn.onclick = () => {
+      detachManualSkillFromThread(
+        btn.getAttribute('data-manual-skill-rm'),
+        btn.getAttribute('data-manual-skill-file') || '',
+      )
     }
   })
   $('agent-attach-row')?.querySelectorAll('[data-full]').forEach((btn) => {
@@ -12134,6 +13662,7 @@ function refreshAgentAttachRow() {
   if (!row) return
   row.innerHTML = renderAgentAttachChips()
   bindAgentAttachments()
+  bindLogoFallback(row)
 }
 
 function clearAgentComposerAttachments() {
@@ -12148,8 +13677,8 @@ function agentFileSizeCap(file) {
   const name = file.name || ''
   if (mime.startsWith('image/')) return 8_000_000
   if (mime.startsWith('video/')) return 8_000_000
-  if (mime === 'application/pdf' || name.toLowerCase().endsWith('.pdf')) return 8_000_000
-  if (mime.startsWith('text/') || /\.(md|txt|json|csv|ts|tsx|js|jsx|py|html|css|xml|yaml|yml|skill)$/i.test(name)) {
+  if (/\.(pdf|docx?|xlsx?|pptx?|odt|ods|odp|epub|rtf|zip)$/i.test(name)) return 8_000_000
+  if (mime.startsWith('text/') || /\.(md|txt|json|csv|ts|tsx|js|jsx|py|html|css|xml|yaml|yml|skill|rtf|log|ini)$/i.test(name)) {
     return 400_000
   }
   return 2_000_000
@@ -12158,7 +13687,10 @@ function agentFileSizeCap(file) {
 function isAgentTextFile(file) {
   const mime = file.type || ''
   const name = file.name || ''
-  return mime.startsWith('text/') || /\.(md|txt|json|csv|ts|tsx|js|jsx|py|html|css|xml|yaml|yml|skill)$/i.test(name)
+  return (
+    mime.startsWith('text/') ||
+    /\.(md|txt|json|csv|ts|tsx|js|jsx|py|html|css|xml|yaml|yml|skill|rtf|log|ini|cfg|conf|toml|vue|svelte|astro)$/i.test(name)
+  )
 }
 
 async function addAgentFiles(fileList) {
@@ -12173,11 +13705,25 @@ async function addAgentFiles(fileList) {
     if (isAgentTextFile(file)) {
       try {
         entry.text = (await file.text()).slice(0, 200_000)
+        const skillMeta = skillMetaFromAgentText(name, entry.text)
+        if (skillMeta) {
+          attachManualSkillToThread(skillMeta)
+          continue
+        }
       } catch {
         continue
       }
     } else {
       entry.dataUrl = await readBlobAsDataUrl(file)
+      if (!mime.startsWith('image/') && !mime.startsWith('video/')) {
+        try {
+          const extracted = await api.extractDocument?.({ name, mime, dataUrl: entry.dataUrl })
+          if (extracted?.text) entry.text = extracted.text.slice(0, 200_000)
+          if (extracted?.analysis) entry.analysis = extracted.analysis
+        } catch {
+          /* agent harness extracts again on send */
+        }
+      }
       if (mime.startsWith('image/')) {
         try {
           entry.dataUrl = await compressAgentImage(entry.dataUrl)
@@ -12317,7 +13863,7 @@ function renderAgentQueueStrip() {
     return
   }
   row.hidden = false
-  row.innerHTML = `<div class="agent-queue-head">Queued (${items.length}) — sends after the current run, or use Send now</div>${items
+  row.innerHTML = `<div class="agent-queue-head">Wait line (${items.length}) — runs after current task · Send now skips the queue</div>${items
     .map(
       ({ q, idx }, display) => `<div class="agent-queue-item" data-outbox-idx="${idx}">
         <span class="agent-queue-num">${display + 1}</span>
@@ -12341,11 +13887,11 @@ function renderAgentQueueStrip() {
       if (!item) return
       state.agentOutbox.splice(i, 1)
       renderAgentQueueStrip()
-      state.agentInterruptAfterCancel = {
-        text: item.text || '',
-        attach: item.attach || [],
-        threadId: item.threadId || state.activeThreadId,
-      }
+      state.agentInterruptAfterCancel = composeInterruptPayload(
+        item.text || '',
+        item.attach || [],
+        item.threadId || state.activeThreadId,
+      )
       setAgentLiveStatus('Stopping to run queued message…')
       void api.agentCancel()
     }
@@ -12374,20 +13920,26 @@ function updateAgentBusyUi() {
   if (runStop) runStop.hidden = !activeRunning
   if (go) {
     go.disabled = false
-    go.title = activeRunning ? 'Stop current run and send this message' : 'Send message'
+    go.title = activeRunning ? 'Add to wait line (runs after current task)' : 'Send message'
   }
-  if (queueBtn) queueBtn.hidden = !activeRunning
+  const sendNow = $('agent-send-now')
+  if (sendNow) sendNow.hidden = !activeRunning
+  if (queueBtn) queueBtn.hidden = true
   if (input) {
     input.disabled = false
     input.placeholder = activeRunning
-      ? 'Enter = queue · Ctrl+Enter = steer now · Send button = interrupt'
+      ? 'Type while agent works — Send = queue · Send now = interrupt · Ctrl+Enter = steer'
       : state.agentDriver === 'bot'
         ? 'Message New Bot'
         : 'Describe a task or ask a question…'
   }
-  $('agent-mode-btn')?.toggleAttribute('disabled', activeRunning)
-  $('agent-intel-btn')?.toggleAttribute('disabled', activeRunning)
-  $('agent-model-btn')?.toggleAttribute('disabled', activeRunning)
+  $('agent-attach')?.removeAttribute('disabled')
+  $('agent-voice-btn')?.removeAttribute('disabled')
+  if (activeRunning) {
+    void refreshTerminalTrayState().then(() => paintAgentBgTerminals())
+    syncAgentReviewLive()
+    paintAgentReviewTray()
+  }
   refreshAgentRunBar()
   renderAgentQueueStrip()
   updateAgentEditorTrack()
@@ -12397,19 +13949,79 @@ function updateAgentBusyUi() {
   updateStatus()
 }
 
+function syncAgentReviewLive() {
+  const t = activeThread()
+  const act = t.items.find((i) => i.role === 'activity' && (i.open || state.agentBusy))
+  if (act?.steps?.length) updateAgentReviewFromActivity(act)
+}
+
+function interruptHandoffForThread(threadId) {
+  const t = state.threads.find((row) => row.id === threadId) || activeThread()
+  const act = t.items.find((i) => i.role === 'activity' && (i.open || i.steps?.length))
+  const edited = [
+    ...new Set(
+      (act?.steps || [])
+        .filter(
+          (s) =>
+            s.kind === 'tool' &&
+            /^(write|diff|edit|str_replace|apply_patch)$/i.test(String(s.name || '')) &&
+            s.state === 'done' &&
+            s.path,
+        )
+        .map((s) => s.path),
+    ),
+  ]
+  if (edited.length) return `interrupted after editing ${edited.slice(0, 8).join(', ')}`
+  if (act?.status) return `interrupted during: ${act.status}`
+  return 'interrupted mid-task'
+}
+
+function composeInterruptPayload(text, attach, threadId) {
+  return {
+    text: text || '',
+    attach: attach || [],
+    threadId: threadId || state.activeThreadId,
+    handoff: interruptHandoffForThread(threadId || state.activeThreadId),
+  }
+}
+
 function updateAgentReviewFromActivity(act) {
-  const paths = []
+  const fileMap = new Map()
   let checkpointId = ''
   for (const step of act?.steps || []) {
     if (step.kind === 'checkpoint' && step.id) checkpointId = step.id
     const n = String(step.name || '').toLowerCase()
     if (step.kind === 'tool' && /^(write|diff|edit|str_replace|apply_patch)$/.test(n) && step.path) {
-      paths.push(step.path)
+      fileMap.set(step.path, {
+        path: step.path,
+        added: step.linesAdded || 0,
+        removed: step.linesRemoved || 0,
+      })
     }
   }
-  const unique = [...new Set(paths)]
-  state.agentReview = unique.length ? { paths: unique, checkpointId, hidden: false } : null
+  const files = [...fileMap.values()]
+  state.agentReview = files.length
+    ? {
+        paths: files.map((f) => f.path),
+        files,
+        checkpointId: checkpointId || state.agentReview?.checkpointId || '',
+        hidden: false,
+      }
+    : state.agentBusy
+      ? state.agentReview
+      : null
   paintAgentReviewTray()
+}
+
+function updateComposerTraysDock() {
+  const dock = $('agent-composer-trays')
+  if (!dock) return
+  const canvas = $('agent-canvas-tray')
+  const terms = $('agent-bg-terminals')
+  const review = $('agent-review-tray')
+  const any =
+    (canvas && !canvas.hidden) || (terms && !terms.hidden) || (review && !review.hidden)
+  dock.hidden = !any
 }
 
 function paintAgentReviewTray() {
@@ -12418,24 +14030,142 @@ function paintAgentReviewTray() {
   const rev = state.agentReview
   if (!rev || rev.hidden || !rev.paths?.length) {
     tray.hidden = true
+    updateComposerTraysDock()
     return
   }
   tray.hidden = false
+  if (!tray.open) tray.open = true
   const label = $('agent-review-label')
-  if (label) label.textContent = `Review ${rev.paths.length} file${rev.paths.length === 1 ? '' : 's'}`
+  if (label) label.textContent = `${rev.paths.length} File${rev.paths.length === 1 ? '' : 's'}`
+  const list = $('agent-review-files')
+  if (list) {
+    list.innerHTML = (rev.files || rev.paths.map((p) => ({ path: p, added: 0, removed: 0 })))
+      .map(
+        (f) =>
+          `<li class="agent-review-file">
+            <button type="button" class="agent-review-file-btn" data-agent-path="${escapeAttr(f.path)}" title="${escapeAttr(f.path)}">
+              <span class="agent-review-file-name">${escapeHtml(agentFileLeaf(f.path))}</span>
+              ${f.added || f.removed ? agentDiffStatHtml(f.added, f.removed) : ''}
+            </button>
+            <button type="button" class="agent-review-file-undo" data-review-undo="${escapeAttr(f.path)}" title="Restore this file">Restore</button>
+          </li>`,
+      )
+      .join('')
+    list.querySelectorAll('[data-agent-path]').forEach((btn) => {
+      btn.onclick = () => void openFile(joinWorkspacePath(btn.dataset.agentPath))
+    })
+    list.querySelectorAll('[data-review-undo]').forEach((btn) => {
+      btn.onclick = (e) => {
+        e.stopPropagation()
+        const rel = btn.dataset.reviewUndo
+        const id = state.agentReview?.checkpointId
+        if (!id || !rel) return
+        void api.checkpointRestore(id, [rel]).then((res) => {
+          appendPanelOutput(`[review] ${res.ok ? res.text : res.error || 'Restore failed'}\n`)
+          if (state.agentReview?.files) {
+            state.agentReview.files = state.agentReview.files.filter((f) => f.path !== rel)
+            state.agentReview.paths = state.agentReview.files.map((f) => f.path)
+            if (!state.agentReview.paths.length) state.agentReview.hidden = true
+          }
+          paintAgentReviewTray()
+          void refreshTree()
+        })
+      }
+    })
+  }
+  updateComposerTraysDock()
+}
+
+async function refreshTerminalTrayState() {
+  if (!state.folder || typeof api.terminalState !== 'function') return
+  try {
+    const ts = await api.terminalState()
+    state.agentTerminalLive = ts.devServerUp && ts.urls?.length ? ts.urls[ts.urls.length - 1] : ''
+    if (ts.devServerUp && ts.urls?.length) {
+      const url = ts.urls[ts.urls.length - 1]
+      const exists = state.agentBgTerminals.some((r) => r.command.includes(url))
+      if (!exists) {
+        state.agentBgTerminals.unshift({ command: `Dev server ${url}`, label: url, at: Date.now(), live: true })
+        state.agentBgTerminals = state.agentBgTerminals.slice(0, 8)
+      }
+    }
+  } catch {
+    /* optional */
+  }
+}
+
+function paintAgentBgTerminals() {
+  const tray = $('agent-bg-terminals')
+  const list = $('agent-bg-terminals-list')
+  const label = $('agent-bg-terminals-label')
+  const rows = state.agentBgTerminals || []
+  if (!tray || !list) return
+  if (!rows.length && !state.agentTerminalLive) {
+    tray.hidden = true
+    updateComposerTraysDock()
+    return
+  }
+  tray.hidden = false
+  if (label) {
+    const count = rows.length || (state.agentTerminalLive ? 1 : 0)
+    const base = count
+      ? `${count} background terminal${count === 1 ? '' : 's'}`
+      : 'Dev server running'
+    const live = state.agentTerminalLive
+    label.innerHTML =
+      live && count <= 1
+        ? `${escapeHtml(base)}<span class="agent-dock-meta"> · ${escapeHtml(live.replace(/^https?:\/\//, ''))}</span>`
+        : escapeHtml(base)
+  }
+  const listRows = rows.slice()
+  if (state.agentTerminalLive && !listRows.some((r) => r.label.includes(state.agentTerminalLive))) {
+    listRows.unshift({
+      label: state.agentTerminalLive,
+      live: true,
+    })
+  }
+  list.innerHTML = listRows
+    .map(
+      (r) =>
+        `<li class="agent-bg-term-row${r.live ? ' is-live' : ''}"><span class="agent-bg-term-icon" aria-hidden="true">›_</span><span class="agent-bg-term-cmd">${escapeHtml(r.label)}</span></li>`,
+    )
+    .join('')
+  updateComposerTraysDock()
+}
+
+function paintAgentCanvasTray() {
+  const tray = $('agent-canvas-tray')
+  const label = $('agent-canvas-label')
+  const c = state.agentCanvas
+  if (!tray) return
+  if (!c || c.hidden) {
+    tray.hidden = true
+    updateComposerTraysDock()
+    return
+  }
+  tray.hidden = false
+  if (label) label.textContent = `Canvas: ${c.title || c.path || 'Design'}`
+  updateComposerTraysDock()
 }
 
 function bindAgentReviewTray() {
+  document.querySelectorAll('.agent-dock-summary-review .agent-dock-actions').forEach((el) => {
+    el.onmousedown = (e) => e.preventDefault()
+  })
   const keep = $('agent-review-keep')
   if (keep) {
-    keep.onclick = () => {
+    keep.onclick = (e) => {
+      e.preventDefault()
+      e.stopPropagation()
       if (state.agentReview) state.agentReview.hidden = true
       paintAgentReviewTray()
     }
   }
   const undo = $('agent-review-undo')
   if (undo) {
-    undo.onclick = () => {
+    undo.onclick = (e) => {
+      e.preventDefault()
+      e.stopPropagation()
       const id = state.agentReview?.checkpointId
       if (!id) return
       void api.checkpointRestore(id).then((res) => {
@@ -12443,9 +14173,51 @@ function bindAgentReviewTray() {
         if (state.agentReview) state.agentReview.hidden = true
         paintAgentReviewTray()
         void refreshTree()
+        for (const tab of state.tabs) {
+          if (tab.path) delete tab.beforeAgentEdit
+        }
+        renderEditor()
       })
     }
   }
+  const reviewOpen = $('agent-review-open')
+  if (reviewOpen) {
+    reviewOpen.onclick = (e) => {
+      e.preventDefault()
+      e.stopPropagation()
+      const rev = state.agentReview
+      if (!rev?.paths?.length) return
+      void (async () => {
+        for (const rel of rev.paths.slice(0, 12)) {
+          await openFile(joinWorkspacePath(rel))
+        }
+      })()
+    }
+  }
+  const canvasOpen = $('agent-canvas-open')
+  if (canvasOpen) {
+    canvasOpen.onclick = (e) => {
+      e.preventDefault()
+      e.stopPropagation()
+      const p = state.agentCanvas?.path || 'CANVAS.md'
+      void openFile(joinWorkspacePath(p))
+    }
+  }
+  paintAgentBgTerminals()
+  paintAgentCanvasTray()
+}
+
+function userWantsPlanFirstLocal(text) {
+  const t = String(text || '')
+  if (/\b(what can you do|what can u do|what do you do|what can you do with|capabilities)\b/i.test(t)) return false
+  if (/\bbuild\b/i.test(t) && !/\bplan first\b/i.test(t)) return false
+  return /\b(plan first|make a plan|create a plan|plan mode|let'?s plan|we plan|plan before|write a plan|need a plan|plan it first|plan this first|plan out)\b/i.test(t)
+}
+
+function userWantsBuildPlanLocal(text) {
+  const t = String(text || '').trim()
+  if (/^build\.?$/i.test(t)) return true
+  return /\b(execute plan|go ahead and build|build it now|start building|approve plan|run the plan|implement plan)\b/i.test(t)
 }
 
 function getOrCreateActivity(t) {
@@ -12500,7 +14272,31 @@ function appendAgentReply(t, text, modelId) {
   if (last && last.text === safe) return
   const requested = t.model || state.agentModel || modelId
   const foot = modelDisplayNameForId(requested)
-  t.items.push({ role: 'agent', text: safe, model: foot, modelId: requested })
+  const parsed = parseAgentChoices(safe)
+  const row = {
+    role: 'agent',
+    text: safe,
+    model: foot,
+    modelId: requested,
+  }
+  applyParsedChoices(row, parsed)
+  t.items.push(row)
+}
+
+function ensureAgentChoicesFromText(t, text, modelId) {
+  const parsed = parseAgentChoices(text)
+  if (!parsed?.items?.length) return false
+  const lastAgent = [...t.items].reverse().find((i) => i.role === 'agent')
+  if (lastAgent && !lastAgent.choicePicked) {
+    const existing = lastAgent.choices?.length || 0
+    if (!existing || parsed.items.length > existing) {
+      applyParsedChoices(lastAgent, parsed)
+      if (String(text || '').length > String(lastAgent.text || '').length) lastAgent.text = text
+    }
+    return true
+  }
+  appendAgentReply(t, text, modelId)
+  return true
 }
 
 function finishOpenActivity(t, label) {
@@ -12541,9 +14337,10 @@ function handleAgentStreamEvent(ev) {
   if (ev.type === 'status') {
     setAgentAvatarState('thinking')
     const act = getOrCreateActivity(t)
-    act.status = ev.text
-    if (!(act.steps || []).length) act.thought = ev.text
-    setAgentLiveStatus(ev.text)
+    const short = agentStatusDisplayText(ev.text)
+    act.status = short
+    if (!(act.steps || []).length) act.thought = short
+    setAgentLiveStatus(short)
     if (state.agentLiveFile) {
       state.agentLiveFile.detail = ev.text
       updateAgentEditorTrack()
@@ -12573,7 +14370,12 @@ function handleAgentStreamEvent(ev) {
     ) {
       lastStep.args = { ...(lastStep.args || {}), ...(ev.args || {}) }
     } else {
-      act.steps.push({ kind: 'tool', name: ev.name, args: ev.args || {}, state: 'running' })
+      const step = { kind: 'tool', name: ev.name, args: ev.args || {}, state: 'running' }
+      if (ev.contentPreview) {
+        step.contentPreview = ev.contentPreview
+        step.path = ev.path || ev.args?.path || ev.args?.file || ''
+      }
+      act.steps.push(step)
     }
     act.status = agentToolLiveLabel(ev.name, ev.args, 'start')
     setAgentLiveStatus(act.status)
@@ -12606,9 +14408,22 @@ function handleAgentStreamEvent(ev) {
     t.mode = target
     $('agent-mode-label').textContent = agentModeLabel()
     setAgentLiveStatus(ev.explanation ? `Mode → ${target}: ${ev.explanation}` : `Mode → ${target}`)
+  } else if (ev.type === 'plan_file') {
+    state.agentCanvas = null
+    paintAgentCanvasTray()
+    const rel = ev.path || 'PLAN.md'
+    void openFile(joinWorkspacePath(rel))
+    setAgentLiveStatus('Plan saved — review PLAN.md, then send BUILD')
+  } else if (ev.type === 'canvas') {
+    state.agentCanvas = { path: ev.path || 'CANVAS.md', title: ev.title || 'Design', hidden: false }
+    paintAgentCanvasTray()
+    void openFile(joinWorkspacePath(state.agentCanvas.path))
   } else if (ev.type === 'workspace_refresh') {
     void refreshTree()
   } else if (ev.type === 'result') {
+    if (ev.ok && /^attempt_completion$/i.test(String(ev.name || '')) && ev.text) {
+      ensureAgentChoicesFromText(t, ev.text, t.model || state.agentModel)
+    }
     const act = t.items.find((i) => i.role === 'activity' && i.open)
     if (act) {
       for (let i = act.steps.length - 1; i >= 0; i--) {
@@ -12625,12 +14440,26 @@ function handleAgentStreamEvent(ev) {
           act.status = agentToolLiveLabel(ev.name, step.args, ev.ok ? 'done' : 'start')
           setAgentLiveStatus(act.status)
           agentFollowToolResult(ev.name, ev.ok, ev.text, ev.path)
+          if (
+            ev.ok &&
+            /^(write|diff|edit|str_replace|apply_patch|delete|wipe_workspace|clear_workspace)$/i.test(n)
+          ) {
+            void refreshTree()
+          }
+          if (act && ev.ok && /^(write|diff|edit|str_replace|apply_patch)$/i.test(n) && ev.path) {
+            updateAgentReviewFromActivity(act)
+          }
           break
         }
       }
     }
   }
-  if (t.id === state.activeThreadId) paintAgentThread()
+  if (t.id === state.activeThreadId) {
+    syncAgentReviewLive()
+    paintAgentReviewTray()
+    paintAgentBgTerminals()
+    schedulePaintAgentThread()
+  }
 }
 
 function stripPendingAgent(t) {
@@ -12640,16 +14469,8 @@ function stripPendingAgent(t) {
 
 function accountHtml() {
   const who = state.user?.email || state.user?.name || 'Not signed in'
-  const ideOn = state.agentDriver === 'ide' ? ' on' : ''
-  const botOn = state.agentDriver === 'bot' ? ' on' : ''
   return `<div class="side-head">Account</div><div class="side-body">
     <p class="msg">${escapeHtml(who)}</p>
-    <p class="msg account-driver-label">Who helps you in the agent panel</p>
-    <div class="account-driver" role="group" aria-label="Agent driver">
-      <button type="button" class="account-driver-btn${ideOn}" data-driver="ide" ${state.agentBusy ? 'disabled' : ''}>IDE Agent</button>
-      <button type="button" class="account-driver-btn${botOn}" data-driver="bot" ${state.agentBusy ? 'disabled' : ''}>Soumtok Bot</button>
-    </div>
-    <p class="msg account-driver-hint">${state.agentDriver === 'bot' ? 'Soumtok Bot automates tasks on this folder until they are done.' : 'IDE Agent pair-programs with you step by step.'}</p>
     ${state.user ? '<button class="ghost" id="logout-btn">Sign out</button> <button class="primary" id="billing-btn">Billing</button>' : '<button class="primary" id="login-btn">Sign in</button>'}
     <p class="msg">Plans and invoices open in your account. This IDE edits files on this computer.</p>
   </div>`
@@ -12773,6 +14594,7 @@ async function logout() {
   } catch {
     /* ignore */
   }
+  flushWorkspaceSaveSync()
   await api.logout()
   setAuthBootLoading(false)
   state.user = null
@@ -12808,17 +14630,42 @@ async function refreshSession() {
   }
 }
 
+function agentMessageNeedsProjectFolder(text, attach, thread) {
+  const raw = String(text || '').trim()
+  const files = Array.isArray(attach) ? attach : []
+  const codingAttach = files.some((f) => {
+    const n = String(f?.name || '').toLowerCase()
+    return /\.(ts|tsx|js|jsx|py|go|rs|java|css|html|vue|svelte|json|yaml|toml)$/.test(n) && !/skill\.md$/i.test(n)
+  })
+  if (codingAttach) return true
+  if (!raw && !files.length) return false
+  const t = raw.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+  if (/^(hi|hello|hey|thanks|thank you|yo)$/.test(t)) return false
+  if (/\b(what can you do|what do you do|how can you help|explain|what is|who is|why|tell me about|help me understand)\b/.test(t)) {
+    return false
+  }
+  if (/\b(build|fix|implement|refactor|scaffold|write|edit|grep|read my|deploy|npm|terminal|wipe|list_dir|run my|localhost)\b/.test(t)) {
+    return true
+  }
+  if (/\b(build|create|make)\b/.test(t) && /\b(app|website|site|landing|dashboard)\b/.test(t)) return true
+  return false
+}
+
 async function sendAgent(queued, options) {
   if (!requireUser()) return
-  if (!state.folder) {
-    paintAgentThread()
-    activeThread().items.push({ role: 'agent', text: 'Open a project folder first (File → Open Folder).' })
-    paintAgentThread()
-    return
-  }
   const input = $('agent-input')
   const text = queued?.text ?? input?.value.trim()
   let attach = queued?.attach ?? state.agentAttachments.slice()
+  const sendThread = queued?.threadId ? state.threads.find((row) => row.id === queued.threadId) || activeThread() : activeThread()
+  if (!state.folder && agentMessageNeedsProjectFolder(text, attach, sendThread)) {
+    paintAgentThread()
+    activeThread().items.push({
+      role: 'agent',
+      text: 'Open a project folder first (File → Open Folder) for code and file tasks. For general questions, just ask — no folder needed.',
+    })
+    paintAgentThread()
+    return
+  }
   if (!text && !attach.length) return
   if (options?.steerNow && state.agentBusy && (text || attach.length)) {
     if (input && !queued) input.value = ''
@@ -12830,11 +14677,7 @@ async function sendAgent(queued, options) {
   }
   if (state.agentBusy && !queued) {
     if (options?.interrupt && (text || attach.length)) {
-      state.agentInterruptAfterCancel = {
-        text: text || '',
-        attach: attach.slice(),
-        threadId: state.activeThreadId,
-      }
+      state.agentInterruptAfterCancel = composeInterruptPayload(text || '', attach.slice(), state.activeThreadId)
       if (input) input.value = ''
       clearAgentComposerAttachments()
       setAgentLiveStatus('Stopping current run…')
@@ -12861,15 +14704,7 @@ async function sendAgent(queued, options) {
       return
     }
     if (text || attach.length) {
-      state.agentInterruptAfterCancel = {
-        text: text || '',
-        attach: attach.slice(),
-        threadId: state.activeThreadId,
-      }
-      if (input) input.value = ''
-      clearAgentComposerAttachments()
-      setAgentLiveStatus('Stopping current run…')
-      await api.agentCancel()
+      void sendAgent(undefined, { queueOnly: true })
       return
     }
     return
@@ -12879,11 +14714,21 @@ async function sendAgent(queued, options) {
   if (queued?.threadId && t.id !== state.activeThreadId) {
     state.activeThreadId = t.id
   }
+  if (text && userWantsPlanFirstLocal(text)) {
+    state.agentMode = 'plan'
+    $('agent-mode-label').textContent = agentModeLabel()
+  } else if (text && userWantsBuildPlanLocal(text)) {
+    state.agentMode = 'agent'
+    $('agent-mode-label').textContent = agentModeLabel()
+  }
   t.mode = state.agentMode
   t.model = state.agentModel
   const label = text || (attach[0]?.name ? `Image: ${attach[0].name}` : 'Attachment')
   if (t.title === 'New Agent' || t.title === 'New Bot') t.title = label.length > 40 ? `${label.slice(0, 38)}…` : label
   touchThreadActivity(t)
+  const handoffPrefix = queued?.handoff
+    ? `[Soumtok: Previous run ${queued.handoff}. Start the NEW request below — do not resume the old task unless the user asks.]\n\n`
+    : ''
   const userLine = stripAttachCaptions(text) || (attach.length ? '' : '')
   t.items.push({
     role: 'user',
@@ -12924,10 +14769,40 @@ async function sendAgent(queued, options) {
       mode: state.agentMode,
       driver: state.agentDriver,
       messages: t.modelMessages,
-      userMessage: stripAttachCaptions(text) || 'See attached image and help with my project.',
+      userMessage:
+        handoffPrefix + (stripAttachCaptions(text) || 'See attached image and help with my project.'),
       threadTitle: t.title || '',
+      threadId: t.id,
       openFiles,
       files: attach,
+      attachedSkills: (t.attachedSkills || []).map((skill) => ({
+        id: skill.id,
+        name: skill.name,
+        file_name: skill.file_name,
+        excerpt: skill.excerpt,
+      })),
+      attachedPluginSkills: (t.attachedPluginSkills || []).map((skill) => ({
+        id: skill.id,
+        skillId: skill.skillId,
+        label: skill.label,
+        pluginName: skill.pluginName,
+        pluginId: skill.pluginId,
+        description: skill.description,
+        insert: skill.insert,
+        sourceUrl: skill.sourceUrl,
+      })),
+      attachedLocalSkills: (t.attachedLocalSkills || []).map((skill) => ({
+        name: skill.name,
+        description: skill.description,
+        source: skill.source,
+      })),
+      attachedManualSkills: (t.attachedManualSkills || []).map((skill) => ({
+        name: skill.name,
+        description: skill.description,
+        source: skill.source,
+        fileName: skill.fileName,
+        body: skill.body,
+      })),
       agentPrefs: prefs,
       subagentModel: state.subagentModel,
     })

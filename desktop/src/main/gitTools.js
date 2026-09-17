@@ -69,9 +69,15 @@ function runGitTool(root, args) {
     if (add.status !== 0) return gitOk(add)
     return gitOk(runGit(root, ['commit', '-m', message]))
   }
+  if (action === 'push' || action === 'publish') {
+    return {
+      ok: false,
+      text: 'Use git({ action: "push" }) or github({ action: "publish" }) — push is handled by Soumtok GitHub OAuth.',
+    }
+  }
   return {
     ok: false,
-    text: `Unknown git action "${action}". Use status, diff, log, branch, show, or commit.`,
+    text: `Unknown git action "${action}". Use status, diff, log, branch, show, commit, or push.`,
   }
 }
 

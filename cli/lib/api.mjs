@@ -1,5 +1,10 @@
 import { resolveApiBase, resolveAuth } from './config.mjs'
 
+function userFromMePayload(data) {
+  if (!data?.id) return null
+  return { id: data.id, email: data.email, name: data.name, ready: Boolean(data.ready) }
+}
+
 /** Match shared/session.ts — send every name Better Auth may read (esp. __Secure- on HTTPS). */
 function sessionCookieNames(base) {
   const secure = String(base || '').startsWith('https://')
@@ -79,6 +84,15 @@ export function createApiClient(baseOverride) {
     api: request,
     getBuffer,
     async session() {
+      const auth = resolveAuth()
+      if (auth?.kind === 'apiKey') {
+        const res = await request('GET', '/api/v1/me')
+        if (res.status === 200) return userFromMePayload(res.data)
+        if (typeof res.data?.raw === 'string' && res.data.raw.trimStart().startsWith('<!')) {
+          throw new Error('API returned HTML instead of JSON — check SOUMTOK_API / network')
+        }
+        return null
+      }
       const res = await request('GET', '/api/auth/get-session')
       if (res.status === 200 && res.data?.user) return res.data.user
       if (res.data?.session?.user) return res.data.session.user

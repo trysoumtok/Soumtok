@@ -1,5 +1,6 @@
 const { contextBridge, ipcRenderer } = require('electron')
 const { readOpenAiKeyFromEnvFile, transcribeWithOpenAiDirect } = require('../main/speechTranscribeCore')
+const { parseAgentChoices, stripNumberedListForChoices } = require('../../../shared/agentChoices.cjs')
 
 async function speechTranscribe(payload) {
   try {
@@ -18,9 +19,21 @@ async function speechTranscribe(payload) {
   return transcribeWithOpenAiDirect(key, payload)
 }
 
+contextBridge.exposeInMainWorld('SOUMTOK_AGENT_CHOICES', {
+  parseAgentChoices,
+  stripNumberedListForChoices,
+})
+
 contextBridge.exposeInMainWorld('soumtok', {
   info: () => ipcRenderer.invoke('app:info'),
   window: (action) => ipcRenderer.invoke('window:control', action),
+  isWindowMaximized: () => ipcRenderer.invoke('window:isMaximized'),
+  onWindowMaxChanged: (cb) => {
+    if (typeof cb !== 'function') return () => {}
+    const fn = (_event, maximized) => cb(!!maximized)
+    ipcRenderer.on('window:maximized', fn)
+    return () => ipcRenderer.removeListener('window:maximized', fn)
+  },
   newWindow: () => ipcRenderer.invoke('window:new'),
   openFolder: () => ipcRenderer.invoke('folder:open'),
   openPath: (dir) => ipcRenderer.invoke('folder:openPath', dir),
@@ -40,6 +53,7 @@ contextBridge.exposeInMainWorld('soumtok', {
   workspaceReplaceAll: (payload) => ipcRenderer.invoke('workspace:replaceAll', payload),
   workspaceLoad: () => ipcRenderer.invoke('workspace:load'),
   workspaceSave: (payload) => ipcRenderer.invoke('workspace:save', payload),
+  workspaceSaveSync: (payload) => ipcRenderer.sendSync('workspace:saveSync', payload),
   readFile: (filePath) => ipcRenderer.invoke('file:read', filePath),
   readFileMedia: (filePath) => ipcRenderer.invoke('file:readMedia', filePath),
   writeFile: (filePath, contents) => ipcRenderer.invoke('file:write', filePath, contents),
@@ -59,6 +73,7 @@ contextBridge.exposeInMainWorld('soumtok', {
   logout: () => ipcRenderer.invoke('auth:logout'),
   session: () => ipcRenderer.invoke('auth:session'),
   agentRun: (payload) => ipcRenderer.invoke('agent:run', payload),
+  extractDocument: (payload) => ipcRenderer.invoke('documents:extract', payload),
   agentCancel: () => ipcRenderer.invoke('agent:cancel'),
   agentJobs: () => ipcRenderer.invoke('agent:jobs'),
   agentJobEvents: (id) => ipcRenderer.invoke('agent:job-events', id),
@@ -66,7 +81,10 @@ contextBridge.exposeInMainWorld('soumtok', {
   agentAskReply: (payload) => ipcRenderer.invoke('agent:askReply', payload),
   checkUpdates: () => ipcRenderer.invoke('app:checkUpdates'),
   logCrash: (payload) => ipcRenderer.invoke('crash:log', payload),
-  checkpointRestore: (id) => ipcRenderer.invoke('checkpoint:restore', id),
+  checkpointRestore: (id, paths) =>
+    ipcRenderer.invoke('checkpoint:restore', paths?.length ? { id, paths } : id),
+  checkpointList: () => ipcRenderer.invoke('checkpoint:list'),
+  terminalState: () => ipcRenderer.invoke('terminal:state'),
   extensionsSearch: (payload) => ipcRenderer.invoke('extensions:search', payload),
   extensionsPopular: (payload) => ipcRenderer.invoke('extensions:popular', payload),
   extensionsDetail: (payload) => ipcRenderer.invoke('extensions:detail', payload),
@@ -121,10 +139,22 @@ contextBridge.exposeInMainWorld('soumtok', {
   testHubPublish: (payload) => ipcRenderer.invoke('testhub:publish', payload),
   testHubListDeploys: (payload) => ipcRenderer.invoke('testhub:deploys:list', payload),
   testHubDeleteDeploy: (payload) => ipcRenderer.invoke('testhub:deploys:delete', payload),
+  agentListLocalSkills: () => ipcRenderer.invoke('agent:listLocalSkills'),
+  skillsList: () => ipcRenderer.invoke('skills:list'),
+  skillsUpload: (payload) => ipcRenderer.invoke('skills:upload', payload),
+  skillsRemove: (payload) => ipcRenderer.invoke('skills:remove', payload),
+  pluginsList: () => ipcRenderer.invoke('plugins:list'),
+  pluginsInstall: (payload) => ipcRenderer.invoke('plugins:install', payload),
+  pluginsRemove: (payload) => ipcRenderer.invoke('plugins:remove', payload),
   studySavePdf: (payload) => ipcRenderer.invoke('study:savePdf', payload),
   fetchProfile: () => ipcRenderer.invoke('profile:load'),
   fetchAvatarDataUrl: () => ipcRenderer.invoke('profile:avatar'),
   uploadProfileAvatar: () => ipcRenderer.invoke('profile:uploadAvatar'),
+  onProfileUploadProgress: (fn) => {
+    const listen = (_event, data) => fn(data)
+    ipcRenderer.on('profile:uploadProgress', listen)
+    return () => ipcRenderer.removeListener('profile:uploadProgress', listen)
+  },
   fetchPlatformProviders: () => ipcRenderer.invoke('agent:platform-providers'),
   fetchAccountSummary: () => ipcRenderer.invoke('account:summary'),
   speechTranscribe,
@@ -145,11 +175,14 @@ contextBridge.exposeInMainWorld('soumtok', {
   openBilling: () => ipcRenderer.invoke('billing:open'),
   openDashboard: () => ipcRenderer.invoke('dashboard:open'),
   openGithub: () => ipcRenderer.invoke('github:open'),
+  grantGithubRepos: () => ipcRenderer.invoke('github:grantRepos'),
   connectorsList: () => ipcRenderer.invoke('connectors:list'),
   connectorsMarketplace: (query) => ipcRenderer.invoke('connectors:marketplace', query),
   connectorsAdd: (payload) => ipcRenderer.invoke('connectors:add', payload),
   connectorsConnect: (id) => ipcRenderer.invoke('connectors:connect', id),
   connectorsOauth: (payload) => ipcRenderer.invoke('connectors:oauth', payload),
+  connectStart: (payload) => ipcRenderer.invoke('connect:start', payload),
+  connectPoll: (code) => ipcRenderer.invoke('connect:poll', code),
   termCreate: (opts) => ipcRenderer.invoke('term:create', opts),
   termListLive: (opts) => ipcRenderer.invoke('term:list-live', opts),
   termStart: (cwd) => ipcRenderer.invoke('term:start', cwd),
@@ -188,9 +221,20 @@ contextBridge.exposeInMainWorld('soumtok', {
     ipcRenderer.on('extensions:scope-changed', listen)
     return () => ipcRenderer.removeListener('extensions:scope-changed', listen)
   },
+  onConnectorsUpdated: (fn) => {
+    const listen = () => fn()
+    ipcRenderer.on('connectors:updated', listen)
+    return () => ipcRenderer.removeListener('connectors:updated', listen)
+  },
   onExtensionHostUiReady: (fn) => {
     const listen = () => fn()
     ipcRenderer.on('extension-host:ui-ready', listen)
     return () => ipcRenderer.removeListener('extension-host:ui-ready', listen)
+  },
+  onExtensionHostDownloadProgress: (fn) => {
+    if (typeof fn !== 'function') return () => {}
+    const listen = (_e, data) => fn(data)
+    ipcRenderer.on('extensionHost:downloadProgress', listen)
+    return () => ipcRenderer.removeListener('extensionHost:downloadProgress', listen)
   },
 })

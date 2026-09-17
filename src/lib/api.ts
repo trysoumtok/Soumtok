@@ -559,8 +559,13 @@ export type SshKeyRow = {
 
 export async function fetchAccountKeys() {
   const res = await fetch('/api/account-keys', { credentials: 'include' })
-  if (!res.ok) throw new Error('Could not load keys')
-  return res.json() as Promise<{ apiKeys: UserApiKey[]; sshKeys: SshKeyRow[] }>
+  const data = (await res.json().catch(() => ({}))) as {
+    error?: string
+    apiKeys?: UserApiKey[]
+    sshKeys?: SshKeyRow[]
+  }
+  if (!res.ok) throw new Error(data.error || 'Could not load keys')
+  return { apiKeys: data.apiKeys || [], sshKeys: data.sshKeys || [] }
 }
 
 export async function createUserApiKey(name: string, expiresInDays?: number | null) {
@@ -825,6 +830,8 @@ export type ConnectDeviceSession = {
   verificationUri?: string
   provider: string
   name: string
+  logo?: string | null
+  logos?: string[]
   connectorId?: string | null
   kind?: string
   status?: string
@@ -929,7 +936,9 @@ export async function fetchGithubRepos() {
     expired: Boolean(data.expired),
     login: data.login || null,
     repos: data.repos || [],
-    installUrl: data.installUrl || GITHUB_APP_INSTALL_URL,
+    installUrl: data.installUrl || data.grantReposUrl || GITHUB_APP_INSTALL_URL,
+    grantReposUrl: data.grantReposUrl || data.installUrl || GITHUB_APP_INSTALL_URL,
+    grantReposKind: data.grantReposKind || 'oauth',
   }
 }
 
@@ -1186,6 +1195,7 @@ export type StudioRun = {
   billedTo?: string
   promptTokens?: number
   completionTokens?: number
+  completionText?: string
 }
 
 /** Streams a completion, calling onText with the full text so far on each chunk. */
@@ -1205,6 +1215,9 @@ export async function streamStudio(
     agentPrefs?: Record<string, unknown>
     workspaceRoot?: string
     openFiles?: string[]
+    client?: string
+    runtime?: string
+    driver?: 'ide' | 'bot'
     onRound?: (text: string) => void
     onResult?: (result: { name: string; ok: boolean; text: string; files?: Record<string, string>; command?: string }) => void
     onTools?: (tools: { name: string; args: Record<string, string> }[]) => void
@@ -1227,6 +1240,9 @@ export async function streamStudio(
       agentPrefs: opts?.agentPrefs,
       workspaceRoot: opts?.workspaceRoot,
       openFiles: opts?.openFiles,
+      client: opts?.client,
+      runtime: opts?.runtime,
+      driver: opts?.driver,
     }),
     signal,
   })
@@ -1294,6 +1310,51 @@ export async function streamStudio(
   }
 
   return final.text ? final : { ...final, text }
+}
+
+export async function studioPublishRepo(
+  name: string,
+  files: Record<string, string>,
+  message = 'Initial commit from Soumtok Studio',
+  isPrivate = true,
+) {
+  const res = await fetch('/api/github/publish-repo', {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, private: isPrivate, files, message }),
+  })
+  const data = (await res.json()) as {
+    error?: string
+    needsGithub?: boolean
+    grantUrl?: string
+    fullName?: string
+    htmlUrl?: string
+    sha?: string
+    url?: string
+    branch?: string
+    count?: number
+    created?: boolean
+    pushed?: boolean
+  }
+  if (res.status === 403 && data.needsGithub) {
+    const err = new Error(data.error || 'Connect GitHub first') as Error & { grantUrl?: string; needsGithub?: boolean }
+    err.grantUrl = data.grantUrl
+    err.needsGithub = true
+    throw err
+  }
+  if (!res.ok) throw new Error(data.error || 'Could not create repository')
+  if (!data.fullName || !data.htmlUrl) throw new Error('Repository created but response was incomplete')
+  return {
+    fullName: data.fullName,
+    htmlUrl: data.htmlUrl,
+    sha: data.sha || '',
+    url: data.url || data.htmlUrl,
+    branch: data.branch || 'main',
+    count: data.count || 0,
+    created: Boolean(data.created),
+    pushed: Boolean(data.pushed),
+  }
 }
 
 export async function studioCommitRepo(repo: string, message: string, files: Record<string, string>) {

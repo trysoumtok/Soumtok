@@ -74,7 +74,7 @@ export const STUDIO_FUNCTIONS = [
   {
     name: 'terminal',
     description:
-      'Run a shell command in the workspace (Studio sandbox: node, python, npm test, git, etc.). On Soumtok Desktop IDE this runs on the user\'s real machine — see read_terminal in tool list for integrated Terminal.',
+      'Run a one-shot shell command (Web Studio sandbox: npm test, npm install, npx tsc, node -e). Do not start dev servers — Preview shows static HTML automatically. On Desktop IDE, terminal runs on the real machine.',
     parameters: parameters(
       {
         command: { ...STR, description: 'The exact command' },
@@ -112,10 +112,14 @@ export const STUDIO_FUNCTIONS = [
   },
   {
     name: 'github',
-    description: 'Clone the attached GitHub repository (or args.repo) into the workspace.',
+    description:
+      'GitHub in the open folder: clone (args.repo), publish (create private repo + push), or push (commit dirty files if needed, then push). Requires Soumtok GitHub connected — use Settings → Connectors if push fails.',
     parameters: parameters({
-      action: { ...STR, description: 'Use clone' },
-      repo: { ...STR, description: 'owner/name if not already attached' },
+      action: { ...STR, description: 'clone | publish | push' },
+      repo: { ...STR, description: 'owner/name for clone, or repo name for publish/push (defaults to folder name)' },
+      name: { ...STR, description: 'Repository name for publish/push' },
+      message: { ...STR, description: 'Commit message before push' },
+      private: { ...STR, description: 'true/false — default true for publish' },
     }),
   },
   {
@@ -139,7 +143,7 @@ export const STUDIO_FUNCTIONS = [
   {
     name: 'generate_image',
     description:
-      'Generate a still image with Flux 2 Max (no video, no music) and save it into the project. Use when they asked to generate/create/draw an image even if that is misspelled (genera, iamge, egale). Default path assets/generated/. Default aspect 1:1; pass aspect if they asked 16:9, 9:16, 4:3.',
+      'Generate a still image with Flux 1.1 Pro (no video, no music) and save it into the project. Use when they asked to generate/create/draw an image even if that is misspelled (genera, iamge, egale). Default path assets/generated/. Default aspect 1:1; pass aspect if they asked 16:9, 9:16, 4:3.',
     parameters: parameters(
       {
         prompt: { ...STR, description: 'What to draw. Do not include the ratio in this string — put that in aspect.' },
@@ -207,11 +211,12 @@ export const STUDIO_FUNCTIONS = [
   {
     name: 'git',
     description:
-      'Git in the open folder: status (default), diff, log, branch, show, commit. Prefer this over terminal("git …"). commit only when the user asked to commit.',
+      'Git in the open folder: status (default), diff, log, branch, show, commit, push. Prefer this over terminal("git …"). commit/push only when the user asked. push uses Soumtok GitHub OAuth.',
     parameters: parameters({
-      action: { ...STR, description: 'status | diff | log | branch | show | commit' },
+      action: { ...STR, description: 'status | diff | log | branch | show | commit | push' },
       path: { ...STR, description: 'Optional path for diff' },
-      message: { ...STR, description: 'Commit message (commit action)' },
+      message: { ...STR, description: 'Commit message (commit or push action)' },
+      name: { ...STR, description: 'GitHub repo name for push (defaults to folder name)' },
       staged: { ...STR, description: 'true for staged diff' },
       max: { ...STR, description: 'Max log entries' },
       rev: { ...STR, description: 'Rev for show' },
@@ -246,9 +251,13 @@ export const STUDIO_FUNCTIONS = [
   {
     name: 'attempt_completion',
     description:
-      'Call when the user request is actually done, with a short result. Requires tool evidence already in this turn (successful write/diff, tests, or localhost). A correct "nothing to change" also uses this instead of saying done in prose.',
+      'Call when the user request is actually done. Write a detailed result for the user: what you built or fixed, key files, hero/image if any, and how to preview or what to change next. Requires tool evidence already in this turn (successful write/diff, tests, or preview). A correct "nothing to change" also uses this instead of saying done in prose.',
     parameters: parameters({
-      result: { ...STR, description: 'What was verified on disk or why nothing needed changing' },
+      result: {
+        ...STR,
+        description:
+          'Detailed conclusion for the user — what shipped, which files matter, and what to do next (Preview, edits, etc.)',
+      },
     }, ['result']),
   },
 ] as const

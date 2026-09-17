@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type DragEvent, type FormEvent, type PointerEvent, type ReactNode, type RefObject } from 'react'
 import { createPortal } from 'react-dom'
+import { GITHUB_APP_INSTALL_URL } from '../../../shared/githubApp.ts'
 import {
   addConnector,
   addPlugin,
@@ -16,6 +17,7 @@ import {
   saveStudioProject,
   streamStudio,
   studioCommitRepo,
+  studioPublishRepo,
   studioOpenPull,
   studioFetchPages,
   studioMcpCall,
@@ -43,14 +45,8 @@ import {
   svgFromFetchedPages,
   wantsBrandAsset,
 } from '../../../shared/brandLogo'
-import {
-  botMaxToolRounds,
-  readStoredAgentDriver,
-  soumtokBotStudioContext,
-  writeStoredAgentDriver,
-  type AgentDriver,
-} from '../../../shared/soumtokBot'
-import { DEFAULT_DESKTOP_AGENT_PREFS } from '../../../shared/desktopAgentPrefs'
+import { soumtokBotStudioContext, type AgentDriver } from '../../../shared/soumtokBot'
+import { maxToolRoundsForPrefs, type DesktopAgentPrefs } from '../../../shared/desktopAgentPrefs'
 import { analyzeUserRequest, formatAnalyzedRequest, repairUserText } from '../../../shared/requestAnalyze'
 import {
   defaultWorkbenchTab,
@@ -85,6 +81,7 @@ import {
   outputBudget,
   isAskReply,
   promptWithAttachments,
+  dismissResolvedAskEvents,
   formatAskReply,
   formatSkipAsk,
   formatApprovePlan,
@@ -114,10 +111,12 @@ import {
   slashMatch,
   PROMPT_COMMANDS,
 } from '../../../shared/capabilities'
+import { formatAttachedPluginSkillsBlock, type AttachedPluginSkill } from '../../../shared/pluginSkills'
 import { liveStepLabel } from '../../../shared/toolFeed'
 import { liveProgressStep, toolResultLine } from '../../../shared/tools'
 import { friendlyStreamError, isTransientStreamError } from '../../../shared/streamDrop'
 import { checkoutPath } from '../../../shared/plans'
+import { modelsForPlan } from '../../../shared/usagePools'
 import { AUTO_MODEL_ID, CODING_MODELS, isAutoModel, modelGuide, pickAutoModel, sortModelsByPower } from '../../../shared/models'
 import { mediaGap, modelMedia, slimChatFiles, type ChatFile } from '../../../shared/chatMedia'
 import {
@@ -142,22 +141,22 @@ import {
   stageChatFile,
   takeChatFiles,
 } from '../../lib/chatFiles'
-import { runStudioAgentHarness } from '../../lib/studioAgentHarness'
+import { resolveStudioAskReply, runStudioAgentHarness } from '../../lib/studioAgentHarness'
+import { readStudioAgentPrefs, studioAgentPrefsForRunMode, writeStudioAgentPrefs } from '../../lib/studioAgentPrefs'
 import { ReplyMarkdown } from '../../lib/replyText'
-import { signIn } from '../../lib/auth-client'
+import { signInSocial } from '../../lib/auth-client'
 import { navigate, openTab } from '../../lib/nav'
-import { BrandMark } from '../ui'
+import { BrandLockup, BrandMark } from '../ui'
 import { PluginLogo } from './PluginLogos'
 import { AgentTimeline } from './AgentTimeline'
 import { AgentLiveCard } from './AskCards'
 import { AgentWorkbench, type BenchTab } from './AgentWorkbench'
 import { AccountMenu } from './AccountMenu'
-import { SoumtokBotChatHeader, SoumtokBotComposer, SoumtokBotOnboarding, SoumtokBotShell } from './SoumtokBotShell'
+import { SoumtokBotChatHeader, SoumtokBotComposer, SoumtokBotOnboarding } from './SoumtokBotShell'
 import { TestHubPanel } from './TestHubPanel'
 import {
   AutomationsIcon,
   BookIcon,
-  CodebaseIcon,
   ComposeIcon,
   HomeIcon,
   MicIcon,
@@ -177,7 +176,7 @@ type StudioMessage = {
   picked?: string
 }
 
-type StudioView = 'chat' | 'test-hub' | 'codebase'
+type StudioView = 'chat' | 'test-hub'
 type StudioModel = {
   id: string
   name: string
@@ -229,7 +228,6 @@ function modelTriggerLabel(item: Pick<StudioModel, 'id' | 'name' | 'cost'> | und
 
 function studioView(path: string): StudioView {
   if (path.startsWith('/dashboard/studio/automations') || path.startsWith('/dashboard/studio/test-hub')) return 'test-hub'
-  if (path.startsWith('/dashboard/studio/codebase')) return 'codebase'
   return 'chat'
 }
 
@@ -271,21 +269,6 @@ export function StudioDashboard({
   const [mobileOpen, setMobileOpen] = useState(false)
   const [projects, setProjects] = useState<StudioProject[]>([])
   const [projectsReady, setProjectsReady] = useState(false)
-  const [agentDriver, setAgentDriver] = useState<AgentDriver>(() => readStoredAgentDriver())
-  const setStudioAgentDriver = (driver: AgentDriver) => {
-    setAgentDriver(driver)
-    writeStoredAgentDriver(driver)
-  }
-
-  useEffect(() => {
-    const onDriver = (event: Event) => {
-      const next = (event as CustomEvent<AgentDriver>).detail
-      if (next === 'ide' || next === 'bot') setAgentDriver(next)
-    }
-    window.addEventListener('soumtok-agent-driver', onDriver)
-    return () => window.removeEventListener('soumtok-agent-driver', onDriver)
-  }, [])
-
   function goChat(fresh = false) {
     if (fresh) setChatNonce((n) => n + 1)
     navigate('/dashboard/studio')
@@ -307,6 +290,10 @@ export function StudioDashboard({
     window.addEventListener('soumtok-agent-driver', onDriver)
     return () => window.removeEventListener('soumtok-agent-driver', onDriver)
   }, [])
+
+  useEffect(() => {
+    if (path.startsWith('/dashboard/studio/codebase')) navigate('/dashboard/studio')
+  }, [path])
 
   useEffect(() => {
     const giveUp = window.setTimeout(() => setProjectsReady(true), 5000)
@@ -347,38 +334,8 @@ export function StudioDashboard({
     />
   ) : null
 
-  if (agentDriver === 'bot' && view === 'chat') {
-    return (
-      <>
-        <SoumtokBotShell
-          displayName={displayName}
-          profile={profile}
-          projects={projects}
-          projectsReady={projectsReady}
-          chatId={chatId}
-          onNewChat={() => goChat(true)}
-          onPickChat={(id) => navigate(`/dashboard/studio/${id}`)}
-          onSearch={() => setSearchOpen(true)}
-          onDownload={onDownload}
-          onProfileSaved={onProfileSaved}
-          agentDriver={agentDriver}
-          onAgentDriverChange={setStudioAgentDriver}
-        >
-          <StudioChat
-            key={chatId || `new-${chatNonce}`}
-            initialId={chatId}
-            onSaved={upsertProject}
-            plan={profile?.plan}
-            agentDriver={agentDriver}
-          />
-        </SoumtokBotShell>
-        {searchOverlay}
-      </>
-    )
-  }
-
   return (
-    <div className="theme-app flex h-svh overflow-hidden">
+    <div className="theme-app studio-shell flex h-svh overflow-hidden">
       <aside
         className={`sticky top-0 z-30 hidden h-svh shrink-0 flex-col border-r border-white/[0.05] py-3 lg:flex ${
           collapsed ? 'w-[64px] px-2' : 'w-[248px] px-3'
@@ -394,12 +351,7 @@ export function StudioDashboard({
             {collapsed ? (
               <BrandMark className="h-7 w-auto" />
             ) : (
-              <img
-                src="/images/soumtok-lockup.png"
-                alt="Soumtok"
-                className="brand-logo h-8 w-auto max-w-[168px] select-none object-contain object-left"
-                draggable={false}
-              />
+              <BrandLockup className="h-8 w-auto max-w-[168px] object-contain object-left" />
             )}
           </button>
           <button
@@ -435,17 +387,6 @@ export function StudioDashboard({
             collapsed={collapsed}
             onClick={() => {
               navigate('/dashboard/studio/test-hub')
-              setMobileOpen(false)
-            }}
-          />
-          <StudioNavButton
-            icon={<CodebaseIcon />}
-            label="Codebase"
-            badge="Early Beta"
-            active={view === 'codebase'}
-            collapsed={collapsed}
-            onClick={() => {
-              navigate('/dashboard/studio/codebase')
               setMobileOpen(false)
             }}
           />
@@ -511,20 +452,13 @@ export function StudioDashboard({
           collapsed={collapsed}
           onDownload={onDownload}
           onProfileSaved={onProfileSaved}
-          agentDriver={agentDriver}
-          onAgentDriverChange={setStudioAgentDriver}
         />
       </aside>
 
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <header className="flex items-center justify-between border-b border-white/[0.05] px-4 py-3 lg:hidden">
           <button type="button" aria-label="Soumtok" onClick={() => navigate('/dashboard')}>
-            <img
-              src="/images/soumtok-lockup.png"
-              alt="Soumtok"
-              className="brand-logo h-6 w-auto max-w-[140px] select-none object-contain"
-              draggable={false}
-            />
+            <BrandLockup className="h-6 w-auto max-w-[140px] object-contain" />
           </button>
           <div className="flex items-center gap-3">
             <button type="button" className="text-[13px] text-white/60" onClick={() => setMobileOpen((open) => !open)}>
@@ -557,20 +491,30 @@ export function StudioDashboard({
                 <button
                   type="button"
                   className="block w-full rounded-md px-2.5 py-2.5 text-left text-[14px] text-white/80"
-                  onClick={() => {
-                    navigate('/dashboard/studio/codebase')
-                    setMobileOpen(false)
-                  }}
-                >
-                  Codebase
-                </button>
-                <button
-                  type="button"
-                  className="block w-full rounded-md px-2.5 py-2.5 text-left text-[14px] text-white/80"
                   onClick={() => navigate('/dashboard')}
                 >
                   Dashboard
                 </button>
+                {projectsReady && projects.length > 0 && (
+                  <div className="mt-3 border-t border-white/[0.06] pt-3">
+                    <p className="px-2.5 pb-2 text-[11px] text-white/35">Recent chats</p>
+                    {projects.slice(0, 10).map((item) => (
+                      <button
+                        key={item.id}
+                        type="button"
+                        className={`block w-full truncate rounded-md px-2.5 py-2 text-left text-[13px] ${
+                          chatId === item.id ? 'bg-white/[0.08] text-white' : 'text-white/60 hover:bg-white/[0.04] hover:text-white'
+                        }`}
+                        onClick={() => {
+                          navigate(`/dashboard/studio/${item.id}`)
+                          setMobileOpen(false)
+                        }}
+                      >
+                        {item.title || 'New chat'}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </nav>
               <div className="border-t border-white/[0.06] pt-2">
                 <AccountMenu
@@ -580,8 +524,6 @@ export function StudioDashboard({
                   hasAvatar={profile?.hasAvatar}
                   onDownload={onDownload}
                   onProfileSaved={onProfileSaved}
-                  agentDriver={agentDriver}
-                  onAgentDriverChange={setStudioAgentDriver}
                 />
               </div>
             </div>
@@ -594,11 +536,10 @@ export function StudioDashboard({
             initialId={chatId}
             onSaved={upsertProject}
             plan={profile?.plan}
-            agentDriver={agentDriver}
+            agentDriver="ide"
           />
         )}
-        {view === 'test-hub' && <TestHubPanel />}
-        {view === 'codebase' && <StudioCodebase />}
+        {view === 'test-hub' && <TestHubPanel plan={profile?.plan} />}
       </div>
 
       {searchOverlay}
@@ -644,7 +585,7 @@ function StudioNavButton({
 function StudioCodebase() {
   const [repos, setRepos] = useState<GithubRepo[]>([])
   const [connected, setConnected] = useState(false)
-  const [installUrl, setInstallUrl] = useState('https://github.com/apps/soumtok/installations/new')
+  const [installUrl, setInstallUrl] = useState(GITHUB_APP_INSTALL_URL)
   const [status, setStatus] = useState('')
   const [busy, setBusy] = useState(false)
   const listRef = useRef<HTMLDivElement>(null)
@@ -663,7 +604,7 @@ function StudioCodebase() {
     if (!connected) {
       setBusy(true)
       try {
-        await signIn.social({ provider: 'github', callbackURL: '/dashboard/studio/codebase' })
+        await signInSocial({ provider: 'github', callbackURL: '/dashboard/studio/codebase' })
       } catch {
         setBusy(false)
       }
@@ -820,7 +761,6 @@ function StudioSearch({
   const actions = [
     { href: '/dashboard/studio', label: 'New Chat', icon: <ComposeIcon /> },
     { href: '/dashboard/studio/test-hub', label: 'Test Hub', icon: <StackIcon /> },
-    { href: '/dashboard/studio/codebase', label: 'Codebase', icon: <CodebaseIcon /> },
     { href: '/dashboard', label: 'Dashboard', icon: <HomeIcon /> },
     ...projects.map((item) => ({
       href: `/dashboard/studio/${item.id}`,
@@ -1174,6 +1114,36 @@ function RegenIcon() {
   )
 }
 
+function slugRepoName(raw: string) {
+  return String(raw || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 100)
+}
+
+function inferStudioRepoName(title: string, files: Record<string, string>) {
+  const fromTitle = slugRepoName(title)
+  if (fromTitle.length >= 2) return fromTitle
+  try {
+    const pkg = files['package.json']
+    if (pkg) {
+      const name = slugRepoName(String(JSON.parse(pkg).name || ''))
+      if (name.length >= 2) return name
+    }
+  } catch {
+    /* ignore */
+  }
+  return 'soumtok-project'
+}
+
+function studioFilesWithReadme(files: Record<string, string>, title: string) {
+  if (files['README.md']?.trim() || files['readme.md']?.trim()) return files
+  const heading = (title || 'Project').trim().slice(0, 120) || 'Project'
+  return { ...files, 'README.md': `# ${heading}\n\nCreated with Soumtok Studio.\n` }
+}
+
 function StudioChat({
   initialId,
   onSaved,
@@ -1195,7 +1165,7 @@ function StudioChat({
   const [sourceOpen, setSourceOpen] = useState(false)
   const [repos, setRepos] = useState<GithubRepo[]>([])
   const [githubConnected, setGithubConnected] = useState(false)
-  const [installUrl, setInstallUrl] = useState('https://github.com/apps/soumtok/installations/new')
+  const [installUrl, setInstallUrl] = useState(GITHUB_APP_INSTALL_URL)
   const [project, setProject] = useState<GithubRepo | null>(null)
   const [prompt, setPrompt] = useState('')
   const [messages, setMessages] = useState<StudioMessage[]>([])
@@ -1218,6 +1188,7 @@ function StudioChat({
   const [listening, setListening] = useState(false)
   const [multitask, setMultitask] = useState(false)
   const [runMode, setRunMode] = useState<AgentRunMode>('agent')
+  const [agentPrefs, setAgentPrefs] = useState<DesktopAgentPrefs>(() => readStudioAgentPrefs())
   const lastTaskRef = useRef('')
   const skipGateRef = useRef(false)
   const [plugins, setPlugins] = useState<InstalledPlugin[]>([])
@@ -1225,6 +1196,7 @@ function StudioChat({
   const [libraryDocs, setLibraryDocs] = useState<{ title: string; folder?: string }[]>([])
   const [skills, setSkills] = useState<UserSkill[]>([])
   const [attachedSkills, setAttachedSkills] = useState<UserSkill[]>([])
+  const [attachedPluginSkills, setAttachedPluginSkills] = useState<AttachedPluginSkill[]>([])
   const [pendingFiles, setPendingFiles] = useState<ChatFile[]>([])
   const pendingFilesRef = useRef<ChatFile[]>([])
   const [fileError, setFileError] = useState('')
@@ -1241,8 +1213,10 @@ function StudioChat({
   const voiceBaseRef = useRef('')
   const listeningRef = useRef(false)
   const [canReplay, setCanReplay] = useState(false)
+  const [repoPushing, setRepoPushing] = useState(false)
   const savedIdRef = useRef<string | null>(initialId)
   const workspaceRef = useRef<AgentWorkspace>(emptyWorkspace())
+  const harnessAskIdRef = useRef<string | null>(null)
   const selected = models.find((item) => item.id === model)
   const title = messages.find((item) => item.role === 'user')?.content.slice(0, 80) || messages.find((item) => item.role === 'user')?.files?.[0]?.name || 'New chat'
   const [benchOpen, setBenchOpen] = useState(false)
@@ -1309,8 +1283,11 @@ function StudioChat({
     fetchModels()
       .then((data) => {
         if (cancelled) return
-        setModels(sortModelsByPower(data.models))
+        const planId = billingPlan || 'hobby'
+        const eligible = modelsForPlan(data.models, planId).filter((item) => item.ready)
+        setModels(sortModelsByPower(eligible))
         if (!initialId) setModel(AUTO_MODEL_ID)
+        else if (!isAutoModel(model) && !eligible.some((item) => item.id === model)) setModel(AUTO_MODEL_ID)
       })
       .catch(() => {
         if (!cancelled) setStatus('Could not load models')
@@ -1416,7 +1393,15 @@ function StudioChat({
       cancelled = true
       window.clearTimeout(giveUp)
     }
-  }, [initialId])
+  }, [initialId, billingPlan])
+
+  useEffect(() => {
+    if (!models.length) return
+    setModel((current) => {
+      if (isAutoModel(current)) return current
+      return models.some((item) => item.id === current) ? current : AUTO_MODEL_ID
+    })
+  }, [models])
 
   const userTurns = messages.filter((item) => item.role === 'user').length
 
@@ -1582,6 +1567,64 @@ function StudioChat({
     void attachChatFiles(filesFromDrop(event.dataTransfer))
   }
 
+  async function createGithubRepo() {
+    if (repoPushing || busy) return
+    const rawFiles = Object.fromEntries(
+      Object.entries(workspaceRef.current.files).filter(
+        ([path, body]) =>
+          !isSecretPath(path) && path !== '.gitignore' && !path.endsWith('/.keep') && Boolean(body?.trim()),
+      ),
+    )
+    if (Object.keys(rawFiles).length === 0) {
+      setStatus('Add some files before creating a repository.')
+      return
+    }
+    const files = studioFilesWithReadme(rawFiles, title)
+    const name = inferStudioRepoName(title, files)
+    setRepoPushing(true)
+    setStatus('Creating GitHub repository and pushing files…')
+    try {
+      const result = await studioPublishRepo(name, files)
+      const attached: GithubRepo = {
+        id: 0,
+        name,
+        fullName: result.fullName,
+        private: true,
+        url: result.htmlUrl,
+        description: null,
+        language: null,
+        updatedAt: new Date().toISOString(),
+      }
+      setProject(attached)
+      const next = {
+        ...workspaceRef.current,
+        events: [
+          ...workspaceRef.current.events,
+          {
+            kind: 'result' as const,
+            name: 'github',
+            ok: true,
+            text: `${result.created ? 'Created' : 'Updated'} ${result.fullName}@${result.branch} · ${result.count} files`,
+          },
+        ],
+      }
+      applyWorkspace(next)
+      void persist(messages, next)
+      setStatus(`Pushed to ${result.fullName}`)
+      window.open(result.htmlUrl, '_blank', 'noopener,noreferrer')
+    } catch (error) {
+      const err = error as Error & { needsGithub?: boolean; grantUrl?: string }
+      if (err.needsGithub) {
+        window.open(err.grantUrl || installUrl, '_blank', 'noopener,noreferrer')
+        setStatus('Connect GitHub first, then try Create repo again.')
+      } else {
+        setStatus(err.message || 'Could not create repository')
+      }
+    } finally {
+      setRepoPushing(false)
+    }
+  }
+
   async function attachGithub(repo: GithubRepo | null) {
     setProject(repo)
     if (!repo) return
@@ -1613,6 +1656,11 @@ function StudioChat({
   }
 
   function stopRun() {
+    const harnessId = harnessAskIdRef.current
+    if (harnessId) {
+      resolveStudioAskReply(harnessId, {})
+      harnessAskIdRef.current = null
+    }
     abortRef.current?.abort()
     abortRef.current = null
     setBusy(false)
@@ -1715,6 +1763,7 @@ function StudioChat({
             url: started.url,
             code: started.code,
             connectorId: started.connectorId || undefined,
+            logo: started.logo || null,
             detail: started.detail,
             connected: false,
           })
@@ -1897,6 +1946,7 @@ function StudioChat({
               )
               .join('\n')}`
           : '',
+        attachedPluginSkills.length ? formatAttachedPluginSkillsBlock(attachedPluginSkills) : '',
         attached.length
           ? hasImage && priorFiles
             ? `The user attached a screenshot of the CURRENT live preview of this workspace. Look at the pixels. Identify the broken UI section (overlapping header/nav, hamburger with desktop links, missing pictures, overflow). Read the matching files and patch them. Do not start a new site. Do not stop at a description.\n${attached
@@ -2054,18 +2104,20 @@ function StudioChat({
         }
       }
 
+      const prefs = studioAgentPrefsForRunMode(agentPrefs, uiMode === 'ask' ? 'ask' : uiMode === 'plan' ? 'plan' : 'agent')
       const run = await runStudioAgentHarness({
         model: sendModel,
         mode: uiMode === 'ask' ? 'ask' : uiMode === 'plan' ? 'plan' : 'agent',
         driver: agentDriver,
-        maxRounds: botMaxToolRounds(agentDriver, 12),
+        maxRounds: maxToolRoundsForPrefs(agentDriver, prefs),
         messages: harnessMessages,
         files: roundBase.files,
         repo: project?.fullName,
-        agentPrefs: DEFAULT_DESKTOP_AGENT_PREFS,
+        agentPrefs: prefs,
         workspaceRoot: project?.fullName || project?.name || 'studio-sandbox',
         openFiles: visibleWorkPaths(liveFiles.length ? liveFiles : Object.keys(roundBase.files)),
         analysisKind: turnAnalysis.kind,
+        contextPrompt: extra,
         signal: linked,
         onStatus: (line) => {
           if (line) setStep(line)
@@ -2107,8 +2159,48 @@ function StudioChat({
           applyWorkspace({ ...current, events })
           setShown(events.length)
         },
+        onAsk: (ask) => {
+          harnessAskIdRef.current = ask.id
+          const current = workspaceRef.current
+          const events = [
+            ...current.events,
+            {
+              kind: 'ask' as const,
+              title: ask.title,
+              intro: ask.intro,
+              questions: ask.questions,
+            },
+          ]
+          applyWorkspace({ ...current, events })
+          setShown(events.length)
+        },
+        onTodo: (items, merge) => {
+          const current = workspaceRef.current
+          const mapped = items.map((item) => ({
+            text: String(item.content || item.id || ''),
+            done: item.status === 'completed' || item.status === 'done',
+          }))
+          const prior = current.events.filter((item) => item.kind === 'todo').at(-1)
+          const merged =
+            merge && prior?.kind === 'todo'
+              ? prior.items.map((row) => {
+                  const hit = mapped.find((item) => item.text === row.text)
+                  return hit || row
+                })
+              : mapped
+          applyWorkspace({ ...current, events: [...current.events, { kind: 'todo', items: merged }] })
+          setShown(workspaceRef.current.events.length)
+        },
+        onModeSwitch: (target) => {
+          if (target === 'plan') setRunMode('plan')
+          else if (target === 'ask') setRunMode('ask')
+          else setRunMode('agent')
+        },
         onResult: (out) => {
-          const files = { ...workspaceRef.current.files, ...(out.files || {}) }
+          let files = { ...workspaceRef.current.files, ...(out.files || {}) }
+          if (out.deleted?.length) {
+            for (const path of out.deleted) delete files[path]
+          }
           const events = workspaceRef.current.events.map((item) => {
             if (
               item.kind === 'command' &&
@@ -2121,15 +2213,23 @@ function StudioChat({
             }
             return item
           })
+          const previewPaths = out.files ? Object.keys(out.files) : []
+          const previewTouch =
+            previewPaths.some((path) => /\.(html?|css|js|tsx?|jsx)$/i.test(path)) ||
+            (out.name === 'write' || out.name === 'diff' || out.name === 'edit')
+          const previewHtml = previewTouch ? previewFromFiles(files, workspaceRef.current.previewHtml || '') : workspaceRef.current.previewHtml
+          const resultLine =
+            /^attempt_completion|finish$/i.test(out.name) ? out.text.slice(0, 12_000) : toolResultLine(out.name, out.text)
           merged = {
             ...workspaceRef.current,
             files,
-            previewHtml: out.files ? previewFromFiles(files, workspaceRef.current.previewHtml || '') : workspaceRef.current.previewHtml,
-            events: [...events, { kind: 'result', name: out.name, ok: out.ok, text: toolResultLine(out.name, out.text) }],
+            previewHtml,
+            events: [...events, { kind: 'result', name: out.name, ok: out.ok, text: resultLine }],
           }
           applyWorkspace(merged)
           setShown(merged.events.length)
           roundBase = merged
+          if (previewHtml && previewTouch) openBench('desktop')
         },
       })
 
@@ -2159,15 +2259,22 @@ function StudioChat({
       const turnSlice = merged.events.slice(prior)
       const openAsk = latestOpenAsk(turnSlice)
       const openPlan = latestOpenPlan(turnSlice)
-      let spoken = delivered
-        ? spokenRecap({ ...merged, events: turnSlice, mode: plan.mode })
-        : isFollowUpTask(plan)
-          ? 'I read the files but did not change the code. Tap Retry and I will write the change.'
-          : 'I finished without writing the files. Tap Retry and I will build the app again.'
+      let spoken =
+        run.completionText?.trim() ||
+        (delivered
+          ? spokenRecap({ ...merged, events: turnSlice, mode: plan.mode })
+          : isFollowUpTask(plan)
+            ? 'I read the files but did not change the code. Tap Retry and I will write the change.'
+            : 'I finished without writing the files. Tap Retry and I will build the app again.')
       if (openAsk || openPlan) {
         spoken = ''
-      } else if (plan.mode === 'chat') {
+      } else if (plan.mode === 'chat' && !(priorFiles > 0 && (isFollowUpTask(plan) || turnAnalysis.kind === 'edit'))) {
         spoken = finishChatReply(run.text || '', turnSlice)
+      } else if (plan.mode === 'chat') {
+        spoken =
+          chatReplyFromRun(run.text || '', turnSlice) ||
+          spokenRecap({ ...merged, events: turnSlice, mode: plan.mode }) ||
+          'I read the project but did not finish the change. Tap Retry and I will continue from here.'
       } else if (plan.mode === 'ask' || plan.mode === 'plan') {
         spoken = chatReplyFromRun(run.text || '', turnSlice) || spoken
       }
@@ -2287,9 +2394,17 @@ function StudioChat({
   }
 
   function submitAsk(answers: Record<string, string[]>) {
+    const harnessId = harnessAskIdRef.current
+    if (harnessId) {
+      if (resolveStudioAskReply(harnessId, answers)) {
+        harnessAskIdRef.current = null
+        applyWorkspace(dismissResolvedAskEvents(applyAskAnswers(workspaceRef.current, answers)))
+      }
+      return
+    }
     const card = latestOpenAsk(workspaceRef.current.events)
     if (!card || busy) return
-    applyWorkspace(applyAskAnswers(workspaceRef.current, answers))
+    applyWorkspace(dismissResolvedAskEvents(applyAskAnswers(workspaceRef.current, answers)))
     const capability = card.questions.some((item) => item.id === 'skill' || item.id === 'mcp')
     if (capability) {
       const labels = answers.skill || []
@@ -2307,9 +2422,18 @@ function StudioChat({
   }
 
   function skipAsk() {
+    const harnessId = harnessAskIdRef.current
+    if (harnessId) {
+      if (resolveStudioAskReply(harnessId, {})) {
+        harnessAskIdRef.current = null
+        const card = latestOpenAsk(workspaceRef.current.events)
+        if (card) applyWorkspace(dismissResolvedAskEvents(applyAskAnswers(workspaceRef.current, {})))
+      }
+      return
+    }
     if (busy) return
     const card = latestOpenAsk(workspaceRef.current.events)
-    if (card) applyWorkspace(applyAskAnswers(workspaceRef.current, {}))
+    if (card) applyWorkspace(dismissResolvedAskEvents(applyAskAnswers(workspaceRef.current, {})))
     const capability = card?.questions.some((item) => item.id === 'skill' || item.id === 'mcp')
     if (capability) {
       skipGateRef.current = true
@@ -2510,9 +2634,11 @@ function StudioChat({
       compact={messages.length > 0}
       runMode={runMode}
       setRunMode={setRunMode}
-      workspaceFiles={Object.keys(workspace.files)}
+      intelligence={agentPrefs.intelligence}
+      onIntelligence={(value) => setAgentPrefs(writeStudioAgentPrefs({ intelligence: value }))}
       userSkills={skills}
       attachedSkills={attachedSkills}
+      attachedPluginSkills={attachedPluginSkills}
       pendingFiles={pendingFiles}
       onPendingFiles={dropPendingFiles}
       onAttachFiles={attachChatFiles}
@@ -2520,6 +2646,11 @@ function StudioChat({
       onFileError={setFileError}
       onAttachSkill={(skill) => {
         setAttachedSkills((current) => (current.some((item) => item.id === skill.id) ? current : [...current, skill]))
+      }}
+      onAttachPluginSkill={(skill) => {
+        setAttachedPluginSkills((current) =>
+          current.some((item) => item.id === skill.id) ? current.filter((item) => item.id !== skill.id) : [...current, skill],
+        )
       }}
       onStop={stopRun}
     />
@@ -2632,9 +2763,9 @@ function StudioChat({
           <button
             type="button"
             onClick={() => (hasBench ? closeBench() : openComputer())}
-            className="rounded-md px-2 py-1 text-[12px] text-white/45 hover:text-white"
+            className="shrink-0 rounded-md border border-white/10 bg-white/[0.04] px-2.5 py-1 text-[12px] text-white/75 hover:text-white lg:border-transparent lg:bg-transparent lg:px-2 lg:text-white/45"
           >
-            {hasBench ? 'Back to chat' : 'Review'}
+            {hasBench ? 'Back to chat' : 'Preview'}
           </button>
         </div>
       )}
@@ -2646,9 +2777,10 @@ function StudioChat({
         ) : (
           <div className="mx-auto max-w-[720px] space-y-8 pb-16">
             {project && <p className="text-[12px] text-white/35">Project · {project.fullName}</p>}
-            {attachedSkills.length > 0 && (
+            {(attachedSkills.length > 0 || attachedPluginSkills.length > 0) && (
               <p className="text-[12px] text-white/35">
-                Skills · {attachedSkills.map((skill) => skill.name).join(', ')}
+                Skills ·{' '}
+                {[...attachedSkills.map((skill) => skill.name), ...attachedPluginSkills.map((skill) => skill.label || skill.id)].join(', ')}
               </p>
             )}
             {(() => {
@@ -2730,7 +2862,7 @@ function StudioChat({
                       files={workspace.files}
                       collapsed={!latest}
                       live={latest && busy}
-                      interactive={latest && !busy}
+                      interactive={latest && (!busy || Boolean(harnessAskIdRef.current))}
                       onPreview={() => openComputer()}
                       onReview={() => openComputer()}
                       onOpenFile={(path) => {
@@ -2795,10 +2927,11 @@ function StudioChat({
             })() && (
               <button
                 type="button"
-                onClick={() => window.open('https://github.com/new', '_blank', 'noopener,noreferrer')}
-                className="mb-3 rounded-full border border-white/12 bg-[#141413] px-3 py-1.5 text-[13px] text-white/70 hover:text-white"
+                disabled={repoPushing || busy}
+                onClick={() => void createGithubRepo()}
+                className="mb-3 rounded-full border border-white/12 bg-[#141413] px-3 py-1.5 text-[13px] text-white/70 hover:text-white disabled:opacity-50"
               >
-                Create repo
+                {repoPushing ? 'Creating repo…' : 'Create repo'}
               </button>
             )}
             {composer}
@@ -3033,7 +3166,7 @@ function SourcePicker({
   async function connectGithub() {
     setBusy(true)
     try {
-      await signIn.social({ provider: 'github', callbackURL: '/dashboard/studio' })
+      await signInSocial({ provider: 'github', callbackURL: '/dashboard/studio' })
     } catch {
       setBusy(false)
     }
@@ -3186,12 +3319,15 @@ function StudioComposer({
   compact,
   runMode,
   setRunMode,
-  workspaceFiles = [],
+  intelligence = 'balanced',
+  onIntelligence,
   multitask,
   setMultitask,
   userSkills,
   attachedSkills,
+  attachedPluginSkills,
   onAttachSkill,
+  onAttachPluginSkill,
   pendingFiles,
   onPendingFiles,
   onAttachFiles,
@@ -3225,12 +3361,15 @@ function StudioComposer({
   compact?: boolean
   runMode: AgentRunMode
   setRunMode: (value: AgentRunMode) => void
-  workspaceFiles?: string[]
+  intelligence?: 'fast' | 'balanced' | 'max'
+  onIntelligence?: (value: 'fast' | 'balanced' | 'max') => void
   multitask: boolean
   setMultitask: (value: boolean) => void
   userSkills: UserSkill[]
   attachedSkills: UserSkill[]
+  attachedPluginSkills: AttachedPluginSkill[]
   onAttachSkill: (skill: UserSkill) => void
+  onAttachPluginSkill: (skill: AttachedPluginSkill) => void
   pendingFiles: ChatFile[]
   onPendingFiles: (files: ChatFile[]) => void
   onAttachFiles?: (files: File[]) => Promise<void> | void
@@ -3256,7 +3395,7 @@ function StudioComposer({
           { image: false, video: false, pdf: false },
         )
     : models.find((item) => item.id === model)?.media || modelMedia(model)
-  const canSend = Boolean(prompt.trim() || pendingFiles.length)
+  const canSend = Boolean(prompt.trim() || pendingFiles.length || attachedPluginSkills.length)
   const [mediaHint, setMediaHint] = useState<'image' | 'video' | 'pdf' | null>(null)
   const slashes = slashMatch(prompt)
 
@@ -3366,6 +3505,26 @@ function StudioComposer({
             onRemove={(index) => onPendingFiles(pendingFiles.filter((_, i) => i !== index))}
           />
         )}
+        {attachedPluginSkills.length > 0 && (
+          <div className="mb-2 flex flex-wrap gap-1.5">
+            {attachedPluginSkills.map((skill) => (
+              <span
+                key={skill.id}
+                className="inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/[0.04] px-2 py-0.5 text-[11px] text-white/70"
+              >
+                ◆ {skill.label || skill.id}
+                <button
+                  type="button"
+                  className="text-white/40 hover:text-white"
+                  aria-label={`Remove ${skill.label || skill.id}`}
+                  onClick={() => onAttachPluginSkill(skill)}
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
         <textarea
           ref={inputRef}
           value={prompt}
@@ -3425,7 +3584,9 @@ function StudioComposer({
               setMultitask={setMultitask}
               userSkills={userSkills}
               attachedSkills={attachedSkills}
+              attachedPluginSkills={attachedPluginSkills}
               onAttachSkill={onAttachSkill}
+              onAttachPluginSkill={onAttachPluginSkill}
               onPickFiles={() => fileRef.current?.click()}
               onInsert={(text) => {
                 setPrompt(prompt ? `${prompt}\n${text}` : text)
@@ -3444,34 +3605,39 @@ function StudioComposer({
               setModel={setModel}
               selectedName={selectedName}
             />
-            <div className="hidden shrink-0 items-center rounded-full border border-white/10 p-0.5 md:flex">
-              {(['agent', 'ask', 'plan'] as const).map((mode) => (
-                <button
-                  key={mode}
-                  type="button"
-                  onClick={() => setRunMode(mode)}
-                  className={`rounded-full px-2 py-0.5 text-[11px] capitalize ${
-                    runMode === mode ? 'bg-white/12 text-white' : 'text-white/40 hover:text-white/70'
-                  }`}
-                >
-                  {mode}
-                </button>
-              ))}
+            <div className="composer-mode-row flex max-w-[min(100%,calc(100vw-7rem))] shrink-0 items-center gap-1 overflow-x-auto thin-scroll md:max-w-none md:gap-1.5">
+              <div className="flex shrink-0 items-center rounded-full border border-white/10 p-0.5">
+                {(['agent', 'ask', 'plan'] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => setRunMode(mode)}
+                    className={`rounded-full px-2 py-0.5 text-[11px] capitalize ${
+                      runMode === mode ? 'bg-white/12 text-white' : 'text-white/40 hover:text-white/70'
+                    }`}
+                  >
+                    {mode}
+                  </button>
+                ))}
+              </div>
+              {onIntelligence && (
+                <div className="flex items-center rounded-full border border-white/10 p-0.5">
+                  {(['fast', 'balanced', 'max'] as const).map((level) => (
+                    <button
+                      key={level}
+                      type="button"
+                      onClick={() => onIntelligence(level)}
+                      className={`rounded-full px-2 py-0.5 text-[11px] capitalize ${
+                        intelligence === level ? 'bg-white/12 text-white' : 'text-white/40 hover:text-white/70'
+                      }`}
+                      title={level === 'max' ? 'Max intelligence — more tool rounds' : undefined}
+                    >
+                      {level === 'max' ? 'Max' : level}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
-            {workspaceFiles.length > 0 && (
-              <button
-                type="button"
-                onClick={() => {
-                  const path = workspaceFiles[0]
-                  setPrompt(prompt ? `${prompt} @${path}` : `@${path}`)
-                  inputRef.current?.focus()
-                }}
-                className="hidden max-w-[120px] truncate rounded-full border border-white/10 px-2 py-0.5 text-[11px] text-white/40 hover:text-white/70 sm:inline"
-                title="Mention a file"
-              >
-                @{workspaceFiles[0].split('/').pop()}
-              </button>
-            )}
             {multitask && (
               <span className="hidden h-8 items-center rounded-lg px-2 text-[12px] text-white/45 sm:inline-flex">
                 Multitask
@@ -3747,10 +3913,13 @@ const RECENT_SKILLS_MAX = 6
 
 type SkillItem = {
   id: string
+  skillId?: string
+  pluginId?: string
   label: string
   insert: string
   plugin?: string
   description?: string
+  sourceUrl?: string
 }
 
 function readRecentSkills() {
@@ -3770,13 +3939,15 @@ function rememberSkill(id: string) {
 function SkillRow({
   skill,
   compact,
+  attached,
   onPick,
 }: {
   skill: SkillItem
   compact?: boolean
+  attached?: boolean
   onPick: (skill: SkillItem) => void
 }) {
-  const title = skillTitle(skill.id.replace(/^[a-z0-9]+-/i, ''), skill.label)
+  const title = skillTitle(skill.id.replace(/^[a-z0-9]+[-:]/i, ''), skill.label)
   return (
     <button
       type="button"
@@ -3784,7 +3955,12 @@ function SkillRow({
       className="block w-full px-3 py-2.5 text-left hover:bg-white/[0.07]"
     >
       <span className="block text-[13px] font-medium">{title}</span>
-      {skill.plugin ? <span className="mt-0.5 block text-[11px] text-white/35">{skill.plugin}</span> : null}
+      {skill.plugin ? (
+        <span className="mt-0.5 block text-[11px] text-white/35">
+          {skill.plugin}
+          {attached ? ' · Added' : ''}
+        </span>
+      ) : null}
       {!compact && skill.description ? (
         <span className="mt-0.5 block text-[12px] leading-5 text-white/45 line-clamp-2">{skill.description}</span>
       ) : null}
@@ -3979,7 +4155,9 @@ function AddMenu({
   onInsert,
   userSkills = [],
   attachedSkills = [],
+  attachedPluginSkills = [],
   onAttachSkill,
+  onAttachPluginSkill,
   onPickFiles,
 }: {
   open: boolean
@@ -3993,7 +4171,9 @@ function AddMenu({
   onInsert: (text: string) => void
   userSkills?: UserSkill[]
   attachedSkills?: UserSkill[]
+  attachedPluginSkills?: AttachedPluginSkill[]
   onAttachSkill?: (skill: UserSkill) => void
+  onAttachPluginSkill?: (skill: AttachedPluginSkill) => void
   onPickFiles?: () => void
 }) {
   const [view, setView] = useState<'root' | 'files' | 'skills'>('root')
@@ -4074,11 +4254,14 @@ function AddMenu({
     ...SKILLS,
     ...plugins.flatMap((item) =>
       (item.skills?.length ? item.skills : catalogPlugin(item.plugin_id)?.skills || []).map((skill) => ({
-        id: `${item.plugin_id}-${skill.id}`,
+        id: `${item.plugin_id}:${skill.id}`,
+        skillId: skill.id,
+        pluginId: item.plugin_id,
         label: skill.label,
         insert: skill.insert,
         plugin: item.name,
         description: skill.description,
+        sourceUrl: skill.sourceUrl,
       })),
     ),
   ]
@@ -4102,6 +4285,20 @@ function AddMenu({
   function pickSkill(skill: SkillItem) {
     rememberSkill(skill.id)
     setRecentIds(readRecentSkills())
+    if (skill.plugin && skill.pluginId && skill.skillId) {
+      onAttachPluginSkill?.({
+        id: `${skill.pluginId}:${skill.skillId}`,
+        skillId: skill.skillId,
+        pluginId: skill.pluginId,
+        pluginName: skill.plugin,
+        label: skill.label,
+        description: skill.description,
+        insert: skill.insert,
+        sourceUrl: skill.sourceUrl,
+      })
+      onClose()
+      return
+    }
     onInsert(skill.insert)
     onClose()
   }
@@ -4338,7 +4535,13 @@ function AddMenu({
                   <div className="pb-1">
                     <p className="px-3 pb-1 text-[11px] uppercase tracking-[0.08em] text-white/35">Last used</p>
                     {recentSkills.map((skill) => (
-                      <SkillRow key={`recent-${skill.id}`} skill={skill} compact onPick={pickSkill} />
+                      <SkillRow
+                        key={`recent-${skill.id}`}
+                        skill={skill}
+                        compact
+                        attached={attachedPluginSkills.some((item) => item.id === skill.id)}
+                        onPick={pickSkill}
+                      />
                     ))}
                     <div className="mx-3 my-1 border-t border-white/[0.08]" />
                     <p className="px-3 pb-1 pt-1 text-[11px] uppercase tracking-[0.08em] text-white/35">All skills</p>
@@ -4347,7 +4550,14 @@ function AddMenu({
                 {visibleSkills.length === 0 ? (
                   <p className="px-3 py-3 text-[13px] text-white/40">No skills match that search.</p>
                 ) : (
-                  visibleSkills.map((skill) => <SkillRow key={skill.id} skill={skill} onPick={pickSkill} />)
+                  visibleSkills.map((skill) => (
+                    <SkillRow
+                      key={skill.id}
+                      skill={skill}
+                      attached={attachedPluginSkills.some((item) => item.id === skill.id)}
+                      onPick={pickSkill}
+                    />
+                  ))
                 )}
               </div>
             </div>
@@ -4446,6 +4656,7 @@ function ModelPicker({
   const search = query.trim().toLowerCase()
   const showAuto = !search || 'auto'.startsWith(search)
   const visible = models.filter((item) => {
+    if (!item.ready) return false
     if (!search) return true
     const hay = `${item.name} ${item.id} ${modelCaps(item).join(' ')}`.toLowerCase()
     return hay.includes(search)
@@ -4560,7 +4771,11 @@ function ModelPicker({
               </button>
             )}
             {visible.length === 0 && !showAuto && (
-              <p className="px-3 py-3 text-[13px] text-white/40">No models match “{query.trim()}”.</p>
+              <p className="px-3 py-3 text-[13px] leading-5 text-white/40">
+                {query.trim()
+                  ? `No models match “${query.trim()}”.`
+                  : 'No models on your plan are ready yet. Upgrade in Billing or add API keys in Settings.'}
+              </p>
             )}
             {visible.map((item) => {
               const caps = modelCaps(item)

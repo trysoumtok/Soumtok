@@ -11,4 +11,4 @@ Prefer the `git` tool over `terminal("git …")`.
 3. Commit **only** when the user asked. Message: `git({ action: "commit", message: "…" })` — imperative, what/why.
 4. Never `git push --force` to main/master. Never rewrite published history unless they said to.
 5. Stay in the open folder. Do not clone into a new sibling folder unless they asked.
-6. For GitHub PRs use `mcp(server: "GitHub", tool: …)` if connected, else `gh` via terminal when the user asked to publish.
+6. To push the open folder to GitHub: `github({ action: "publish" })` or `git({ action: "push", message: "…" })` (uses Soumtok GitHub OAuth). For PRs/issues use `mcp(server: "GitHub", tool: …)` when the GitHub connector is connected.
