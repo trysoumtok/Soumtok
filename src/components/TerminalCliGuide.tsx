@@ -1,7 +1,12 @@
 import { useState } from 'react'
 
-const PS_INSTALL = "irm 'https://soumtok.com/install/cli.ps1' | iex"
-const SH_INSTALL = 'curl -fsSL https://soumtok.com/install/cli.sh | bash'
+const INSTALL = {
+  windows: "irm 'https://soumtok.com/install/cli.ps1' | iex",
+  macos: 'curl -fsSL https://soumtok.com/install/cli-macos.sh | bash',
+  linux: 'curl -fsSL https://soumtok.com/install/cli-linux.sh | bash',
+} as const
+
+type PlatformTab = keyof typeof INSTALL
 
 function CopyBlock({ text }: { text: string }) {
   const [copied, setCopied] = useState(false)
@@ -25,7 +30,7 @@ function CopyBlock({ text }: { text: string }) {
 }
 
 export function TerminalCliGuide() {
-  const [tab, setTab] = useState<'powershell' | 'unix'>('powershell')
+  const [tab, setTab] = useState<PlatformTab>('windows')
 
   return (
     <section className="mt-16 sm:mt-20" id="terminal">
@@ -47,8 +52,14 @@ export function TerminalCliGuide() {
         </div>
 
         <div>
-          <div className="flex gap-2">
-            {(['powershell', 'unix'] as const).map((key) => (
+          <div className="flex flex-wrap gap-2">
+            {(
+              [
+                ['windows', 'Windows'],
+                ['macos', 'macOS'],
+                ['linux', 'Linux'],
+              ] as const
+            ).map(([key, label]) => (
               <button
                 key={key}
                 type="button"
@@ -57,11 +68,11 @@ export function TerminalCliGuide() {
                   tab === key ? 'bg-white text-black' : 'border border-white/10 text-white/55 hover:text-white/80'
                 }`}
               >
-                {key === 'powershell' ? 'PowerShell' : 'Linux / macOS'}
+                {label}
               </button>
             ))}
           </div>
-          <CopyBlock text={tab === 'powershell' ? PS_INSTALL : SH_INSTALL} />
+          <CopyBlock text={INSTALL[tab]} />
           <p className="mt-4 text-[14px] leading-7 text-white/45">
             Run <code className="text-white/70">soumtok login</code>, then{' '}
             <code className="text-white/70">soumtok</code> in your project folder.
