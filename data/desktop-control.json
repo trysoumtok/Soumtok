@@ -50,13 +50,13 @@
           "id": "mac-arm64",
           "label": "Mac (ARM64)",
           "filename": "Soumtok-Setup-0.1.0-mac-arm64.dmg",
-          "available": false
+          "available": true
         },
         {
           "id": "mac-x64",
           "label": "Mac (x64)",
           "filename": "Soumtok-Setup-0.1.0-mac-x64.dmg",
-          "available": false
+          "available": true
         },
         {
           "id": "mac-universal",
@@ -70,28 +70,28 @@
           "id": "linux-deb-x64",
           "label": "Linux .deb (x64)",
           "filename": "Soumtok-Setup-0.1.0-linux-amd64.deb",
-          "available": false
+          "available": true
         },
         {
           "id": "linux-deb-arm64",
           "label": "Linux .deb (ARM64)",
           "filename": "Soumtok-Setup-0.1.0-linux-arm64.deb",
-          "available": false
+          "available": true
         },
         {
           "id": "linux-appimage-x64",
           "label": "Linux AppImage (x64)",
           "filename": "Soumtok-Setup-0.1.0-linux-x86_64.AppImage",
-          "available": false
+          "available": true
         },
         {
           "id": "linux-appimage-arm64",
           "label": "Linux AppImage (ARM64)",
           "filename": "Soumtok-Setup-0.1.0-linux-arm64.AppImage",
-          "available": false
+          "available": true
         }
       ]
     }
   ],
-  "updatedAt": "2026-09-17T00:18:01.972Z"
+  "updatedAt": "2026-09-17T16:22:51.990Z"
 }
